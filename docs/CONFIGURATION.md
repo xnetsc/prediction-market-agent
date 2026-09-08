@@ -4,19 +4,19 @@
 
 | 变量 | 用途 |
 |---|---|
-| `PAPER_ENV_FILE` | 可选的显式 `.env` 路径；否则查找当前目录和项目根目录 |
+| `PREDICTION_AGENT_ENV_FILE` | 可选的显式 `.env` 路径；否则查找当前目录和项目根目录 |
 | `PLUGIN_SDK_CONFIG_FILE` | 六类插件目录的 SDK JSON |
 | `BOT_MANAGEMENT_FILE` | SDK 保存的有序启用名单和当前策略 |
 | `MARKET_API_PLUGINS` | 管理文件未设置 API 类别时的首次回退名单 |
 | `DECISION_PROVIDERS` | Provider 首次回退顺序 |
 | `RESEARCH_TOOL_PLUGINS` | 研究工具首次回退顺序 |
 | `RISK_PLUGINS`、`HOOK_PLUGINS` | 风控和 Hook 首次回退顺序 |
-| `PAPER_MAX_TOPICS_PER_CYCLE` | 每平台每轮最多加载的候选主题数 |
-| `PAPER_MAX_DECISIONS_PER_CYCLE` | 每平台每轮最多决策数 |
-| `PAPER_INTERVAL_SECONDS` | 连续运行的轮询间隔 |
-| `PAPER_RUN_UNTIL_EPOCH` | 可选停止时间；零表示持续运行 |
-| `PAPER_STATE_FILE` | 账户镜像文件；多平台自动加入平台后缀 |
-| `PAPER_SESSION_DB` | 会话、工具、执行与决策台账 SQLite |
+| `PREDICTION_AGENT_MAX_TOPICS_PER_CYCLE` | 每平台每轮最多加载的候选主题数 |
+| `PREDICTION_AGENT_MAX_DECISIONS_PER_CYCLE` | 每平台每轮最多决策数 |
+| `PREDICTION_AGENT_INTERVAL_SECONDS` | 连续运行的轮询间隔 |
+| `PREDICTION_AGENT_RUN_UNTIL_EPOCH` | 可选停止时间；零表示持续运行 |
+| `PREDICTION_AGENT_STATE_FILE` | 账户镜像文件；多平台自动加入平台后缀 |
+| `PREDICTION_AGENT_SESSION_DB` | 会话、工具、执行与决策台账 SQLite |
 | `AGENT_MAX_TOOL_STEPS` | 每次最终决策前最多工具轮数 |
 | `AGENT_TOOL_RESULT_CHARS` | 单个工具结果进入上下文的字符预算 |
 | `CONTEXT_WINDOW_CHARS` | Provider 输入窗口预算 |

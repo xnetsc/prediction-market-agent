@@ -18,6 +18,7 @@ htmlcov/
 *~
 backup/
 backups/
+CHANGELOG.md
 
 # Plugin-owned private runtime configuration. Commit only sanitized examples
 # from examples/plugin_configs/.
@@ -33,11 +34,6 @@ config/plugins/*.json
 credentials.json
 secrets.json
 
-paper_state.json
-paper_state.json.tmp
-paper_sessions.sqlite3
-paper_sessions.sqlite3-shm
-paper_sessions.sqlite3-wal
 *_state.json
 *_state.json.tmp
 *_state*.json

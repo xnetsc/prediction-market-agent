@@ -3,8 +3,8 @@ requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "binance-prediction-paper-bot"
-version = "1.1.1"
+name = "prediction-market-agent"
+version = "2.0.0"
 description = "Multi-platform prediction-market Agent with plugin APIs and online execution"
 license = { file = "LICENSE" }
 requires-python = ">=3.11"
@@ -14,13 +14,13 @@ dependencies = [
 ]
 
 [project.scripts]
-prediction-paper-bot = "prediction_paper_bot.__main__:main"
+prediction-market-agent = "prediction_market_agent.__main__:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
 
 [tool.setuptools.package-data]
-prediction_paper_bot = ["config/*.json", "strategies/*.md", "strategies/*.txt"]
+prediction_market_agent = ["config/*.json", "plugins/strategies/prompts/*.md", "plugins/strategies/prompts/*.txt"]
 
 [tool.pytest.ini_options]
 pythonpath = ["src"]

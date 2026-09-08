@@ -5,12 +5,12 @@ import json
 import unittest
 from pathlib import Path
 
-from prediction_paper_bot.models import Config
-from prediction_paper_bot.plugins.discovery import load_plugin_catalog
+from prediction_market_agent.core.config import Config
+from prediction_market_agent.sdk.discovery import load_plugin_catalog
 
 
 ROOT = Path(__file__).resolve().parents[1]
-PACKAGE = ROOT / "src" / "prediction_paper_bot"
+PACKAGE = ROOT / "src" / "prediction_market_agent"
 
 
 class ArchitectureContractTests(unittest.TestCase):
@@ -27,10 +27,10 @@ class ArchitectureContractTests(unittest.TestCase):
 
     def test_sdk_files_contain_no_platform_or_policy_configuration(self) -> None:
         sdk_files = (
-            PACKAGE / "sdk_config.py",
-            PACKAGE / "managed_config.py",
-            PACKAGE / "plugin_management.py",
-            PACKAGE / "plugins" / "discovery.py",
+            PACKAGE / "sdk" / "config.py",
+            PACKAGE / "sdk" / "managed_config.py",
+            PACKAGE / "sdk" / "management.py",
+            PACKAGE / "sdk" / "discovery.py",
         )
         combined = "\n".join(path.read_text(encoding="utf-8") for path in sdk_files).casefold()
         forbidden = (
@@ -69,7 +69,7 @@ class ArchitectureContractTests(unittest.TestCase):
         self.assertEqual([name for name in forbidden if name in combined], [])
 
     def test_generic_config_has_no_platform_strategy_or_risk_policy_fields(self) -> None:
-        tree = ast.parse((PACKAGE / "models.py").read_text(encoding="utf-8"))
+        tree = ast.parse((PACKAGE / "core" / "config.py").read_text(encoding="utf-8"))
         config = next(
             node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == "Config"
         )
@@ -99,11 +99,13 @@ class ArchitectureContractTests(unittest.TestCase):
         self.assertEqual(fields & forbidden, set())
 
     def test_generic_gateway_accepts_only_normalized_order_statuses(self) -> None:
-        source = (PACKAGE / "broker.py").read_text(encoding="utf-8")
+        source = (PACKAGE / "runtime" / "broker.py").read_text(encoding="utf-8")
         self.assertNotIn('"LIVE"', source)
         self.assertIn("unsupported normalized order status", source)
-        for name in ("binance_write.py", "polymarket_write.py"):
-            plugin_source = (PACKAGE / "plugins" / name).read_text(encoding="utf-8")
+        for platform in ("_binance", "_polymarket"):
+            plugin_source = (
+                PACKAGE / "plugins" / "api" / platform / "write.py"
+            ).read_text(encoding="utf-8")
             self.assertIn("platformStatus", plugin_source)
 
     def test_api_credentials_and_wallet_fields_do_not_block_plugin_loading(self) -> None:
@@ -133,8 +135,8 @@ class ArchitectureContractTests(unittest.TestCase):
             catalog.shutdown()
 
     def test_decision_ledger_and_dedicated_ui_remain_present(self) -> None:
-        memory = (PACKAGE / "memory.py").read_text(encoding="utf-8")
-        dashboard = (PACKAGE / "dashboard.py").read_text(encoding="utf-8")
+        memory = (PACKAGE / "runtime" / "memory.py").read_text(encoding="utf-8")
+        dashboard = (PACKAGE / "runtime" / "dashboard.py").read_text(encoding="utf-8")
         self.assertIn("CREATE TABLE IF NOT EXISTS decision_ledger", memory)
         self.assertIn("/api/decisions", dashboard)
         self.assertIn("决策账本", dashboard)

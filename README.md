@@ -29,7 +29,7 @@ Prediction 与 Polymarket API 插件，以及 Codex、Claude、OpenAI-compatible
 ## 安装
 
 ```bash
-cd /path/to/binance_prediction_paper_bot
+cd /path/to/prediction-market-agent
 python3 -m venv .venv
 .venv/bin/python -m pip install --index-url https://pypi.org/simple .
 cp .env.example .env
@@ -46,13 +46,13 @@ cp .env.example .env
 ## 使用
 
 ```bash
-.venv/bin/python -m prediction_paper_bot doctor
-.venv/bin/python -m prediction_paper_bot provider-test
-.venv/bin/python -m prediction_paper_bot once
-.venv/bin/python -m prediction_paper_bot run
-.venv/bin/python -m prediction_paper_bot status
-.venv/bin/python -m prediction_paper_bot report --since-hours 12
-.venv/bin/python -m prediction_paper_bot serve
+.venv/bin/python -m prediction_market_agent doctor
+.venv/bin/python -m prediction_market_agent provider-test
+.venv/bin/python -m prediction_market_agent once
+.venv/bin/python -m prediction_market_agent run
+.venv/bin/python -m prediction_market_agent status
+.venv/bin/python -m prediction_market_agent report --since-hours 12
+.venv/bin/python -m prediction_market_agent serve
 ```
 
 管理与审计界面默认地址是 `http://127.0.0.1:8765`。插件配置保存后，管理服务会刷新插件实例；独立运行的
@@ -70,7 +70,6 @@ cp .env.example .env
 - [决策台账与 HTTP 界面](docs/HTTP_AUDIT.md)
 - [集成测试](docs/INTEGRATION_TESTS.md)
 - [时区信息延迟案例研究](docs/STRATEGY_RESEARCH.md)
-- [变更记录](CHANGELOG.md)
 - [敏感信息与发布安全](SECURITY.md)
 - `examples/`：六类插件、动态 Python 规则、插件 JSON 和 SDK 目录配置的完整例子。
 

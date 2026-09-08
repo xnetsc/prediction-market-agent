@@ -4,6 +4,17 @@
 SDK 只负责目录发现、启用顺序、JSON schema 验证、配置回调调用和生命周期，不包含平台名、凭证、URL、
 代理、资金数字、损益公式、网络白名单或策略内容。
 
+## 源码布局
+
+- `core/`：通用运行配置、领域模型、账户状态持久化、Hook 与风险协议。
+- `sdk/`：插件契约、自动发现、生命周期、启用状态和配置回调。
+- `agent/`：Provider 决策协议、多步研究工具协议和文本策略协议。
+- `runtime/`：启动装配、市场评估、动作执行、循环引擎、SQLite、报告与 HTTP 界面。
+- `plugins/`：按 `api`、`providers`、`strategies`、`research`、`risk`、`hooks` 六类组织的内置插件。
+
+Binance 与 Polymarket 的配置、读取和写入实现分别位于 `plugins/api/_binance/` 和
+`plugins/api/_polymarket/`；SDK 不引用这些平台目录。
+
 ## 一次决策的数据流
 
 1. API 插件读取自己的平台，把事件、市场、outcome、盘口、K 线和能力差异标准化。

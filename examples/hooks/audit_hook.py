@@ -1,6 +1,6 @@
 """Complete Hook plugin example with lifecycle-safe registration and unregistration."""
 
-from prediction_paper_bot.plugins.discovery import PluginInitializationContext, PluginSpec
+from prediction_market_agent.sdk.discovery import PluginInitializationContext, PluginSpec
 
 
 def initialize_plugin(context: PluginInitializationContext) -> PluginSpec:

@@ -3,7 +3,7 @@
 运行：
 
 ```bash
-.venv/bin/python -m prediction_paper_bot serve
+.venv/bin/python -m prediction_market_agent serve
 ```
 
 打开 `http://127.0.0.1:8765`。服务只允许绑定回环地址。

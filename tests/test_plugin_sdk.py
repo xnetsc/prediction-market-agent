@@ -6,11 +6,11 @@ import unittest
 from pathlib import Path
 from types import SimpleNamespace
 
-from prediction_paper_bot.models import Config
-from prediction_paper_bot.hooks import HookManager
-from prediction_paper_bot.plugin_config_io import json_file_callbacks
-from prediction_paper_bot.plugin_management import PluginManagementService
-from prediction_paper_bot.plugins.discovery import (
+from prediction_market_agent.core.config import Config
+from prediction_market_agent.core.hooks import HookManager
+from prediction_market_agent.sdk.config_io import json_file_callbacks
+from prediction_market_agent.sdk.management import PluginManagementService
+from prediction_market_agent.sdk.discovery import (
     PluginCatalog,
     PluginConfigField,
     PluginConfiguration,
@@ -18,10 +18,10 @@ from prediction_paper_bot.plugins.discovery import (
     PluginSpec,
     discover_plugin_catalog,
 )
-from prediction_paper_bot.plugins.polymarket_config import PolymarketPluginConfig
-from prediction_paper_bot.plugins.polymarket_write import PolymarketWriteTransport
-from prediction_paper_bot.risk import NetworkWriteGate
-from prediction_paper_bot.sdk_config import PluginSdkConfig
+from prediction_market_agent.plugins.api._polymarket.config import PolymarketPluginConfig
+from prediction_market_agent.plugins.api._polymarket.write import PolymarketWriteTransport
+from prediction_market_agent.core.risk import NetworkWriteGate
+from prediction_market_agent.sdk.config import PluginSdkConfig
 
 
 class _Model:
@@ -252,7 +252,7 @@ class PluginSdkTests(unittest.TestCase):
             marker = root / "torn-down.txt"
             plugin_path = hook_dir / "sample.py"
             plugin_path.write_text(
-                "from prediction_paper_bot.plugins.discovery import PluginSpec\n"
+                "from prediction_market_agent.sdk.discovery import PluginSpec\n"
                 "def initialize_plugin(context):\n"
                 f"    marker = __import__('pathlib').Path({str(marker)!r})\n"
                 "    return PluginSpec('hook','sample','sample hook',str(context.module_path),lambda config, services: None,None,lambda: marker.write_text('done', encoding='utf-8'))\n",
