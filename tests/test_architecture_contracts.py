@@ -14,6 +14,17 @@ PACKAGE = ROOT / "src" / "prediction_paper_bot"
 
 
 class ArchitectureContractTests(unittest.TestCase):
+    def test_noncommercial_license_is_present_and_packaged(self) -> None:
+        license_text = (ROOT / "LICENSE").read_text(encoding="utf-8")
+        readme = (ROOT / "README.md").read_text(encoding="utf-8")
+        package_metadata = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
+        self.assertIn("PolyForm Noncommercial License 1.0.0", license_text)
+        self.assertIn("Any noncommercial purpose is a permitted purpose.", license_text)
+        self.assertIn("Required Notice: Copyright 2026 xnetsc.", license_text)
+        self.assertIn("商业用途不在免费授权范围内", readme)
+        self.assertIn("source-available", readme)
+        self.assertIn('license = { file = "LICENSE" }', package_metadata)
+
     def test_sdk_files_contain_no_platform_or_policy_configuration(self) -> None:
         sdk_files = (
             PACKAGE / "sdk_config.py",

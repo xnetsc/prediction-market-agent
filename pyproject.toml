@@ -4,8 +4,9 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "binance-prediction-paper-bot"
-version = "1.1.0"
+version = "1.1.1"
 description = "Multi-platform prediction-market Agent with plugin APIs and online execution"
+license = { file = "LICENSE" }
 requires-python = ">=3.11"
 dependencies = [
   "python-dotenv>=1.2,<2",

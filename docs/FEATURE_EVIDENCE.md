@@ -23,6 +23,7 @@
 | 专用决策账本与可解释性界面 | `memory.py`、`dashboard.py`、`reporting.py` | [HTTP_AUDIT.md](HTTP_AUDIT.md) | 已保存 ledger 记录即为可查询样例 | ledger 全链路字段、筛选 API、HTML UI 与后续盘口测试 |
 | dotenv 自动加载、直连/系统/显式代理 | `models.py`、`plugin_config_io.py` 与各联网插件 | [CONFIGURATION.md](CONFIGURATION.md) | `.env.example` 和各插件 JSON | dotenv 优先级、配置清单和生产联网测试 |
 | 零跳过及架构边界持续检查 | `tests/test_architecture_contracts.py` | [INTEGRATION_TESTS.md](INTEGRATION_TESTS.md) | 本测试文件本身可作为新增契约模板 | 全套 pytest；检测 skip/xfail、执行模式、SDK 私有字段和账本 UI |
+| 非商业免费、商业另行授权 | [LICENSE](../LICENSE)、`pyproject.toml` | README 的“许可”章节 | `LICENSE` 中的 Required Notice | 架构契约检查许可证正文、项目通知、README 和包元数据；wheel 收录验证 |
 
 示例里的静态数据只用于说明插件协议，不会被生产程序静默选作替代数据。真实内置 API 插件始终使用其
 私有 JSON 指向的线上端点。

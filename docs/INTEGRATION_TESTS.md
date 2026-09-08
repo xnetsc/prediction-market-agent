@@ -25,4 +25,4 @@ PYTHONPATH=src .venv/bin/python -m pytest -q
 服务器。当前无写权限凭证的拒绝是测试预期；权限或服务器行为改变会让测试失败并要求人工复核，而不会
 被当成通过。
 
-第二轮最终结果：`59 passed, 9 subtests passed, 0 skipped`。
+当前最终结果：`60 passed, 9 subtests passed, 0 skipped`。
