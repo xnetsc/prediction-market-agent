@@ -1,0 +1,22 @@
+{
+  "POLYMARKET_API_KEY": "<POLYMARKET_API_KEY>",
+  "POLYMARKET_API_PASSPHRASE": "<POLYMARKET_API_PASSPHRASE>",
+  "POLYMARKET_API_SECRET": "<POLYMARKET_API_SECRET>",
+  "POLYMARKET_BUILDER_API_KEY": "<POLYMARKET_BUILDER_API_KEY>",
+  "POLYMARKET_BUILDER_API_PASSPHRASE": "<POLYMARKET_BUILDER_API_PASSPHRASE>",
+  "POLYMARKET_BUILDER_API_SECRET": "<POLYMARKET_BUILDER_API_SECRET>",
+  "POLYMARKET_BUILDER_CODE": "",
+  "POLYMARKET_CHAIN_ID": 137,
+  "POLYMARKET_CLOB_URL": "https://clob.polymarket.com",
+  "POLYMARKET_DATA_URL": "https://data-api.polymarket.com",
+  "POLYMARKET_FUNDER_ADDRESS": "<POLYMARKET_FUNDER_ADDRESS>",
+  "POLYMARKET_GAMMA_URL": "https://gamma-api.polymarket.com",
+  "POLYMARKET_HTTP_PROXY": "DIRECT",
+  "POLYMARKET_NETWORK_RULES_JSON": "{\"schemes\":[\"https\"],\"hosts\":[\"gamma-api.polymarket.com\",\"clob.polymarket.com\",\"data-api.polymarket.com\",\"relayer-v2.polymarket.com\",\"polygon.drpc.org\"],\"methods\":[\"GET\",\"POST\",\"DELETE\"],\"paths_by_method\":{\"GET\":[\"/events\",\"/events/*\",\"/book\",\"/prices-history\",\"/time\",\"/tick-size\",\"/neg-risk\",\"/version\",\"/positions\",\"/balance-allowance\",\"/balance-allowance/update\",\"/deployed\",\"/relay-payload\",\"/v1/account/transactions/params\",\"/v1/account/transactions/*\",\"/markets/*\",\"/clob-markets/*\"],\"POST\":[\"/\",\"/order\",\"/submit\"],\"DELETE\":[\"/order\",\"/orders\"]}}",
+  "POLYMARKET_PRIVATE_KEY": "<POLYMARKET_PRIVATE_KEY>",
+  "POLYMARKET_RELAYER_API_KEY": "<POLYMARKET_RELAYER_API_KEY>",
+  "POLYMARKET_RELAYER_API_KEY_ADDRESS": "<POLYMARKET_RELAYER_API_KEY_ADDRESS>",
+  "POLYMARKET_RELAYER_URL": "https://relayer-v2.polymarket.com",
+  "POLYMARKET_RPC_URL": "https://polygon.drpc.org",
+  "POLYMARKET_TRANSFER_RECIPIENT": "<POLYMARKET_TRANSFER_RECIPIENT>"
+}

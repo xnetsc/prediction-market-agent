@@ -1,0 +1,348 @@
+from __future__ import annotations
+
+import json
+import tempfile
+import unittest
+from pathlib import Path
+from types import SimpleNamespace
+
+from prediction_paper_bot.models import Config
+from prediction_paper_bot.hooks import HookManager
+from prediction_paper_bot.plugin_config_io import json_file_callbacks
+from prediction_paper_bot.plugin_management import PluginManagementService
+from prediction_paper_bot.plugins.discovery import (
+    PluginCatalog,
+    PluginConfigField,
+    PluginConfiguration,
+    PluginFile,
+    PluginSpec,
+    discover_plugin_catalog,
+)
+from prediction_paper_bot.plugins.polymarket_config import PolymarketPluginConfig
+from prediction_paper_bot.plugins.polymarket_write import PolymarketWriteTransport
+from prediction_paper_bot.risk import NetworkWriteGate
+from prediction_paper_bot.sdk_config import PluginSdkConfig
+
+
+class _Model:
+    def __init__(self, **values):
+        self.__dict__.update(values)
+
+    def model_dump(self, **kwargs):
+        del kwargs
+        return dict(self.__dict__)
+
+
+class _Handle:
+    def __init__(self, transaction_id):
+        self.transaction_id = transaction_id
+
+    def wait(self):
+        return _Model(transactionId=self.transaction_id, state="CONFIRMED")
+
+
+class _Paginator:
+    def __init__(self, items):
+        self.items = items
+
+    def iter_items(self):
+        yield from self.items
+
+
+class _PolymarketClient:
+    def __init__(self):
+        self.orders = []
+        self.environment = SimpleNamespace(collateral_token="0x" + "1" * 40)
+
+    def place_limit_order(self, **values):
+        self.orders.append(("limit", values))
+        return _Model(ok=True, order_id="limit-1", status="live")
+
+    def place_market_order(self, **values):
+        self.orders.append(("market", values))
+        return _Model(ok=True, order_id="market-1", status="matched")
+
+    def cancel_orders(self, *, order_ids):
+        return _Model(canceled=tuple(order_ids), not_canceled={})
+
+    def list_positions(self, **values):
+        self.positions_filter = values
+        return _Paginator(
+            [_Model(token_id="token-1", condition_id="0x" + "2" * 64)]
+        )
+
+    def redeem_positions(self, *, condition_id):
+        return _Handle("redeem-" + condition_id[-4:])
+
+    def transfer_erc20(self, **values):
+        self.transfer_values = values
+        return _Handle("transfer-1")
+
+    def close(self):
+        self.closed = True
+
+
+class PluginSdkTests(unittest.TestCase):
+    def test_every_plugin_category_has_an_initializable_complete_example(self) -> None:
+        project = Path(__file__).parents[1]
+        with tempfile.TemporaryDirectory() as directory:
+            sdk_path = Path(directory) / "examples-sdk.json"
+            categories = {
+                "api": [str(project / "examples/api_plugins")],
+                "decision_provider": [str(project / "examples/decision_provider_plugins")],
+                "decision_strategy": [str(project / "examples/decision_strategy_plugins")],
+                "research_tool": [str(project / "examples/research_tool_plugins")],
+                "risk": [str(project / "examples/risk_plugins")],
+                "hook": [str(project / "examples/hooks")],
+            }
+            sdk_path.write_text(json.dumps({"categories": categories}), encoding="utf-8")
+            selected = {
+                "api": ("static_demo",),
+                "decision_provider": ("static_provider",),
+                "decision_strategy": ("example_strategy",),
+                "research_tool": ("static_evidence",),
+                "risk": ("reject_operation",),
+                "hook": ("audit_hook",),
+            }
+            catalog = discover_plugin_catalog(
+                PluginSdkConfig.load(sdk_path),
+                enabled=selected,
+                working_directory=project,
+            )
+            try:
+                runtime = Config()
+                self.assertEqual(catalog.get("api", "static_demo").factory(runtime).name, "static_demo")
+                self.assertEqual(catalog.get("decision_provider", "static_provider").factory(runtime).name, "static_provider")
+                strategy = catalog.get("decision_strategy", "example_strategy").factory(runtime)
+                self.assertIn("evidence", strategy.instructions.lower())
+                research = catalog.get("research_tool", "static_evidence").factory(runtime)
+                self.assertIn("READ_STATIC_EVIDENCE", research.descriptions)
+                risk = catalog.get("risk", "reject_operation").factory(runtime, {})
+                self.assertEqual(risk.target, "example:operation_policy")
+                hook = catalog.get("hook", "audit_hook").factory(runtime, {"hooks": HookManager()})
+                self.assertEqual(hook["events"], ["after_order", "after_cancel"])
+            finally:
+                catalog.shutdown()
+
+    def test_every_configuration_field_requires_description(self) -> None:
+        with self.assertRaisesRegex(ValueError, "description"):
+            PluginConfigField("API_KEY", "API key", "secret", "")
+
+    def test_plugin_owned_json_callbacks_validate_defaults_and_preserve_secret(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "private.json"
+            load, save, storage = json_file_callbacks(path)
+            config = PluginConfiguration(
+                (
+                    PluginConfigField("NAME", "Name", "string", "Display name.", default="bot"),
+                    PluginConfigField("TOKEN", "Token", "secret", "Private token."),
+                ),
+                load,
+                save,
+                storage,
+            )
+            self.assertEqual(config.load(), {"NAME": "bot"})
+            config.save({"NAME": "first", "TOKEN": "secret-value"})
+            config.save({"NAME": "second", "TOKEN": ""})
+            self.assertEqual(load(), {"NAME": "second", "TOKEN": "secret-value"})
+            manifest = config.manifest()
+            token = next(field for field in manifest["fields"] if field["name"] == "TOKEN")
+            self.assertEqual(token["value"], "")
+            self.assertTrue(token["configured"])
+
+    def test_required_fields_render_before_first_save(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            load, save, storage = json_file_callbacks(Path(directory) / "new.json")
+            config = PluginConfiguration(
+                (PluginConfigField("VALUE", "Value", "number", "Required value.", required=True),),
+                load,
+                save,
+                storage,
+            )
+            field = config.manifest()["fields"][0]
+            self.assertFalse(field["configured"])
+            self.assertIsNone(field["value"])
+            with self.assertRaisesRegex(ValueError, "Required"):
+                config.load()
+
+    def test_disabled_file_is_discovered_without_import_or_initialize(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            api_dir = root / "api"
+            api_dir.mkdir()
+            (api_dir / "danger.py").write_text(
+                "raise RuntimeError('module must not be imported while disabled')\n",
+                encoding="utf-8",
+            )
+            sdk_path = root / "sdk.json"
+            sdk_path.write_text(
+                json.dumps(
+                    {
+                        "categories": {
+                            "api": [str(api_dir)],
+                            "decision_provider": [],
+                            "decision_strategy": [],
+                            "research_tool": [],
+                            "risk": [],
+                            "hook": [],
+                        }
+                    }
+                ),
+                encoding="utf-8",
+            )
+            catalog = discover_plugin_catalog(
+                PluginSdkConfig.load(sdk_path),
+                enabled={kind: () for kind in ("api", "decision_provider", "decision_strategy", "research_tool", "risk", "hook")},
+            )
+            self.assertEqual(catalog.discovered_names("api"), ("danger",))
+            self.assertEqual(catalog.names("api"), ())
+
+    def test_catalog_shutdown_calls_teardown_and_unregisters_everything(self) -> None:
+        calls = []
+        catalog = PluginCatalog()
+        catalog.record_file(PluginFile("hook", "sample", "/tmp/sample.py"))
+        catalog.register(
+            PluginSpec(
+                "hook",
+                "sample",
+                "Lifecycle sample.",
+                "/tmp/sample.py",
+                lambda config, services: None,
+                None,
+                lambda: calls.append("teardown"),
+            )
+        )
+        catalog.shutdown()
+        self.assertEqual(calls, ["teardown"])
+        self.assertEqual(catalog.names("hook"), ())
+        self.assertEqual(catalog.discovered_names("hook"), ())
+
+    def test_management_enables_and_disables_with_refresh(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            config = Config(management_file=Path(directory) / "managed.json")
+            service = PluginManagementService(config)
+            initial = service.manifest()
+            disabled = initial["plugins"]["hook"][0]
+            self.assertFalse(disabled["initialized"])
+            self.assertEqual(disabled["description"], "")
+            payload = {
+                "enabled": {
+                    "api": ["binance", "polymarket"],
+                    "decision_provider": ["codex", "claude", "openai_compatible"],
+                    "decision_strategy": ["general_agent"],
+                    "research_tool": ["standard_research"],
+                    "risk": ["portfolio_limits", "agent_actions", "dynamic_python"],
+                    "hook": ["jsonl_audit"],
+                },
+                "decision_strategy": "general_agent",
+            }
+            enabled = service.save_enabled(payload)
+            hook = enabled["plugins"]["hook"][0]
+            self.assertTrue(hook["initialized"])
+            self.assertTrue(hook["configuration"]["fields"])
+            payload["enabled"]["hook"] = []
+            disabled_again = service.save_enabled(payload)
+            self.assertFalse(disabled_again["plugins"]["hook"][0]["initialized"])
+
+    def test_manual_refresh_unloads_and_unregisters_removed_plugin_file(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            hook_dir = root / "hooks"
+            hook_dir.mkdir()
+            marker = root / "torn-down.txt"
+            plugin_path = hook_dir / "sample.py"
+            plugin_path.write_text(
+                "from prediction_paper_bot.plugins.discovery import PluginSpec\n"
+                "def initialize_plugin(context):\n"
+                f"    marker = __import__('pathlib').Path({str(marker)!r})\n"
+                "    return PluginSpec('hook','sample','sample hook',str(context.module_path),lambda config, services: None,None,lambda: marker.write_text('done', encoding='utf-8'))\n",
+                encoding="utf-8",
+            )
+            sdk_path = root / "sdk.json"
+            sdk_path.write_text(
+                json.dumps({"categories": {
+                    "api": [], "decision_provider": [], "decision_strategy": [],
+                    "research_tool": [], "risk": [], "hook": [str(hook_dir)],
+                }}),
+                encoding="utf-8",
+            )
+            management_path = root / "managed.json"
+            management_path.write_text(
+                json.dumps({"enabled": {
+                    "api": [], "decision_provider": [], "decision_strategy": [],
+                    "research_tool": [], "risk": [], "hook": ["sample"],
+                }, "decision_strategy": ""}),
+                encoding="utf-8",
+            )
+            runtime = Config(
+                plugin_sdk_config_file=sdk_path,
+                management_file=management_path,
+                market_api_plugins=(),
+                decision_providers=(),
+                research_tool_plugins=(),
+                risk_plugins=(),
+                hook_plugins=("sample",),
+            )
+            service = PluginManagementService(runtime)
+            self.assertEqual(service.catalog.names("hook"), ("sample",))
+            plugin_path.unlink()
+            refreshed = service.refresh()
+            self.assertEqual(marker.read_text(encoding="utf-8"), "done")
+            self.assertEqual(refreshed["plugins"]["hook"], [])
+            self.assertEqual(service.catalog.names("hook"), ())
+
+    def test_polymarket_official_sdk_surface_all_write_workflows(self) -> None:
+        settings = PolymarketPluginConfig.from_mapping(
+            values={
+                "POLYMARKET_GAMMA_URL": "https://gamma-api.polymarket.com",
+                "POLYMARKET_CLOB_URL": "https://clob.polymarket.com",
+                "POLYMARKET_DATA_URL": "https://data-api.polymarket.com",
+                "POLYMARKET_RELAYER_URL": "https://relayer-v2.polymarket.com",
+                "POLYMARKET_RPC_URL": "https://polygon.drpc.org",
+                "POLYMARKET_CHAIN_ID": "137",
+                "POLYMARKET_HTTP_PROXY": "DIRECT",
+                "POLYMARKET_NETWORK_RULES_JSON": '{"schemes":["https"],"hosts":["clob.polymarket.com"],"methods":["GET","POST","DELETE"],"paths_by_method":{"GET":["/*"],"POST":["/*"],"DELETE":["/*"]}}',
+                "POLYMARKET_PRIVATE_KEY": "unused-by-mock",
+                "POLYMARKET_API_KEY": "key",
+                "POLYMARKET_API_SECRET": "secret",
+                "POLYMARKET_API_PASSPHRASE": "passphrase",
+                "POLYMARKET_FUNDER_ADDRESS": "0x" + "3" * 40,
+                "POLYMARKET_TRANSFER_RECIPIENT": "0x" + "4" * 40,
+            }
+        )
+        gate = NetworkWriteGate(
+            allowed_hosts=frozenset(),
+            allowed_schemes=frozenset(),
+            allowed_methods=frozenset(),
+            allowed_read_paths=frozenset(),
+        )
+        transport = PolymarketWriteTransport(settings, gate)
+        client = _PolymarketClient()
+        transport._client = client
+        quote = transport.get_quote(
+            outcome_id="token-1",
+            side="BUY",
+            amount="5",
+            order_type="LIMIT",
+            price_limit="0.5",
+            reference_price=0.5,
+            fee_bps=0,
+        )
+        order = transport.place_order(
+            quote_id=quote["quoteId"], order_type="LIMIT", price_limit="0.5"
+        )
+        self.assertEqual(order["orderId"], "limit-1")
+        self.assertEqual(order["status"], "OPEN")
+        self.assertEqual(order["platformStatus"], "live")
+        self.assertEqual(transport.cancel_orders(["limit-1"])["canceled"], ["limit-1"])
+        redeemed = transport.redeem(["token-1"])
+        self.assertEqual(len(redeemed["transactions"]), 1)
+        transferred = transport.transfer("OUTBOUND", "1.25")
+        self.assertEqual(transferred["amountBaseUnits"], 1_250_000)
+        self.assertEqual(client.transfer_values["amount"], 1_250_000)
+        with self.assertRaisesRegex(ValueError, "OUTBOUND"):
+            transport.transfer("INBOUND", str(10**18))
+
+
+if __name__ == "__main__":
+    unittest.main()

@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "categories": {
+    "api": ["${PACKAGE_ROOT}/api_plugins"],
+    "decision_provider": ["${PACKAGE_ROOT}/provider_plugins"],
+    "decision_strategy": ["${PACKAGE_ROOT}/strategy_plugins"],
+    "research_tool": ["${PACKAGE_ROOT}/research_tool_plugins"],
+    "risk": ["${PACKAGE_ROOT}/risk_plugins"],
+    "hook": ["${PACKAGE_ROOT}/hook_plugins"]
+  }
+}

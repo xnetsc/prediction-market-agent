@@ -1,0 +1,4 @@
+{
+  "EVENTS": "*",
+  "OUTPUT_PATH": "hook_events.jsonl"
+}

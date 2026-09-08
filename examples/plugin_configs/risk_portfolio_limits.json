@@ -1,0 +1,8 @@
+{
+  "LOSS_LIMIT": 25,
+  "MAX_EXPOSURE": 150,
+  "MAX_POSITION": 30,
+  "MIN_ORDER_NOTIONAL": 2,
+  "PLATFORM_ALLOCATIONS_JSON": "{\"binance\": 250, \"polymarket\": 250}",
+  "TOTAL_CAPITAL": 500
+}

@@ -1,0 +1,7 @@
+{
+  "STRATEGY_FILE": "examples/decision_strategy_plugins/example_strategy.md",
+  "TOPIC_STATUSES": "OPEN",
+  "MARKET_STATUSES": "OPEN",
+  "OUTCOME_NAMES": "YES,NO",
+  "MIN_TOPIC_LIQUIDITY": 0
+}

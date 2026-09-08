@@ -1,0 +1,6 @@
+{
+  "CLAUDE_CLI_PATH": "claude",
+  "CLAUDE_HTTP_PROXY": "DIRECT",
+  "CLAUDE_MODEL": "",
+  "CLAUDE_TIMEOUT_SECONDS": 180
+}

@@ -1,0 +1,24 @@
+{
+  "version": 1,
+  "enabled": {
+    "api": [
+      "binance",
+      "polymarket"
+    ],
+    "decision_provider": [
+      "codex",
+      "claude",
+      "openai_compatible"
+    ],
+    "research_tool": [
+      "standard_research"
+    ],
+    "risk": [
+      "portfolio_limits",
+      "agent_actions",
+      "dynamic_python"
+    ],
+    "hook": []
+  },
+  "decision_strategy": "general_agent"
+}

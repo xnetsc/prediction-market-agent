@@ -1,0 +1,7 @@
+{
+  "MARKET_STATUSES": "OPEN",
+  "MIN_TOPIC_LIQUIDITY": 0,
+  "OUTCOME_NAMES": "YES",
+  "STRATEGY_FILE": "src/prediction_paper_bot/strategies/timezone_latency_example.md",
+  "TOPIC_STATUSES": "OPEN,ACTIVE,TRADING"
+}

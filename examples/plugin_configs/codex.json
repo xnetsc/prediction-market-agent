@@ -1,0 +1,6 @@
+{
+  "CODEX_CLI_PATH": "codex",
+  "CODEX_HTTP_PROXY": "DIRECT",
+  "CODEX_MODEL": "",
+  "CODEX_TIMEOUT_SECONDS": 180
+}
