@@ -6,12 +6,12 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from pathlib import Path
 
-from prediction_paper_bot.models import Config
-from prediction_paper_bot.decision import Decision, ProviderResult
-from prediction_paper_bot.engine import TradingEngine
-from prediction_paper_bot.plugins.base import PredictionMarketApiPlugin
-from prediction_paper_bot.plugins.registry import load_api_plugins
-from prediction_paper_bot.risk import NetworkGateError
+from prediction_market_agent.core.config import Config
+from prediction_market_agent.agent.decision import Decision, ProviderResult
+from prediction_market_agent.runtime.engine import TradingEngine
+from prediction_market_agent.sdk.contracts import PredictionMarketApiPlugin
+from prediction_market_agent.sdk.registry import load_api_plugins
+from prediction_market_agent.core.risk import NetworkGateError
 
 
 class ProductionApiIntegrationTests(unittest.TestCase):

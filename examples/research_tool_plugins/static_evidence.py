@@ -1,7 +1,7 @@
 """Research-tool plugin contributing one deterministic Agent tool."""
 
-from prediction_paper_bot.plugin_config_io import json_file_callbacks
-from prediction_paper_bot.plugins.discovery import (
+from prediction_market_agent.sdk.config_io import json_file_callbacks
+from prediction_market_agent.sdk.discovery import (
     PluginConfigField,
     PluginConfiguration,
     PluginInitializationContext,

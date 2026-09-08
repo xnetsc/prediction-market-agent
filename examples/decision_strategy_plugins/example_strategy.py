@@ -2,14 +2,14 @@
 
 from pathlib import Path
 
-from prediction_paper_bot.plugin_config_io import json_file_callbacks
-from prediction_paper_bot.plugins.discovery import (
+from prediction_market_agent.sdk.config_io import json_file_callbacks
+from prediction_market_agent.sdk.discovery import (
     PluginConfigField,
     PluginConfiguration,
     PluginInitializationContext,
     PluginSpec,
 )
-from prediction_paper_bot.strategy_plugin import DecisionStrategyPlugin
+from prediction_market_agent.agent.strategy import DecisionStrategyPlugin
 
 
 def _csv(value: str) -> tuple[str, ...]:
