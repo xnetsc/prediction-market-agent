@@ -5,7 +5,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
 
-from prediction_market_agent.sdk.config_io import resolve_plugin_proxy
+from prediction_market_agent.plugin_system.config_io import resolve_plugin_proxy
 
 
 def _network_rules(raw: str, field: str) -> dict[str, Any]:

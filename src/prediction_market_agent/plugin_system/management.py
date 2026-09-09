@@ -4,11 +4,11 @@ from typing import Any
 
 from .managed_config import ManagedRuntimeConfig, PLUGIN_KINDS, save_managed_config
 from .discovery import PluginCatalog, load_plugin_catalog
-from .config import PluginSdkConfig
+from .config import PluginDirectoryConfig
 
 
 class PluginManagementService:
-    """UI-facing SDK service; plugin storage remains opaque callback behavior."""
+    """UI-facing plugin-management service; plugin storage remains opaque callback behavior."""
 
     def __init__(self, config: Any, catalog: PluginCatalog | None = None):
         self.config = config
@@ -62,8 +62,11 @@ class PluginManagementService:
                 ) if item["enabled"] else None
                 result[kind].append(item)
         return {
-            "sdk": PluginSdkConfig.load(self.config.plugin_sdk_config_file).manifest(),
+            "plugin_directories": PluginDirectoryConfig.load(
+                self.config.plugin_directories_file
+            ).manifest(),
             "management_storage": str(self.config.management_file.expanduser().resolve()),
+            "management_source": str(managed.source_path or managed.path),
             "restart_required_after_change": True,
             "enabled": selected,
             "decision_strategy": strategy,
@@ -78,6 +81,32 @@ class PluginManagementService:
             raise ValueError(f"Plugin {kind}:{name} has no private configuration")
         spec.configuration.save(values)
         return spec.configuration.manifest()
+
+    def delete_plugin_configuration(self, kind: str, name: str) -> dict[str, Any]:
+        spec = self.catalog.get(kind, name)
+        if spec.configuration is None:
+            raise ValueError(f"Plugin {kind}:{name} has no private configuration")
+        spec.configuration.delete()
+        return spec.configuration.manifest()
+
+    def reset_plugin_configuration_fields(
+        self, kind: str, name: str, fields: list[str]
+    ) -> dict[str, Any]:
+        spec = self.catalog.get(kind, name)
+        if spec.configuration is None:
+            raise ValueError(f"Plugin {kind}:{name} has no private configuration")
+        spec.configuration.reset(fields)
+        return spec.configuration.manifest()
+
+    def save_plugin_directories(self, categories: dict[str, object]) -> dict[str, Any]:
+        return PluginDirectoryConfig.save(
+            self.config.plugin_directories_file, categories
+        ).manifest()
+
+    def reset_plugin_directories(self) -> dict[str, Any]:
+        return PluginDirectoryConfig.reset(
+            self.config.plugin_directories_file
+        ).manifest()
 
     def save_enabled(self, payload: dict[str, Any]) -> dict[str, Any]:
         enabled = payload.get("enabled")

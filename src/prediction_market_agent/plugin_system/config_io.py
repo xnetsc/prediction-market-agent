@@ -36,7 +36,12 @@ def resolve_plugin_proxy(value: str, *, field_name: str = "HTTP_PROXY") -> str:
 
 def json_file_callbacks(
     path: Path,
-) -> tuple[Callable[[], dict[str, Any]], Callable[[dict[str, Any]], None], dict[str, Any]]:
+) -> tuple[
+    Callable[[], dict[str, Any]],
+    Callable[[dict[str, Any]], None],
+    Callable[[], None],
+    dict[str, Any],
+]:
     """Optional utility for plugins that choose a local JSON file as their storage implementation."""
     resolved = path.expanduser().resolve()
 
@@ -57,4 +62,8 @@ def json_file_callbacks(
             json.dumps(value, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
         )
 
-    return load, save, {"kind": "json_file", "location": str(resolved)}
+    def delete() -> None:
+        if resolved.exists():
+            resolved.unlink()
+
+    return load, save, delete, {"kind": "json_file", "location": str(resolved)}

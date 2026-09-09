@@ -6,8 +6,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from prediction_market_agent.sdk.config_io import json_file_callbacks
-from prediction_market_agent.sdk.discovery import (
+from prediction_market_agent.plugin_system.config_io import json_file_callbacks
+from prediction_market_agent.plugin_system.discovery import (
     PluginConfigField,
     PluginConfiguration,
     PluginInitializationContext,
@@ -75,7 +75,7 @@ class DynamicPythonRuleEngine:
 
 
 def initialize_plugin(context: PluginInitializationContext) -> PluginSpec:
-    load, save, storage = json_file_callbacks(
+    load, save, delete, storage = json_file_callbacks(
         context.working_directory / "config" / "plugins" / "risk_dynamic_python.json"
     )
     configuration = PluginConfiguration(
@@ -84,6 +84,7 @@ def initialize_plugin(context: PluginInitializationContext) -> PluginSpec:
         ),
         load_callback=load,
         save_callback=save,
+        delete_callback=delete,
         storage=storage,
     )
 

@@ -1,0 +1,24 @@
+{
+  "version": 1,
+  "values": {
+    "working_directory": ".",
+    "management_file": "bot_management.json",
+    "plugin_directories_file": "config/plugin_directories.json",
+    "max_topics_per_cycle": 10,
+    "max_decisions_per_cycle": 6,
+    "interval_seconds": 60,
+    "run_until_epoch": 0,
+    "state_file": "agent_state.json",
+    "session_db": "agent_sessions.sqlite3",
+    "auth_db": "admin_auth.sqlite3",
+    "admin_session_hours": 72,
+    "admin_absolute_session_hours": 168,
+    "agent_max_tool_steps": 4,
+    "agent_tool_result_chars": 12000,
+    "context_window_chars": 60000,
+    "history_per_market": 12,
+    "dashboard_host": "127.0.0.1",
+    "dashboard_port": 8765,
+    "dashboard_refresh_seconds": 5
+  }
+}

@@ -5,7 +5,7 @@ import urllib.parse
 import urllib.request
 
 from prediction_market_agent.runtime.broker import ExecutionGateway
-from prediction_market_agent.sdk.contracts import (
+from prediction_market_agent.plugin_system.contracts import (
     ApiCapabilities,
     Market,
     MarketCandidate,
@@ -16,8 +16,8 @@ from prediction_market_agent.sdk.contracts import (
     TopicDetail,
     TopicPage,
 )
-from prediction_market_agent.sdk.config_io import json_file_callbacks
-from prediction_market_agent.sdk.discovery import (
+from prediction_market_agent.plugin_system.config_io import json_file_callbacks
+from prediction_market_agent.plugin_system.discovery import (
     PluginConfigField,
     PluginConfiguration,
     PluginInitializationContext,
@@ -100,7 +100,7 @@ class StaticDemoPlugin:
 
     def list_topics(self, *, offset, limit):
         topics = () if offset or limit <= 0 else (
-            Topic("demo-topic", "Demo event", "Will the demo resolve YES?", "SDK example.", "demo", "OPEN", 10000, 0, "demo-event"),
+            Topic("demo-topic", "Demo event", "Will the demo resolve YES?", "Plugin-system example.", "demo", "OPEN", 10000, 0, "demo-event"),
         )
         return TopicPage(topics, False, offset + len(topics))
 
@@ -144,7 +144,7 @@ class StaticDemoPlugin:
 
 
 def initialize_plugin(context: PluginInitializationContext) -> PluginSpec:
-    load, save, storage = json_file_callbacks(
+    load, save, delete, storage = json_file_callbacks(
         context.working_directory / "examples" / "plugin_configs" / "static_demo.json"
     )
     configuration = PluginConfiguration(
@@ -154,6 +154,7 @@ def initialize_plugin(context: PluginInitializationContext) -> PluginSpec:
         ),
         load_callback=load,
         save_callback=save,
+        delete_callback=delete,
         storage=storage,
     )
     instances = []

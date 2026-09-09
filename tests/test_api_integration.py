@@ -9,15 +9,15 @@ from pathlib import Path
 from prediction_market_agent.core.config import Config
 from prediction_market_agent.agent.decision import Decision, ProviderResult
 from prediction_market_agent.runtime.engine import TradingEngine
-from prediction_market_agent.sdk.contracts import PredictionMarketApiPlugin
-from prediction_market_agent.sdk.registry import load_api_plugins
+from prediction_market_agent.plugin_system.contracts import PredictionMarketApiPlugin
+from prediction_market_agent.plugin_system.registry import load_api_plugins
 from prediction_market_agent.core.risk import NetworkGateError
 
 
 class ProductionApiIntegrationTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
-        cls.base = Config.from_env()
+        cls.base = Config.load()
         cls.temp = tempfile.TemporaryDirectory()
 
     @classmethod
@@ -145,7 +145,7 @@ class ProductionApiIntegrationTests(unittest.TestCase):
 
         calls = {
             "quote": lambda: binance.get_quote(
-                outcome_id="codex-invalid-outcome",
+                outcome_id="integration-invalid-outcome",
                 side="BUY",
                 amount="0.000000000000000001",
                 order_type="MARKET",
@@ -154,12 +154,12 @@ class ProductionApiIntegrationTests(unittest.TestCase):
                 fee_bps=0,
             ),
             "order": lambda: binance.place_order(
-                quote_id="codex-invalid-quote",
+                quote_id="integration-invalid-quote",
                 order_type="MARKET",
                 price_limit=None,
             ),
-            "cancel": lambda: binance.cancel_orders(["codex-invalid-order"]),
-            "redeem": lambda: binance.redeem(["codex-invalid-outcome"]),
+            "cancel": lambda: binance.cancel_orders(["integration-invalid-order"]),
+            "redeem": lambda: binance.redeem(["integration-invalid-outcome"]),
             "transfer_in": lambda: binance.transfer("INBOUND", "0.000000000000000001"),
             "transfer_out": lambda: binance.transfer("OUTBOUND", "0.000000000000000001"),
         }

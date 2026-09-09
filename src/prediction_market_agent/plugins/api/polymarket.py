@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from prediction_market_agent.sdk.config_io import json_file_callbacks
-from prediction_market_agent.sdk.discovery import (
+from prediction_market_agent.plugin_system.config_io import json_file_callbacks
+from prediction_market_agent.plugin_system.discovery import (
     PluginConfigField,
     PluginConfiguration,
     PluginInitializationContext,
@@ -13,7 +13,7 @@ from prediction_market_agent.plugins.api._polymarket.adapter import PolymarketAp
 
 def initialize_plugin(context: PluginInitializationContext) -> PluginSpec:
     path = context.working_directory / "config" / "plugins" / "polymarket.json"
-    load, save, storage = json_file_callbacks(path)
+    load, save, delete, storage = json_file_callbacks(path)
     fields = (
         PluginConfigField("POLYMARKET_GAMMA_URL", "Gamma URL", "string", "Polymarket 事件发现与元数据 Gamma API 的 HTTPS 根地址。", required=True),
         PluginConfigField("POLYMARKET_CLOB_URL", "CLOB URL", "string", "Polymarket 订单簿行情和订单交易 API 的 HTTPS 根地址。", required=True),
@@ -36,7 +36,7 @@ def initialize_plugin(context: PluginInitializationContext) -> PluginSpec:
         PluginConfigField("POLYMARKET_HTTP_PROXY", "HTTP 代理", "string", "Polymarket 插件独立使用的代理。填 DIRECT 直连、SYSTEM 读取本机系统代理，或填写 http(s) URL。", required=True),
         PluginConfigField("POLYMARKET_NETWORK_RULES_JSON", "网络规则 JSON", "string", "Polymarket 插件允许访问的 scheme、host、HTTP method 与各 method 路径模式；由插件构造网络规则引擎。", required=True),
     )
-    configuration = PluginConfiguration(fields, load, save, storage)
+    configuration = PluginConfiguration(fields, load, save, delete, storage)
 
     instances = []
 

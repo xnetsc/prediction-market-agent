@@ -1,12 +1,16 @@
 .env
 .env.*
-!.env.example
+config/application.json
+config/plugin_directories.json
 .venv/
 __pycache__/
 *.pyc
 .pytest_cache/
 build/
 dist/
+deploy/aliyun/build/
+deploy/aliyun/.build.*/
+deploy/aliyun/.wheel.*/
 *.egg-info/
 .coverage
 htmlcov/
@@ -41,5 +45,8 @@ secrets.json
 *_sessions.sqlite3
 *_sessions.sqlite3-shm
 *_sessions.sqlite3-wal
+admin_auth.sqlite3
+admin_auth.sqlite3-shm
+admin_auth.sqlite3-wal
 *.log
 *.pid

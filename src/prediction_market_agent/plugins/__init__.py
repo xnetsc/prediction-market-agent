@@ -1,1 +1,1 @@
-"""Built-in plugins grouped by SDK category."""
+"""Built-in plugins grouped by plugin category."""

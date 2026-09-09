@@ -4,7 +4,7 @@ from dataclasses import asdict
 from typing import Any
 
 from ..agent.decision import Decision
-from ..sdk.contracts import Market, TopicDetail
+from ..plugin_system.contracts import Market, TopicDetail
 from .bootstrap import PlatformRuntime
 
 

@@ -11,8 +11,8 @@ from dataclasses import asdict, dataclass, field
 from html.parser import HTMLParser
 from typing import Any
 
-from prediction_market_agent.sdk.config_io import json_file_callbacks, resolve_plugin_proxy
-from prediction_market_agent.sdk.discovery import PluginConfigField, PluginConfiguration, PluginInitializationContext, PluginSpec
+from prediction_market_agent.plugin_system.config_io import json_file_callbacks, resolve_plugin_proxy
+from prediction_market_agent.plugin_system.discovery import PluginConfigField, PluginConfiguration, PluginInitializationContext, PluginSpec
 from prediction_market_agent.agent.research import ResearchToolContext, ResearchToolError
 
 
@@ -224,7 +224,7 @@ class StandardResearchContribution:
 
 
 def initialize_plugin(context: PluginInitializationContext) -> PluginSpec:
-    load, save, storage = json_file_callbacks(context.working_directory / "config" / "plugins" / "research_standard.json")
+    load, save, delete, storage = json_file_callbacks(context.working_directory / "config" / "plugins" / "research_standard.json")
     fields = (
         PluginConfigField("SEARCH_URL", "搜索 URL", "string", "网页搜索 GET 端点；插件追加 q 查询参数。", required=True),
         PluginConfigField("HTTP_PROXY", "HTTP 代理", "string", "研究网络请求使用的代理；DIRECT、SYSTEM 或 http(s) URL。", required=True),
@@ -247,7 +247,7 @@ def initialize_plugin(context: PluginInitializationContext) -> PluginSpec:
         PluginConfigField("MARKET_MAX_RESULTS", "最大跨市场条数", "integer", "每个平台单次允许返回的最大候选数。", required=True),
         PluginConfigField("HISTORY_MAX_RESULTS", "历史召回上限", "integer", "单次历史召回允许的最大记录数。", required=True),
     )
-    configuration = PluginConfiguration(fields, load, save, storage)
+    configuration = PluginConfiguration(fields, load, save, delete, storage)
 
     def factory(config):
         del config

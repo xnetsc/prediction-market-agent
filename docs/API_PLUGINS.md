@@ -32,8 +32,7 @@ REDEEM、TRANSFER_IN、TRANSFER_OUT。私有 JSON 拥有 REST URL、Key/Secret�
 地址、代理和网络规则。当前适配器不能可靠判定 winner，因此能力清单明确把 `settlement_status` 设为
 false；这不是占位成功值。
 
-官方参考：[Python SDK](https://github.com/Polymarket/py-sdk)、
-[Gasless 交易](https://docs.polymarket.com/trading/gasless)、
+官方参考：[Gasless 交易](https://docs.polymarket.com/trading/gasless)、
 [市场结算](https://docs.polymarket.com/concepts/resolution)。
 
 ## 多平台协同

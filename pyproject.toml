@@ -4,13 +4,17 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "prediction-market-agent"
-version = "2.0.0"
-description = "Multi-platform prediction-market Agent with plugin APIs and online execution"
-license = { file = "LICENSE" }
+version = "3.0.0"
+description = "Deployable multi-platform prediction-market trading robot"
+license = "LicenseRef-PolyForm-Noncommercial-1.0.0"
+license-files = ["LICENSE"]
 requires-python = ">=3.11"
 dependencies = [
-  "python-dotenv>=1.2,<2",
+  "fastapi>=0.117,<1",
+  "mangum>=0.19,<1",
   "polymarket-client>=0.3,<0.4",
+  "uvicorn>=0.35,<1",
+  "webauthn>=3,<4",
 ]
 
 [project.scripts]

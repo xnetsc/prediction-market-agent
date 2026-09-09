@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from typing import Any, Callable, Protocol
 
 from ..runtime.memory import SessionMemory
-from ..sdk.contracts import PredictionMarketApiPlugin
+from ..plugin_system.contracts import PredictionMarketApiPlugin
 
 
 class ResearchToolError(RuntimeError):

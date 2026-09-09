@@ -6,8 +6,8 @@ import time
 from pathlib import Path
 
 from prediction_market_agent.core.hooks import HookManager
-from prediction_market_agent.sdk.config_io import json_file_callbacks
-from prediction_market_agent.sdk.discovery import (
+from prediction_market_agent.plugin_system.config_io import json_file_callbacks
+from prediction_market_agent.plugin_system.discovery import (
     PluginConfigField,
     PluginConfiguration,
     PluginInitializationContext,
@@ -16,7 +16,7 @@ from prediction_market_agent.sdk.discovery import (
 
 
 def initialize_plugin(context: PluginInitializationContext) -> PluginSpec:
-    load, save, storage = json_file_callbacks(
+    load, save, delete, storage = json_file_callbacks(
         context.working_directory / "config" / "plugins" / "hook_jsonl_audit.json"
     )
     configuration = PluginConfiguration(
@@ -26,6 +26,7 @@ def initialize_plugin(context: PluginInitializationContext) -> PluginSpec:
         ),
         load_callback=load,
         save_callback=save,
+        delete_callback=delete,
         storage=storage,
     )
     lock = threading.Lock()

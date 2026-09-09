@@ -7,8 +7,8 @@ import urllib.request
 from typing import Any
 
 from prediction_market_agent.agent.decision import DecisionProviderError, StructuredResult, SYSTEM_INSTRUCTIONS
-from prediction_market_agent.sdk.config_io import json_file_callbacks, resolve_plugin_proxy
-from prediction_market_agent.sdk.discovery import PluginConfigField, PluginConfiguration, PluginInitializationContext, PluginSpec
+from prediction_market_agent.plugin_system.config_io import json_file_callbacks, resolve_plugin_proxy
+from prediction_market_agent.plugin_system.discovery import PluginConfigField, PluginConfiguration, PluginInitializationContext, PluginSpec
 
 
 class OpenAICompatibleBackend:
@@ -56,7 +56,7 @@ class OpenAICompatibleBackend:
 
 
 def initialize_plugin(context: PluginInitializationContext) -> PluginSpec:
-    load, save, storage = json_file_callbacks(context.working_directory / "config" / "plugins" / "openai_compatible.json")
+    load, save, delete, storage = json_file_callbacks(context.working_directory / "config" / "plugins" / "openai_compatible.json")
     configuration = PluginConfiguration(fields=(
         PluginConfigField("COMPATIBLE_API_BASE", "API URL", "string", "OpenAI Chat Completions 兼容服务的 HTTPS 根地址。", required=True),
         PluginConfigField("COMPATIBLE_API_KEY", "API Key", "secret", "OpenAI 官方、OpenRouter 或其他兼容服务的访问密钥。"),
@@ -64,7 +64,7 @@ def initialize_plugin(context: PluginInitializationContext) -> PluginSpec:
         PluginConfigField("COMPATIBLE_EXTRA_HEADERS_JSON", "附加请求头 JSON", "string", "服务商要求的字符串到字符串 HTTP 请求头 JSON 对象。", required=True),
         PluginConfigField("COMPATIBLE_HTTP_PROXY", "HTTP 代理", "string", "兼容 API 独立使用的代理；DIRECT、SYSTEM 或 http(s) URL。", required=True),
         PluginConfigField("COMPATIBLE_TIMEOUT_SECONDS", "超时秒数", "integer", "每次兼容 API 调用的超时时间。", required=True),
-    ), load_callback=load, save_callback=save, storage=storage)
+    ), load_callback=load, save_callback=save, delete_callback=delete, storage=storage)
 
     def factory(config):
         del config
