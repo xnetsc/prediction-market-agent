@@ -17,6 +17,10 @@ PLUGIN_KINDS = (
     "hook",
 )
 
+DEFAULT_PLUGIN_SELECTION_CONFIG = (
+    Path(__file__).resolve().parents[1] / "config/plugin_selection.default.json"
+)
+
 
 def _string_list(value: Any, field_name: str) -> tuple[str, ...] | None:
     if value is None:
@@ -36,16 +40,16 @@ class ManagedRuntimeConfig:
     path: Path
     enabled: dict[str, tuple[str, ...]] = field(default_factory=dict)
     decision_strategy: str = ""
+    source_path: Path | None = None
 
     @classmethod
     def load(cls, path: Path) -> "ManagedRuntimeConfig":
         resolved = path.expanduser().resolve()
-        if not resolved.exists():
-            return cls(path=resolved)
+        source = resolved if resolved.exists() else DEFAULT_PLUGIN_SELECTION_CONFIG.resolve()
         try:
-            raw = json.loads(resolved.read_text(encoding="utf-8-sig"))
+            raw = json.loads(source.read_text(encoding="utf-8-sig"))
         except json.JSONDecodeError as error:
-            raise ValueError(f"Managed plugin settings are invalid JSON: {resolved}: {error}") from error
+            raise ValueError(f"Managed plugin settings are invalid JSON: {source}: {error}") from error
         if not isinstance(raw, dict):
             raise ValueError("Managed plugin settings must be a JSON object")
         enabled_raw = raw.get("enabled", {})
@@ -61,6 +65,7 @@ class ManagedRuntimeConfig:
             path=resolved,
             enabled=enabled,
             decision_strategy=strategy,
+            source_path=source,
         )
 
     def selected(self, kind: str, fallback: tuple[str, ...]) -> tuple[str, ...]:

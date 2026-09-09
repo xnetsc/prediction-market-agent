@@ -7,8 +7,8 @@ from pathlib import Path
 from typing import Any
 
 from prediction_market_agent.agent.decision import DecisionProviderError, StructuredResult
-from prediction_market_agent.sdk.config_io import json_file_callbacks, resolve_plugin_proxy
-from prediction_market_agent.sdk.discovery import (
+from prediction_market_agent.plugin_system.config_io import json_file_callbacks, resolve_plugin_proxy
+from prediction_market_agent.plugin_system.discovery import (
     PluginConfigField,
     PluginConfiguration,
     PluginInitializationContext,
@@ -69,14 +69,14 @@ class CodexCliBackend:
 
 
 def initialize_plugin(context: PluginInitializationContext) -> PluginSpec:
-    load, save, storage = json_file_callbacks(context.working_directory / "config" / "plugins" / "codex.json")
+    load, save, delete, storage = json_file_callbacks(context.working_directory / "config" / "plugins" / "codex.json")
     configuration = PluginConfiguration(
         fields=(
             PluginConfigField("CODEX_CLI_PATH", "Codex 命令", "string", "本机 Codex CLI 的命令名或可执行文件绝对路径。", required=True),
             PluginConfigField("CODEX_MODEL", "Codex 模型", "string", "Codex 客户端使用的模型覆盖；空字符串表示使用客户端默认模型。"),
             PluginConfigField("CODEX_HTTP_PROXY", "HTTP 代理", "string", "Codex 子进程独立使用的代理；DIRECT、SYSTEM 或 http(s) URL。", required=True),
             PluginConfigField("CODEX_TIMEOUT_SECONDS", "超时秒数", "integer", "每次 Codex 结构化调用的超时时间。", required=True),
-        ), load_callback=load, save_callback=save, storage=storage,
+        ), load_callback=load, save_callback=save, delete_callback=delete, storage=storage,
     )
 
     def factory(config):

@@ -5,8 +5,8 @@ from dataclasses import dataclass
 from typing import Any, Callable
 
 from prediction_market_agent.core.domain import AccountState
-from prediction_market_agent.sdk.config_io import json_file_callbacks
-from prediction_market_agent.sdk.discovery import (
+from prediction_market_agent.plugin_system.config_io import json_file_callbacks
+from prediction_market_agent.plugin_system.discovery import (
     PluginConfigField,
     PluginConfiguration,
     PluginInitializationContext,
@@ -191,7 +191,7 @@ class PortfolioLimitsContribution:
 
 
 def initialize_plugin(context: PluginInitializationContext) -> PluginSpec:
-    load, save, storage = json_file_callbacks(
+    load, save, delete, storage = json_file_callbacks(
         context.working_directory / "config" / "plugins" / "risk_portfolio_limits.json"
     )
     configuration = PluginConfiguration(
@@ -205,6 +205,7 @@ def initialize_plugin(context: PluginInitializationContext) -> PluginSpec:
         ),
         load_callback=load,
         save_callback=save,
+        delete_callback=delete,
         storage=storage,
         required=False,
     )

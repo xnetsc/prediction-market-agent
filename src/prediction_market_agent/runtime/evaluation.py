@@ -8,7 +8,7 @@ from typing import Any
 
 from ..agent.decision import DecisionProviderError
 from ..agent.research import ResearchToolContext, ResearchToolbox
-from ..sdk.contracts import Market, OrderBook, Outcome, Topic, TopicDetail
+from ..plugin_system.contracts import Market, OrderBook, Outcome, Topic, TopicDetail
 from .bootstrap import PlatformRuntime
 from .broker import ExecutionError
 

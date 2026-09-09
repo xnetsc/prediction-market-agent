@@ -1,0 +1,8 @@
+services:
+  robot:
+    build: .
+    ports:
+      - "8765:8765"
+    volumes:
+      - ./runtime-data:/data
+    restart: unless-stopped

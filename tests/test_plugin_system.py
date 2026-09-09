@@ -8,9 +8,9 @@ from types import SimpleNamespace
 
 from prediction_market_agent.core.config import Config
 from prediction_market_agent.core.hooks import HookManager
-from prediction_market_agent.sdk.config_io import json_file_callbacks
-from prediction_market_agent.sdk.management import PluginManagementService
-from prediction_market_agent.sdk.discovery import (
+from prediction_market_agent.plugin_system.config_io import json_file_callbacks
+from prediction_market_agent.plugin_system.management import PluginManagementService
+from prediction_market_agent.plugin_system.discovery import (
     PluginCatalog,
     PluginConfigField,
     PluginConfiguration,
@@ -21,7 +21,7 @@ from prediction_market_agent.sdk.discovery import (
 from prediction_market_agent.plugins.api._polymarket.config import PolymarketPluginConfig
 from prediction_market_agent.plugins.api._polymarket.write import PolymarketWriteTransport
 from prediction_market_agent.core.risk import NetworkWriteGate
-from prediction_market_agent.sdk.config import PluginSdkConfig
+from prediction_market_agent.plugin_system.config import PluginDirectoryConfig
 
 
 class _Model:
@@ -82,11 +82,11 @@ class _PolymarketClient:
         self.closed = True
 
 
-class PluginSdkTests(unittest.TestCase):
+class PluginSystemTests(unittest.TestCase):
     def test_every_plugin_category_has_an_initializable_complete_example(self) -> None:
         project = Path(__file__).parents[1]
         with tempfile.TemporaryDirectory() as directory:
-            sdk_path = Path(directory) / "examples-sdk.json"
+            directory_path = Path(directory) / "example-plugin-directories.json"
             categories = {
                 "api": [str(project / "examples/api_plugins")],
                 "decision_provider": [str(project / "examples/decision_provider_plugins")],
@@ -95,7 +95,7 @@ class PluginSdkTests(unittest.TestCase):
                 "risk": [str(project / "examples/risk_plugins")],
                 "hook": [str(project / "examples/hooks")],
             }
-            sdk_path.write_text(json.dumps({"categories": categories}), encoding="utf-8")
+            directory_path.write_text(json.dumps({"categories": categories}), encoding="utf-8")
             selected = {
                 "api": ("static_demo",),
                 "decision_provider": ("static_provider",),
@@ -105,7 +105,7 @@ class PluginSdkTests(unittest.TestCase):
                 "hook": ("audit_hook",),
             }
             catalog = discover_plugin_catalog(
-                PluginSdkConfig.load(sdk_path),
+                PluginDirectoryConfig.load(directory_path),
                 enabled=selected,
                 working_directory=project,
             )
@@ -131,7 +131,7 @@ class PluginSdkTests(unittest.TestCase):
     def test_plugin_owned_json_callbacks_validate_defaults_and_preserve_secret(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "private.json"
-            load, save, storage = json_file_callbacks(path)
+            load, save, delete, storage = json_file_callbacks(path)
             config = PluginConfiguration(
                 (
                     PluginConfigField("NAME", "Name", "string", "Display name.", default="bot"),
@@ -139,6 +139,7 @@ class PluginSdkTests(unittest.TestCase):
                 ),
                 load,
                 save,
+                delete,
                 storage,
             )
             self.assertEqual(config.load(), {"NAME": "bot"})
@@ -149,14 +150,20 @@ class PluginSdkTests(unittest.TestCase):
             token = next(field for field in manifest["fields"] if field["name"] == "TOKEN")
             self.assertEqual(token["value"], "")
             self.assertTrue(token["configured"])
+            config.reset(["TOKEN"])
+            self.assertEqual(load(), {"NAME": "second"})
+            config.delete()
+            self.assertFalse(path.exists())
+            self.assertEqual(config.load(), {"NAME": "bot"})
 
     def test_required_fields_render_before_first_save(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            load, save, storage = json_file_callbacks(Path(directory) / "new.json")
+            load, save, delete, storage = json_file_callbacks(Path(directory) / "new.json")
             config = PluginConfiguration(
                 (PluginConfigField("VALUE", "Value", "number", "Required value.", required=True),),
                 load,
                 save,
+                delete,
                 storage,
             )
             field = config.manifest()["fields"][0]
@@ -174,8 +181,8 @@ class PluginSdkTests(unittest.TestCase):
                 "raise RuntimeError('module must not be imported while disabled')\n",
                 encoding="utf-8",
             )
-            sdk_path = root / "sdk.json"
-            sdk_path.write_text(
+            directory_path = root / "plugin-directories.json"
+            directory_path.write_text(
                 json.dumps(
                     {
                         "categories": {
@@ -191,7 +198,7 @@ class PluginSdkTests(unittest.TestCase):
                 encoding="utf-8",
             )
             catalog = discover_plugin_catalog(
-                PluginSdkConfig.load(sdk_path),
+                PluginDirectoryConfig.load(directory_path),
                 enabled={kind: () for kind in ("api", "decision_provider", "decision_strategy", "research_tool", "risk", "hook")},
             )
             self.assertEqual(catalog.discovered_names("api"), ("danger",))
@@ -252,14 +259,14 @@ class PluginSdkTests(unittest.TestCase):
             marker = root / "torn-down.txt"
             plugin_path = hook_dir / "sample.py"
             plugin_path.write_text(
-                "from prediction_market_agent.sdk.discovery import PluginSpec\n"
+                "from prediction_market_agent.plugin_system.discovery import PluginSpec\n"
                 "def initialize_plugin(context):\n"
                 f"    marker = __import__('pathlib').Path({str(marker)!r})\n"
                 "    return PluginSpec('hook','sample','sample hook',str(context.module_path),lambda config, services: None,None,lambda: marker.write_text('done', encoding='utf-8'))\n",
                 encoding="utf-8",
             )
-            sdk_path = root / "sdk.json"
-            sdk_path.write_text(
+            directory_path = root / "plugin-directories.json"
+            directory_path.write_text(
                 json.dumps({"categories": {
                     "api": [], "decision_provider": [], "decision_strategy": [],
                     "research_tool": [], "risk": [], "hook": [str(hook_dir)],
@@ -275,7 +282,7 @@ class PluginSdkTests(unittest.TestCase):
                 encoding="utf-8",
             )
             runtime = Config(
-                plugin_sdk_config_file=sdk_path,
+                plugin_directories_file=directory_path,
                 management_file=management_path,
                 market_api_plugins=(),
                 decision_providers=(),
@@ -291,7 +298,7 @@ class PluginSdkTests(unittest.TestCase):
             self.assertEqual(refreshed["plugins"]["hook"], [])
             self.assertEqual(service.catalog.names("hook"), ())
 
-    def test_polymarket_official_sdk_surface_all_write_workflows(self) -> None:
+    def test_polymarket_official_client_surface_all_write_workflows(self) -> None:
         settings = PolymarketPluginConfig.from_mapping(
             values={
                 "POLYMARKET_GAMMA_URL": "https://gamma-api.polymarket.com",

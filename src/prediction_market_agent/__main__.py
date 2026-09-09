@@ -4,16 +4,18 @@ import argparse
 import json
 import logging
 import time
+from pathlib import Path
 
 from .agent.decision import make_provider
 from .runtime.engine import TradingEngine
-from .core.config import Config
-from .sdk.registry import load_api_plugins
-from .sdk.discovery import load_plugin_catalog
-from .sdk.contracts import platform_state_path
+from .core.config import ApplicationConfigStore, Config, DEFAULT_APPLICATION_CONFIG
+from .plugin_system.registry import load_api_plugins
+from .plugin_system.discovery import load_plugin_catalog
+from .plugin_system.contracts import platform_state_path
 from .runtime.reporting import build_report
 from .runtime.dashboard import serve
-from .sdk.managed_config import PLUGIN_KINDS
+from .plugin_system.managed_config import PLUGIN_KINDS
+from .plugin_system.managed_config import ManagedRuntimeConfig, save_managed_config
 
 
 def _doctor(config: Config) -> dict:
@@ -45,14 +47,14 @@ def _doctor(config: Config) -> dict:
     except Exception as error:
         strategy_status = {"error": str(error)}
     return {
-        "loaded_env_file": config.loaded_env_file or "NONE",
+        "application_config_file": str(config.application_config_file),
         "decision_provider_priority": list(config.decision_providers),
         "available_decision_providers": available,
         "unavailable_decision_providers": unavailable,
         "configured_api_plugins": list(config.market_api_plugins),
         "registered_api_plugins": registered_plugins,
         "loaded_api_plugin_capabilities": plugin_status,
-        "plugin_sdk_config": str(config.plugin_sdk_config_file),
+        "plugin_directories_file": str(config.plugin_directories_file),
         "discovered_plugin_files": {
             kind: list(catalog.discovered_names(kind))
             for kind in PLUGIN_KINDS
@@ -61,6 +63,7 @@ def _doctor(config: Config) -> dict:
         "plugin_manifests": catalog.manifests(),
         "state_file": str(config.state_file),
         "session_db": str(config.session_db),
+        "auth_db": str(config.auth_db),
     }
 
 
@@ -69,9 +72,25 @@ def main() -> None:
         description="Multi-platform prediction-market Agent trading bot"
     )
     parser.add_argument(
-        "command", choices=("once", "run", "status", "doctor", "provider-test", "report", "serve")
+        "command",
+        choices=("init", "once", "run", "status", "doctor", "provider-test", "report", "serve"),
+    )
+    parser.add_argument(
+        "--config",
+        type=Path,
+        default=DEFAULT_APPLICATION_CONFIG,
+        help="Application JSON configuration (default: config/application.json)",
     )
     parser.add_argument("--verbose", action="store_true")
+    parser.add_argument(
+        "--listen-host",
+        help="serve-only listen host override, useful for containers",
+    )
+    parser.add_argument(
+        "--listen-port",
+        type=int,
+        help="serve-only listen port override, useful for platform-assigned ports",
+    )
     parser.add_argument(
         "--since-hours",
         type=float,
@@ -83,12 +102,38 @@ def main() -> None:
         level=logging.DEBUG if args.verbose else logging.INFO,
         format="%(asctime)s %(levelname)s %(name)s %(message)s",
     )
-    config = Config.from_env()
+    if args.command == "init":
+        store = ApplicationConfigStore(args.config)
+        if store.path.exists():
+            raise FileExistsError(f"Application configuration already exists: {store.path}")
+        store.save(store.values())
+        values = store.values()
+        workdir = Path(str(values["working_directory"])).expanduser().resolve()
+        management_path = Path(str(values["management_file"])).expanduser()
+        if not management_path.is_absolute():
+            management_path = workdir / management_path
+        management_path = management_path.resolve()
+        if not management_path.exists():
+            defaults = ManagedRuntimeConfig.load(management_path)
+            save_managed_config(management_path, defaults.to_dict())
+        print(
+            json.dumps(
+                {
+                    "application_config": str(store.path),
+                    "plugin_selection": str(management_path),
+                    "next": f"prediction-market-agent --config {store.path} serve",
+                },
+                ensure_ascii=False,
+                indent=2,
+            )
+        )
+        return
+    config = Config.load(args.config)
     if args.command == "doctor":
         print(json.dumps(_doctor(config), ensure_ascii=False, indent=2))
         return
     if args.command == "serve":
-        serve(config)
+        serve(config, host=args.listen_host, port=args.listen_port)
         return
     if args.command == "report":
         since_ms = (

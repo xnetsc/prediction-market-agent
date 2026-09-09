@@ -7,7 +7,7 @@ from typing import Any
 from prediction_market_agent.runtime.broker import ExecutionGateway
 from prediction_market_agent.core.domain import AccountState
 from prediction_market_agent.core.risk import NetworkWriteGate
-from prediction_market_agent.sdk.contracts import (
+from prediction_market_agent.plugin_system.contracts import (
     ApiCapabilities,
     Candle,
     Market,

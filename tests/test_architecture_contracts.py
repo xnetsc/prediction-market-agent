@@ -6,7 +6,7 @@ import unittest
 from pathlib import Path
 
 from prediction_market_agent.core.config import Config
-from prediction_market_agent.sdk.discovery import load_plugin_catalog
+from prediction_market_agent.plugin_system.discovery import load_plugin_catalog
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -23,16 +23,17 @@ class ArchitectureContractTests(unittest.TestCase):
         self.assertIn("Required Notice: Copyright 2026 xnetsc.", license_text)
         self.assertIn("商业用途不在免费授权范围内", readme)
         self.assertIn("source-available", readme)
-        self.assertIn('license = { file = "LICENSE" }', package_metadata)
+        self.assertIn('license = "LicenseRef-PolyForm-Noncommercial-1.0.0"', package_metadata)
+        self.assertIn('license-files = ["LICENSE"]', package_metadata)
 
-    def test_sdk_files_contain_no_platform_or_policy_configuration(self) -> None:
-        sdk_files = (
-            PACKAGE / "sdk" / "config.py",
-            PACKAGE / "sdk" / "managed_config.py",
-            PACKAGE / "sdk" / "management.py",
-            PACKAGE / "sdk" / "discovery.py",
+    def test_plugin_system_files_contain_no_platform_or_policy_configuration(self) -> None:
+        plugin_system_files = (
+            PACKAGE / "plugin_system" / "config.py",
+            PACKAGE / "plugin_system" / "managed_config.py",
+            PACKAGE / "plugin_system" / "management.py",
+            PACKAGE / "plugin_system" / "discovery.py",
         )
-        combined = "\n".join(path.read_text(encoding="utf-8") for path in sdk_files).casefold()
+        combined = "\n".join(path.read_text(encoding="utf-8") for path in plugin_system_files).casefold()
         forbidden = (
             "api_key",
             "api_secret",
@@ -50,6 +51,16 @@ class ArchitectureContractTests(unittest.TestCase):
             "execution_mode",
         )
         self.assertEqual([name for name in forbidden if name in combined], [])
+
+    def test_package_layout_uses_current_application_boundaries(self) -> None:
+        directories = {
+            path.name for path in PACKAGE.iterdir()
+            if path.is_dir() and not path.name.startswith("__")
+        }
+        self.assertEqual(
+            directories,
+            {"agent", "config", "core", "plugins", "plugin_system", "runtime"},
+        )
 
     def test_runtime_has_no_execution_mode_or_local_write_branch(self) -> None:
         combined = "\n".join(
@@ -109,7 +120,7 @@ class ArchitectureContractTests(unittest.TestCase):
             self.assertIn("platformStatus", plugin_source)
 
     def test_api_credentials_and_wallet_fields_do_not_block_plugin_loading(self) -> None:
-        catalog = load_plugin_catalog(Config.from_env())
+        catalog = load_plugin_catalog(Config.load())
         try:
             credential_fragments = (
                 "API_KEY",
@@ -187,7 +198,7 @@ class ArchitectureContractTests(unittest.TestCase):
             "general_agent": "strategy_general_agent.json",
             "timezone_latency": "strategy_timezone_latency.json",
         }
-        catalog = load_plugin_catalog(Config.from_env())
+        catalog = load_plugin_catalog(Config.load())
         try:
             for kind in (
                 "api",
@@ -214,6 +225,23 @@ class ArchitectureContractTests(unittest.TestCase):
                             rf"^<{field.name}>$",
                             f"secret example must use an explicit placeholder: {path}:{field.name}",
                         )
+        finally:
+            catalog.shutdown()
+
+    def test_provider_model_choices_are_dynamic_plugin_fields(self) -> None:
+        catalog = load_plugin_catalog(Config.load())
+        try:
+            expected = {
+                "codex": "CODEX_MODEL",
+                "claude": "CLAUDE_MODEL",
+                "openai_compatible": "COMPATIBLE_MODEL",
+            }
+            for plugin_name, field_name in expected.items():
+                configuration = catalog.get("decision_provider", plugin_name).configuration
+                self.assertIsNotNone(configuration)
+                fields = {field.name: field for field in configuration.fields}
+                self.assertIn(field_name, fields)
+                self.assertTrue(fields[field_name].description.strip())
         finally:
             catalog.shutdown()
 

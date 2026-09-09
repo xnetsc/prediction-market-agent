@@ -26,8 +26,8 @@ from prediction_market_agent.plugins.api._binance.config import BinancePluginCon
 from prediction_market_agent.plugins.api._binance.write import BinancePredictionWriteTransport
 from prediction_market_agent.plugins.api._polymarket.adapter import PolymarketApiPlugin
 from prediction_market_agent.plugins.api._polymarket.config import PolymarketPluginConfig
-from prediction_market_agent.sdk.registry import ApiPluginRegistry
-from prediction_market_agent.sdk.contracts import (
+from prediction_market_agent.plugin_system.registry import ApiPluginRegistry
+from prediction_market_agent.plugin_system.contracts import (
     ApiCapabilities,
     Market,
     OrderBook,

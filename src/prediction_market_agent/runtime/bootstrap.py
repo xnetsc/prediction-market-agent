@@ -9,9 +9,9 @@ from ..core.domain import AccountState
 from ..core.hooks import HookManager
 from ..core.risk import PortfolioRiskContribution, RiskCoordinator
 from ..core.state import StateStore
-from ..sdk.contracts import PredictionMarketApiPlugin, platform_state_path
-from ..sdk.discovery import PluginCatalog, load_plugin_catalog
-from ..sdk.registry import ApiPluginRegistry, load_api_plugins
+from ..plugin_system.contracts import PredictionMarketApiPlugin, platform_state_path
+from ..plugin_system.discovery import PluginCatalog, load_plugin_catalog
+from ..plugin_system.registry import ApiPluginRegistry, load_api_plugins
 from .broker import ExecutionGateway
 
 

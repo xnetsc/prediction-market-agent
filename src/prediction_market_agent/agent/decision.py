@@ -356,7 +356,7 @@ class FallbackDecisionProvider:
 
 def make_provider(config: Config, catalog: Any = None) -> FallbackDecisionProvider:
     if catalog is None:
-        from ..sdk.discovery import load_plugin_catalog
+        from ..plugin_system.discovery import load_plugin_catalog
 
         catalog = load_plugin_catalog(config)
     providers: list[AgentDecisionProvider] = []

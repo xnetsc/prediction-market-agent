@@ -1,8 +1,8 @@
-# 插件 SDK 与生命周期
+# 插件系统与生命周期
 
 ## 固定类别与自动扫描
 
-`PLUGIN_SDK_CONFIG_FILE` 的 `categories` 必须包含 `api`、`decision_provider`、
+应用配置的 `plugin_directories_file` 所指向 JSON，其 `categories` 必须包含 `api`、`decision_provider`、
 `decision_strategy`、`research_tool`、`risk`、`hook` 六个目录列表。`${PACKAGE_ROOT}` 可展开为安装包
 目录。每个目录顶层非下划线 `.py` 文件都是候选插件，插件名等于文件名的小写 stem。
 
@@ -20,23 +20,24 @@
 - 完整字段 schema；
 - `load_callback() -> dict`；
 - `save_callback(dict) -> None`；
+- `delete_callback() -> None`；
 - `{"kind":"json_file","location":"..."}` 存储说明。
 
-SDK 只验证 JSON 对象和字段类型、调用回调，不自行读写该位置。无配置插件返回 `None`。每个
+插件系统只验证 JSON 对象和字段类型、调用回调，不自行读写该位置。无配置插件返回 `None`。每个
 `PluginConfigField` 必须提供 `name`、`label`、`field_type`、非空 `description`；支持 `string`、
 `integer`、`number`、`boolean`、`enum`、`secret`，每个字段可有 `default`，也可为 `required`。
 
 ## 启用、禁用、排序、刷新
 
-SDK 把有序名单保存在 `BOT_MANAGEMENT_FILE`。启用时导入并初始化；禁用时调用旧实例的 `teardown`，
-然后注销。手动刷新先卸载所有已加载插件，再重新读取 SDK 目录和管理名单。刷新后删除的文件、移除的
+插件系统把有序名单保存在应用配置 `management_file` 指定的文件。启用时导入并初始化；禁用时调用旧实例的 `teardown`，
+然后注销。手动刷新先卸载所有已加载插件，再重新读取插件目录和管理名单。刷新后删除的文件、移除的
 目录或不再启用的插件均不会残留显示或实例。卸载失败会显式报错。
 
-管理页面覆盖六类插件：启用/禁用、优先级、当前策略、刷新和动态配置表单。交易进程与管理服务是不同
+管理页面覆盖六类插件：启用/禁用、优先级、当前策略、刷新、动态配置表单、字段删除和整个配置删除。交易进程与管理服务是不同
 进程；管理页重建自己的目录实例，交易进程需重启才能采用新配置。
 
 研究工具和 Hook 可以全部禁用；禁用后的模块不会导入。API、Provider 与一个当前策略是构成可运行
-交易流程的结构性依赖。若某个风险目标没有启用任何适用规则，SDK 不替插件增加默认拒绝策略。
+交易流程的结构性依赖。若某个风险目标没有启用任何适用规则，插件系统不替插件增加默认拒绝策略。
 
 ## 完整例子
 
@@ -46,6 +47,6 @@ SDK 把有序名单保存在 `BOT_MANAGEMENT_FILE`。启用时导入并初始化
 - `examples/research_tool_plugins/static_evidence.py`：动态加入 Agent 控制 schema 的工具。
 - `examples/risk_plugins/reject_operation.py`：命名目标和标准规则结果。
 - `examples/hooks/audit_hook.py`：注册及逐项注销 Hook。
-- `examples/plugin_sdk.json` 与 `examples/plugin_configs/`：目录和字段值样例。
+- `examples/plugin_directories.json` 与 `examples/plugin_configs/`：目录和字段值样例。
 
 插件与动态 Python 风控在机器人进程内运行，属于受信任代码边界。

@@ -1,7 +1,7 @@
 """Research-tool plugin contributing one deterministic Agent tool."""
 
-from prediction_market_agent.sdk.config_io import json_file_callbacks
-from prediction_market_agent.sdk.discovery import (
+from prediction_market_agent.plugin_system.config_io import json_file_callbacks
+from prediction_market_agent.plugin_system.discovery import (
     PluginConfigField,
     PluginConfiguration,
     PluginInitializationContext,
@@ -12,7 +12,7 @@ from prediction_market_agent.sdk.discovery import (
 class StaticEvidenceExecutor:
     descriptions = {
         "READ_STATIC_EVIDENCE": {
-            "purpose": "Return operator-configured evidence for SDK testing.",
+            "purpose": "Return operator-configured evidence for plugin-system testing.",
             "arguments": {},
         }
     }
@@ -39,7 +39,7 @@ class StaticEvidenceContribution:
 
 
 def initialize_plugin(context: PluginInitializationContext) -> PluginSpec:
-    load, save, storage = json_file_callbacks(
+    load, save, delete, storage = json_file_callbacks(
         context.working_directory / "examples" / "plugin_configs" / "static_evidence.json"
     )
     configuration = PluginConfiguration(
@@ -48,6 +48,7 @@ def initialize_plugin(context: PluginInitializationContext) -> PluginSpec:
         ),
         load_callback=load,
         save_callback=save,
+        delete_callback=delete,
         storage=storage,
     )
 

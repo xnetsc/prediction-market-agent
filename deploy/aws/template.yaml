@@ -1,0 +1,30 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Transform: AWS::Serverless-2016-10-31
+Description: Prediction Market Agent HTTP application and scheduled robot cycle
+
+Resources:
+  PredictionMarketAgent:
+    Type: AWS::Serverless::Function
+    Metadata:
+      BuildMethod: makefile
+    Properties:
+      CodeUri: ../..
+      Handler: prediction_market_agent.runtime.cloud.lambda_handler
+      Runtime: python3.13
+      Timeout: 300
+      MemorySize: 1024
+      Events:
+        Http:
+          Type: HttpApi
+        ScheduledCycle:
+          Type: ScheduleV2
+          Properties:
+            ScheduleExpression: rate(5 minutes)
+            State: DISABLED
+            FlexibleTimeWindow:
+              Mode: OFF
+
+Outputs:
+  HttpApiUrl:
+    Description: HTTPS endpoint
+    Value: !Sub "https://${ServerlessHttpApi}.execute-api.${AWS::Region}.${AWS::URLSuffix}/"

@@ -1,3 +1,5 @@
+import json
+
 from ._support import *
 
 class NetworkGateTests(unittest.TestCase):
@@ -73,52 +75,42 @@ class ConfigurationTests(unittest.TestCase):
         self.assertNotIn("private-key", encoded)
         self.assertNotIn("l2-secret", encoded)
 
-    def test_from_env_automatically_loads_local_dotenv(self) -> None:
-        with tempfile.TemporaryDirectory() as directory, patch.dict(os.environ, {}, clear=True):
+    def test_application_json_loads_typed_runtime_values(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            dotenv = root / ".env"
+            application = root / "application.json"
             management = root / "management.json"
             management.write_text(
                 '{"enabled":{"api":["a"],"decision_provider":["p"],'
                 '"research_tool":["r"]},"decision_strategy":"s"}',
                 encoding="utf-8",
             )
-            dotenv.write_text(
-                f"BOT_MANAGEMENT_FILE={management}\nAGENT_MAX_TOOL_STEPS=5\n",
+            application.write_text(
+                json.dumps({"version": 1, "values": {
+                    "management_file": str(management),
+                    "agent_max_tool_steps": 5,
+                }}),
                 encoding="utf-8",
             )
-            previous = Path.cwd()
-            try:
-                os.chdir(root)
-                loaded = Config.from_env()
-            finally:
-                os.chdir(previous)
+            loaded = Config.load(application)
             self.assertEqual(loaded.agent_max_tool_steps, 5)
-            self.assertEqual(loaded.loaded_env_file, str(dotenv.resolve()))
+            self.assertEqual(loaded.application_config_file, application.resolve())
 
-    def test_process_environment_has_priority_over_dotenv(self) -> None:
-        environment = {"AGENT_MAX_TOOL_STEPS": "7"}
-        with tempfile.TemporaryDirectory() as directory, patch.dict(
-            os.environ, environment, clear=True
-        ):
+    def test_application_configuration_reset_restores_default(self) -> None:
+        from prediction_market_agent.core.config import ApplicationConfigStore
+
+        with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            management = root / "management.json"
-            management.write_text(
-                '{"enabled":{"api":["a"],"decision_provider":["p"],'
-                '"research_tool":["r"]},"decision_strategy":"s"}',
-                encoding="utf-8",
+            store = ApplicationConfigStore(root / "application.json")
+            store.save({"agent_max_tool_steps": 7})
+            field = next(
+                item for item in store.manifest()["fields"]
+                if item["name"] == "agent_max_tool_steps"
             )
-            (root / ".env").write_text(
-                f"BOT_MANAGEMENT_FILE={management}\nAGENT_MAX_TOOL_STEPS=5\n",
-                encoding="utf-8",
-            )
-            previous = Path.cwd()
-            try:
-                os.chdir(root)
-                loaded = Config.from_env()
-            finally:
-                os.chdir(previous)
-            self.assertEqual(loaded.agent_max_tool_steps, 7)
+            self.assertTrue(field["configured"])
+            store.reset(["agent_max_tool_steps"])
+            self.assertEqual(store.values()["agent_max_tool_steps"], 4)
+            self.assertFalse(store.path.exists())
 
     def test_financial_limits_are_not_generic_config_fields(self) -> None:
         common = Config()

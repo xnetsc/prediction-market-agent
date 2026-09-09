@@ -1,19 +1,19 @@
 # 架构与边界
 
 机器人由通用编排内核和六类自动扫描插件组成：API、决策 Provider、决策策略、研究工具、风控、Hook。
-SDK 只负责目录发现、启用顺序、JSON schema 验证、配置回调调用和生命周期，不包含平台名、凭证、URL、
+插件系统只负责目录发现、启用顺序、JSON schema 验证、配置回调调用和生命周期，不包含平台名、凭证、URL、
 代理、资金数字、损益公式、网络白名单或策略内容。
 
 ## 源码布局
 
 - `core/`：通用运行配置、领域模型、账户状态持久化、Hook 与风险协议。
-- `sdk/`：插件契约、自动发现、生命周期、启用状态和配置回调。
+- `plugin_system/`：插件契约、自动发现、生命周期、启用状态和配置回调。
 - `agent/`：Provider 决策协议、多步研究工具协议和文本策略协议。
-- `runtime/`：启动装配、市场评估、动作执行、循环引擎、SQLite、报告与 HTTP 界面。
+- `runtime/`：启动装配、市场评估、动作执行、循环引擎、SQLite、报告、Passkey/ECDH 与 Web 界面。
 - `plugins/`：按 `api`、`providers`、`strategies`、`research`、`risk`、`hooks` 六类组织的内置插件。
 
 Binance 与 Polymarket 的配置、读取和写入实现分别位于 `plugins/api/_binance/` 和
-`plugins/api/_polymarket/`；SDK 不引用这些平台目录。
+`plugins/api/_polymarket/`；插件系统不引用这些平台目录。
 
 ## 一次决策的数据流
 
@@ -44,3 +44,7 @@ Polymarket 插件内部处理 pUSD 精度、CLOB 凭证、钱包签名和 Relaye
 Codex 和 Claude 客户端可以维护自己的登录信息，但机器人把每次调用视为可替换 Provider。跨轮业务会话
 统一存入 SQLite，所以 Provider 故障转移后仍能召回同一市场历史。子进程只继承运行所需的 OS/客户端
 环境，不继承其他插件的私有配置。
+
+管理会话与 Agent 业务记忆相互独立：`auth_db` 保存 admin Passkey、公钥签名计数器、挑战、ECDH 会话和
+防重放 nonce；`session_db` 保存 Agent 输入输出和决策台账。两条数据库路径先由应用配置解析，再初始化
+任何持久层。登录后的业务数据经统一加密分派端点进出，认证引导端点不暴露业务内容。

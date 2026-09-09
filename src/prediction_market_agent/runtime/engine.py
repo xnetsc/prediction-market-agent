@@ -5,7 +5,7 @@ import time
 from typing import Any
 
 from ..core.config import Config
-from ..sdk.contracts import PredictionMarketApiPlugin, Topic
+from ..plugin_system.contracts import PredictionMarketApiPlugin, Topic
 from .actions import ExecutionActionsMixin
 from .bootstrap import PlatformRuntime, bootstrap_engine
 from .broker import ExecutionError

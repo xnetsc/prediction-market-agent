@@ -9,7 +9,7 @@ from types import ModuleType
 from typing import Any, Callable
 
 from .managed_config import ManagedRuntimeConfig, PLUGIN_KINDS
-from .config import PluginSdkConfig
+from .config import PluginDirectoryConfig
 
 
 FIELD_TYPES = frozenset({"string", "integer", "number", "boolean", "enum", "secret"})
@@ -70,11 +70,12 @@ class PluginConfigField:
 
 @dataclass(frozen=True)
 class PluginConfiguration:
-    """SDK-facing schema and plugin-owned JSON-object load/save callbacks."""
+    """Plugin-system-facing schema and plugin-owned JSON-object load/save callbacks."""
 
     fields: tuple[PluginConfigField, ...]
     load_callback: Callable[[], dict[str, Any]]
     save_callback: Callable[[dict[str, Any]], None]
+    delete_callback: Callable[[], None]
     storage: dict[str, Any]
     required: bool = False
 
@@ -82,8 +83,13 @@ class PluginConfiguration:
         names = [field.name for field in self.fields]
         if len(names) != len(set(names)):
             raise ValueError("Plugin configuration schema contains duplicate fields")
-        if not callable(self.load_callback) or not callable(self.save_callback):
-            raise ValueError("Plugin configuration must provide callable load/save functions")
+        if not all(
+            callable(callback)
+            for callback in (self.load_callback, self.save_callback, self.delete_callback)
+        ):
+            raise ValueError(
+                "Plugin configuration must provide callable load/save/delete functions"
+            )
         if not isinstance(self.storage, dict):
             raise ValueError("Plugin configuration storage description must be an object")
         if self.storage.get("kind") != "json_file" or not self.storage.get("location"):
@@ -165,6 +171,26 @@ class PluginConfiguration:
                 raise ValueError(f"Required plugin configuration field is missing: {field.name}")
         self.save_callback(normalized)
         return normalized
+
+    def delete(self) -> None:
+        self.delete_callback()
+
+    def reset(self, names: list[str]) -> None:
+        if not isinstance(names, list) or not all(isinstance(name, str) for name in names):
+            raise ValueError("Plugin field names must be a list of strings")
+        known = {field.name for field in self.fields}
+        unknown = sorted(set(names) - known)
+        if unknown:
+            raise ValueError("Unknown plugin configuration fields: " + ", ".join(unknown))
+        raw = self.load_callback()
+        if not isinstance(raw, dict):
+            raise ValueError("Plugin configuration load function must return a JSON object")
+        for name in names:
+            raw.pop(name, None)
+        if raw:
+            self.save_callback(raw)
+        else:
+            self.delete_callback()
 
     def manifest(self) -> dict[str, Any]:
         raw = self.load_callback()
@@ -330,7 +356,7 @@ def _load_module(path: Path, index: int) -> ModuleType:
 
 
 def discover_plugin_catalog(
-    sdk_config: PluginSdkConfig,
+    directory_config: PluginDirectoryConfig,
     *,
     enabled: dict[str, tuple[str, ...]],
     working_directory: Path | None = None,
@@ -339,11 +365,11 @@ def discover_plugin_catalog(
     root = (working_directory or Path.cwd()).resolve()
     index = 0
     for kind in PLUGIN_KINDS:
-        for directory in sdk_config.directories[kind]:
+        for directory in directory_config.directories[kind]:
             if not directory.exists():
                 continue
             if not directory.is_dir():
-                raise ValueError(f"Plugin SDK path is not a directory: {directory}")
+                raise ValueError(f"Plugin system path is not a directory: {directory}")
             for path in sorted(directory.glob("*.py")):
                 if path.name.startswith("_"):
                     continue
@@ -394,8 +420,8 @@ def close_plugin_instances(instances: list[Any]) -> None:
 
 
 def load_plugin_catalog(config: Any) -> PluginCatalog:
-    """Load category locations from SDK config, then initialize every discovered plugin."""
-    sdk_config = PluginSdkConfig.load(config.plugin_sdk_config_file)
+    """Load category locations from plugin-directory config, then initialize every discovered plugin."""
+    directory_config = PluginDirectoryConfig.load(config.plugin_directories_file)
     managed = ManagedRuntimeConfig.load(config.management_file)
     enabled = {
         "api": managed.selected("api", config.market_api_plugins),
@@ -412,5 +438,7 @@ def load_plugin_catalog(config: Any) -> PluginCatalog:
         "hook": managed.selected("hook", config.hook_plugins),
     }
     return discover_plugin_catalog(
-        sdk_config, enabled=enabled, working_directory=Path.cwd()
+        directory_config,
+        enabled=enabled,
+        working_directory=getattr(config, "working_directory", Path.cwd()),
     )

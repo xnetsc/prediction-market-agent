@@ -1,0 +1,13 @@
+.git
+.venv
+build
+dist
+__pycache__
+.pytest_cache
+tests
+runtime-data
+config/plugins/*.json
+config/application.json
+config/plugin_directories.json
+*.sqlite3*
+*_state*.json

@@ -1,8 +1,8 @@
 from __future__ import annotations
 
-from prediction_market_agent.sdk.config_io import json_file_callbacks
+from prediction_market_agent.plugin_system.config_io import json_file_callbacks
 from prediction_market_agent.plugins.api._binance.adapter import BinancePredictionApiPlugin
-from prediction_market_agent.sdk.discovery import (
+from prediction_market_agent.plugin_system.discovery import (
     PluginConfigField,
     PluginConfiguration,
     PluginInitializationContext,
@@ -13,7 +13,7 @@ from prediction_market_agent.sdk.discovery import (
 
 def initialize_plugin(context: PluginInitializationContext) -> PluginSpec:
     path = context.working_directory / "config" / "plugins" / "binance.json"
-    load, save, storage = json_file_callbacks(path)
+    load, save, delete, storage = json_file_callbacks(path)
     configuration = PluginConfiguration(
         fields=(
             PluginConfigField("BINANCE_API_BASE_URL", "API URL", "string", "Binance REST API 的 HTTPS 根地址。", required=True),
@@ -28,6 +28,7 @@ def initialize_plugin(context: PluginInitializationContext) -> PluginSpec:
         ),
         load_callback=load,
         save_callback=save,
+        delete_callback=delete,
         storage=storage,
     )
 

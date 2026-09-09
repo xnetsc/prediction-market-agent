@@ -44,7 +44,7 @@ class _QuoteSpec:
 
 
 class PolymarketWriteTransport:
-    """Official unified SDK adapter for orders, cancellation, redemption, and pUSD transfer."""
+    """Official unified client adapter for orders, cancellation, redemption, and pUSD transfer."""
 
     def __init__(self, settings: PolymarketPluginConfig, gate: NetworkWriteGate):
         self.settings = settings

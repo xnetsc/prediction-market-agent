@@ -1,62 +1,77 @@
-# 配置参考
+# 配置中心
 
-## 通用运行时 `.env`
+机器人不从 `.env` 读取运行参数。所有通用运行配置保存在最早加载的应用 JSON 中，默认位置为
+`config/application.json`；启动命令可通过 `--config` 指定其他文件。第一次安装运行
+`prediction-market-agent init` 会创建完整配置。文件不存在时使用程序内置默认值，管理界面保存后自动创建。
 
-| 变量 | 用途 |
+启动顺序固定为：定位 `--config` → 校验全部应用字段 → 解析 `working_directory` → 把 `session_db`、
+`auth_db` 等相对路径变成绝对路径 → 加载插件目录和启用状态 → 初始化 SQLite、插件和 Web 应用。数据库
+功能不会在路径确定之前运行。界面修改数据库路径后必须重启，运行中不迁移或切换数据库。
+
+## 管理界面
+
+运行 `prediction-market-agent serve` 后，界面的“程序运行配置”列出每个字段的名称、说明、类型、默认值、
+当前生效值及是否为用户覆盖值。界面支持：
+
+- 保存全部运行配置；
+- 删除单个覆盖值并恢复默认值；
+- 删除整个应用配置文件并恢复全部默认值；
+- 修改插件启用顺序和当前策略；
+- 逐类别编辑插件扫描目录，或删除自定义目录文件恢复内置目录；
+- 修改插件私有字段、删除单个字段值，或删除整个插件配置文件。
+
+运行中的交易进程不会热替换自身配置；界面会明确提示需要重启。管理服务自己的监听地址、端口、数据库
+路径等配置同样在重启后生效。
+
+## 应用配置字段
+
+| JSON 字段 | 用途 |
 |---|---|
-| `PREDICTION_AGENT_ENV_FILE` | 可选的显式 `.env` 路径；否则查找当前目录和项目根目录 |
-| `PLUGIN_SDK_CONFIG_FILE` | 六类插件目录的 SDK JSON |
-| `BOT_MANAGEMENT_FILE` | SDK 保存的有序启用名单和当前策略 |
-| `MARKET_API_PLUGINS` | 管理文件未设置 API 类别时的首次回退名单 |
-| `DECISION_PROVIDERS` | Provider 首次回退顺序 |
-| `RESEARCH_TOOL_PLUGINS` | 研究工具首次回退顺序 |
-| `RISK_PLUGINS`、`HOOK_PLUGINS` | 风控和 Hook 首次回退顺序 |
-| `PREDICTION_AGENT_MAX_TOPICS_PER_CYCLE` | 每平台每轮最多加载的候选主题数 |
-| `PREDICTION_AGENT_MAX_DECISIONS_PER_CYCLE` | 每平台每轮最多决策数 |
-| `PREDICTION_AGENT_INTERVAL_SECONDS` | 连续运行的轮询间隔 |
-| `PREDICTION_AGENT_RUN_UNTIL_EPOCH` | 可选停止时间；零表示持续运行 |
-| `PREDICTION_AGENT_STATE_FILE` | 账户镜像文件；多平台自动加入平台后缀 |
-| `PREDICTION_AGENT_SESSION_DB` | 会话、工具、执行与决策台账 SQLite |
-| `AGENT_MAX_TOOL_STEPS` | 每次最终决策前最多工具轮数 |
-| `AGENT_TOOL_RESULT_CHARS` | 单个工具结果进入上下文的字符预算 |
-| `CONTEXT_WINDOW_CHARS` | Provider 输入窗口预算 |
-| `HISTORY_PER_MARKET` | 自动召回的同市场历史条数 |
-| `DASHBOARD_HOST`、`DASHBOARD_PORT` | 仅回环地址的审计服务监听设置 |
-| `DASHBOARD_REFRESH_SECONDS` | 页面自动刷新间隔 |
+| `working_directory` | 所有相对配置和运行数据路径的基准目录 |
+| `management_file` | 插件启用、禁用、优先级和当前策略文件 |
+| `plugin_directories_file` | 六类插件扫描目录文件 |
+| `max_topics_per_cycle` | 每平台每轮候选主题上限 |
+| `max_decisions_per_cycle` | 每平台每轮 Agent 决策上限 |
+| `interval_seconds` | 连续运行的轮询间隔 |
+| `run_until_epoch` | 可选 Unix 停止时间；0 表示持续运行 |
+| `state_file` | 已确认远端结果的账户镜像；多平台自动加后缀 |
+| `session_db` | 会话、研究步骤、执行动作和决策台账 SQLite |
+| `auth_db` | admin Passkey、公钥计数器和登录会话 SQLite |
+| `admin_session_hours` | 连续无操作失效小时数，默认 72；有效请求会刷新闲置计时 |
+| `admin_absolute_session_hours` | 从登录起的绝对有效上限，默认 168 小时（7 天） |
+| `agent_max_tool_steps` | 每次最终决策前最多研究工具步骤 |
+| `agent_tool_result_chars` | 单个工具结果进入上下文的字符预算 |
+| `context_window_chars` | Provider 输入窗口预算 |
+| `history_per_market` | 自动召回的同市场历史条数 |
+| `dashboard_host`、`dashboard_port` | 管理服务监听地址和端口 |
+| `dashboard_refresh_seconds` | 页面自动刷新间隔 |
 
-`.env.example` 是完整公共样例。通用 Config 刻意没有 API Key、私钥、URL、代理、执行开关、资金、止损、
-网络路径、工具白名单、动态脚本路径或策略阈值。
+应用配置示例见 `examples/application.json`。通用 Config 不包含平台 URL、API Key、私钥、代理、资金、止损、
+网络路径、Agent 动作策略或具体交易策略；这些只能由对应插件定义。
 
-## 插件私有 JSON
+## 插件扫描目录与启用状态
 
-插件有配置时，初始化函数返回字段 schema、JSON 文件存储说明以及读取/保存回调。SDK 不拼接路径、不
-打开配置文件，只调用回调。当前内置配置位于 `config/plugins/`，但位置由各插件初始化函数决定：
+`plugin_directories_file` 指向包含六个固定类别的 JSON。每个类别是有序目录列表；文件不存在时使用安装包
+内置插件目录。示例见 `examples/plugin_directories.json`。
 
-- API：端点、认证、钱包、代理、网络方法/路径规则及平台参数。
-- Provider：客户端路径或 API 端点、模型、凭证、代理、超时。
-- 策略：策略文本路径和该策略自己的候选筛选字段。
-- 研究工具：搜索端点、代理、SSRF 规则、响应/结果/K 线/历史限制。
-- 风控：账户分配、损益规则、动作白名单、动态 Python 文件等具体政策。
-- Hook：订阅事件和输出位置。
+`management_file` 保存每类插件的有序启用名单和当前决策策略。禁用插件不会被导入或初始化，因此只能在
+启用后显示和管理其动态私有字段。
 
-所有字段由插件提供非空 `description`；可声明默认值、必填、枚举或秘密。秘密字段不会回显到浏览器，
-保存空秘密会保留原值。示例 JSON 见 `examples/plugin_configs/`。
+## 插件私有配置
 
-`config/plugins/*.json` 是本机私有运行配置，已在 `.gitignore` 中排除。公开仓库只提交
-`examples/plugin_configs/` 下的脱敏样例；真实 API Key、私钥、钱包、认证头和签名文件不得复制到样例、
-日志、文档或提交记录中。
+插件有配置时，初始化函数返回字段 schema、JSON 存储说明以及读取、保存、删除回调。插件系统不知道文件
+如何持久化，只调用插件提供的回调。内置插件当前使用 `config/plugins/*.json`：
 
-研究工具和 Hook 类别允许启用名单为空；此时 Agent 可直接进入 `DECIDE`，且不会产生对应插件行为。
-API、Provider 和当前决策策略是形成可运行交易流程所需的结构性组件。组合账户/执行控制由启用的风险
-贡献插件提供，具体资金和约束仍只在该插件中。
+- API 插件：端点、认证、钱包、代理、网络规则和平台参数；
+- Provider 插件：客户端路径或 API 端点、模型、凭证、代理、超时；
+- 策略插件：策略文本路径和候选筛选字段；
+- 研究插件：搜索端点、代理、网络约束及结果限制；
+- 风控插件：账户分配、损益规则、动作白名单和动态 Python 文件；
+- Hook 插件：订阅事件和输出位置。
 
-## 代理
+每个字段必须有非空 `description`，可以声明默认值、必填、枚举或秘密类型。秘密字段不会回显；保存空秘密
+保持原值，显式点击“删除此字段值”才会清除。删除必填且没有默认值的字段会让对应插件处于待配置状态，
+直到用户重新填写。
 
-代理不是公共参数。每个需要网络的插件各自定义代理字段：`DIRECT` 表示直连，`SYSTEM` 在 macOS 读取
-系统 HTTPS 代理，也可填写显式 `http://` 或 `https://` 地址。不同 API、Provider、研究工具可使用不同
-路由。
-
-## 线上执行
-
-机器人没有线上/非线上切换。所有 BUY、SELL、CANCEL、REDEEM、TRANSFER 都调用相应 API 插件的
-线上传输；缺字段、签名错误、权限不足或远端拒绝均作为真实执行失败写入决策台账和动作记录。
+公开仓库只提交 `examples/plugin_configs/` 下的 placeholder 样例；真实密钥、钱包和签名文件不得进入版本
+控制、日志或文档。
