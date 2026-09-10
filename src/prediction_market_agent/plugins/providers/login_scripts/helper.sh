@@ -3,15 +3,25 @@
 prediction_login_main() (
     set -euo pipefail
     umask 077
-    if ! command -v python3 >/dev/null 2>&1; then
-        echo 'Python 3.9+ is required. Install Python 3, then copy a new command from the login wizard.' >&2
-        exit 1
-    fi
-    if ! python3 -c 'import sys; assert sys.version_info >= (3, 9)' 2>/dev/null; then
+    helper_python=''
+    fallback_python=''
+    for helper_candidate in python3 python; do
+        if command -v "$helper_candidate" >/dev/null 2>&1; then
+            helper_candidate=$(command -v "$helper_candidate")
+            if "$helper_candidate" -c 'import sys; assert sys.version_info >= (3, 9)' 2>/dev/null; then
+                if [ -z "$fallback_python" ]; then fallback_python="$helper_candidate"; fi
+                if "$helper_candidate" -c 'from cryptography.hazmat.primitives.ciphers.aead import AESGCM' 2>/dev/null; then
+                    helper_python="$helper_candidate"
+                    break
+                fi
+            fi
+        fi
+    done
+    if [ -z "$helper_python" ]; then helper_python="$fallback_python"; fi
+    if [ -z "$helper_python" ]; then
         echo 'Python 3.9+ is required; update Python and restart the login wizard.' >&2
         exit 1
     fi
-    helper_python=$(command -v python3)
     helper_temp=''
     cleanup() {
         if [ -n "$helper_temp" ]; then
