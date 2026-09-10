@@ -109,6 +109,17 @@ class HelperTerminalTests(unittest.TestCase):
         config = {"endpoint": self.endpoint, "secret": self.secret, "expires_at": time.time() + expires}
         return self.launch(render_script(self.platform, config).encode("utf-8"))
 
+    def wait_ready(self, process):
+        if self.ready.wait(20):
+            return
+        if process.poll() is None:
+            process.terminate()
+        out, err = process.communicate(timeout=5)
+        self.fail(
+            "helper not ready; stdout=" + out.decode(errors="replace")[-1000:]
+            + "; stderr=" + err.decode(errors="replace")[-1000:]
+        )
+
     def test_pipeline_preserves_quotes_unicode_backslashes_and_line_endings(self):
         literal = """引号 ' " $HOME $(printf BAD) `printf BAD` \\ \t"""
         if self.platform == "bash":
@@ -152,7 +163,7 @@ class HelperTerminalTests(unittest.TestCase):
 
     def test_terminal_script_forwards_encrypted_callback_and_releases_port(self):
         process = self.helper()
-        self.assertTrue(self.ready.wait(12), process.communicate(timeout=3) if process.poll() is not None else "helper not ready")
+        self.wait_ready(process)
         with urllib.request.urlopen(self.redirect + "?state=fixture&code=fixture-only", timeout=10) as response:
             self.assertEqual(response.status, 200)
         out, err = process.communicate(timeout=10)
@@ -165,7 +176,7 @@ class HelperTerminalTests(unittest.TestCase):
 
     def test_cancel_releases_listener_without_a_callback(self):
         process = self.helper()
-        self.assertTrue(self.ready.wait(12))
+        self.wait_ready(process)
         self.completed = True
         process.communicate(timeout=10)
         self.assert_port_closed()
