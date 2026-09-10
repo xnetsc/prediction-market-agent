@@ -3,6 +3,30 @@ Set-Location $PSScriptRoot
 . "$PSScriptRoot/deploy/ensure-docker.ps1"
 Ensure-Docker
 Invoke-Docker compose -f "$PSScriptRoot/compose.yaml" pull
+$image = if ($env:PREDICTION_AGENT_IMAGE) { $env:PREDICTION_AGENT_IMAGE } else { 'ghcr.io/xnetsc/prediction-market-agent:latest' }
+& "$PSScriptRoot/deploy/prepare-host-proxy.ps1" -Image $image
 Invoke-Docker compose -f "$PSScriptRoot/compose.yaml" up -d --no-build --wait --wait-timeout 180
+$robot = (Invoke-Docker compose -f "$PSScriptRoot/compose.yaml" ps -q robot).Trim()
+if ($robot -notmatch '^[a-f0-9]+$') { throw "Cannot identify the running robot container" }
+& "$PSScriptRoot/deploy/prepare-host-proxy.ps1" -Image $image -AttachContainer $robot
+$dataDirectory = Join-Path $PSScriptRoot "runtime-data"
+New-Item -ItemType Directory -Force $dataDirectory | Out-Null
+$pidFile = Join-Path $dataDirectory "local-callbacks-$robot.pid"
+$existing = if (Test-Path $pidFile) { Get-Process -Id ([int](Get-Content $pidFile)) -ErrorAction SilentlyContinue } else { $null }
+if (-not $existing) {
+    $readyFile = Join-Path $dataDirectory "local-callbacks-$robot.ready"
+    Set-Content $readyFile '' -NoNewline
+    $shellExecutable = (Get-Process -Id $PID).Path
+    $worker = Start-Process $shellExecutable -ArgumentList @('-NoProfile', '-File', "`"$PSScriptRoot/deploy/local-callbacks.ps1`"", '-Container', $robot, '-ReadyFile', "`"$readyFile`"") `
+        -WindowStyle Hidden -PassThru -RedirectStandardOutput "$dataDirectory/local-callbacks.log" `
+        -RedirectStandardError "$dataDirectory/local-callbacks.errors.log"
+    Set-Content $pidFile $worker.Id
+    for ($attempt = 0; $attempt -lt 20; $attempt++) {
+        if ((Get-Item $readyFile).Length -gt 0) { break }
+        if ($worker.HasExited -or $attempt -eq 19) { throw "Local callback forwarding failed to start. See runtime-data/local-callbacks.errors.log" }
+        Start-Sleep -Seconds 1
+    }
+}
 $port = if ($env:PREDICTION_AGENT_PORT) { $env:PREDICTION_AGENT_PORT } else { "8765" }
 Write-Host "Robot is ready: http://127.0.0.1:$port"
+Write-Host "Local client callback forwarding is managed automatically. Log: runtime-data/local-callbacks.log"

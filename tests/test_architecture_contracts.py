@@ -26,7 +26,7 @@ class ArchitectureContractTests(unittest.TestCase):
         self.assertIn('license = "LicenseRef-PolyForm-Noncommercial-1.0.0"', package_metadata)
         self.assertIn('license-files = ["LICENSE"]', package_metadata)
 
-    def test_plugin_system_files_contain_no_platform_or_policy_configuration(self) -> None:
+    def test_plugin_system_files_contain_no_platform_specific_or_policy_configuration(self) -> None:
         plugin_system_files = (
             PACKAGE / "plugin_system" / "config.py",
             PACKAGE / "plugin_system" / "managed_config.py",
@@ -40,7 +40,6 @@ class ArchitectureContractTests(unittest.TestCase):
             "private_key",
             "wallet_address",
             "wallet_id",
-            "http_proxy",
             "stop_loss",
             "take_profit",
             "loss_limit",
@@ -51,6 +50,7 @@ class ArchitectureContractTests(unittest.TestCase):
             "execution_mode",
         )
         self.assertEqual([name for name in forbidden if name in combined], [])
+        self.assertIn("shared_http_proxy", combined)
 
     def test_package_layout_uses_current_application_boundaries(self) -> None:
         directories = {

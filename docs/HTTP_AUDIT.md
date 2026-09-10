@@ -26,12 +26,12 @@
 浏览器中的逻辑操作仍使用 `/api/summary`、`/api/decisions`、`/api/records`、`/api/manifest`、
 `/api/plugins/manage`、`/api/runtime` 和 `/api/settings` 等稳定名称，但不会直接发这些明文 URL 请求。登录后页面把逻辑 URL、
 参数和正文一起放进 AES-GCM 信封，统一提交到 `POST /api/secure`，服务端解密分派后再加密响应。
-回环地址页面则通过 `POST /api/local` 发送明文 JSON `{ "url": "/api/settings", "body": null }`，无需会话、
+回环或明确私网 IP 地址页面则通过 `POST /api/local` 发送明文 JSON `{ "url": "/api/settings", "body": null }`，无需会话、
 Passkey 或加解密；写操作使用相同封装并在 `body` 中提供字段。两条通道复用同一业务分派逻辑。
 
 ## 插件管理
 
-页面动态展示六类插件。禁用项只显示文件名和来源；启用项调用初始化后显示描述、存储说明及字段表单。
+页面动态管理六类插件。Decision Provider 集中显示在“模型服务”，其余五类显示在“插件中心”；禁用项只显示文件名和来源，启用项调用初始化后显示描述、存储说明及字段表单。
 秘密不回显。程序字段、插件目录、启用状态和插件字段都支持保存及删除/恢复：
 
 - `/api/settings`、`/api/settings/reset`
@@ -40,13 +40,15 @@ Passkey 或加解密；写操作使用相同封装并在 `body` 中提供字段�
 - `/api/plugins/config`、`/api/plugins/config/reset`、`/api/plugins/config/delete`
 - `/api/plugins/install`
 - `/api/plugins/refresh`
+- `/api/plugins/controls`、`/api/plugins/controls/action`
+- `/api/plugins/config/choices`
 - `/api/runtime`、`/api/runtime/control`
 - `/api/auth/manage`、`/api/auth/passkeys/*`、`/api/auth/sessions/kick`
 
-非回环访问的管理操作要求有效的 HttpOnly 会话 Cookie、会话请求 token 和 ECDH 派生密钥。保存配置时插件系统只调用
+非本地地址访问的管理操作要求有效的 HttpOnly 会话 Cookie、会话请求 token 和 ECDH 派生密钥。保存配置时插件系统只调用
 插件的 `save_callback` 或 `delete_callback`。刷新会卸载旧注册表并按磁盘最新状态重建。完整认证和信封协议
 见 [AUTHENTICATION.md](AUTHENTICATION.md)。
 
-“机器人运行控制”显示全局 readiness、每个平台配置缺失原因、暂停和 runtime/事件队列状态。全局或逐平台
-暂停写入 `management_file` 并立即执行启停；恢复后只有配置就绪的平台会启动。安装新插件时，页面提交
+“机器人运行控制”显示 AI 主链 readiness、每个平台自己报告的启动原因、暂停和 runtime/事件队列状态。
+全局或逐平台暂停写入 `management_file` 并立即执行启停；恢复后只有插件报告可启动的平台会启动。安装新插件时，页面提交
 类别、目标目录、名称和源码；服务端校验后写入，不覆盖已有文件，新文件默认禁用。

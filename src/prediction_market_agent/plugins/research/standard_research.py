@@ -1,4 +1,5 @@
 from __future__ import annotations
+from prediction_market_agent.plugin_system.network_diagnostics import configured_proxy_route
 
 import html
 import ipaddress
@@ -11,7 +12,7 @@ from dataclasses import asdict, dataclass, field
 from html.parser import HTMLParser
 from typing import Any
 
-from prediction_market_agent.plugin_system.config_io import json_file_callbacks, resolve_plugin_proxy
+from prediction_market_agent.plugin_system.config_io import json_file_callbacks
 from prediction_market_agent.plugin_system.discovery import PluginConfigField, PluginConfiguration, PluginInitializationContext, PluginSpec
 from prediction_market_agent.agent.research import ResearchToolContext, ResearchToolError
 
@@ -227,7 +228,7 @@ def initialize_plugin(context: PluginInitializationContext) -> PluginSpec:
     load, save, delete, storage = json_file_callbacks(context.working_directory / "config" / "plugins" / "research_standard.json")
     fields = (
         PluginConfigField("SEARCH_URL", "搜索 URL", "string", "网页搜索 GET 端点；插件追加 q 查询参数。", required=True),
-        PluginConfigField("HTTP_PROXY", "HTTP 代理", "string", "研究网络请求使用的代理；DIRECT、SYSTEM 或 http(s) URL。", required=True),
+        PluginConfigField("HTTP_PROXY", "代理使用方式", "string", "默认 INHERIT，使用程序设置里的统一代理。也可单独填 DIRECT、HOST、ENVIRONMENT、SYSTEM（仅原生 macOS）或完整 http(s) URL。", required=True, default="INHERIT"),
         PluginConfigField("HTTP_TIMEOUT_SECONDS", "HTTP 超时", "integer", "研究网络请求的超时秒数。", required=True),
         PluginConfigField("USER_AGENT", "User-Agent", "string", "研究网络请求发送的 User-Agent。", required=True),
         PluginConfigField("SEARCH_RESPONSE_BYTES", "搜索响应字节上限", "integer", "单次搜索最多读取的响应字节数。", required=True),
@@ -253,7 +254,7 @@ def initialize_plugin(context: PluginInitializationContext) -> PluginSpec:
         del config
         values = configuration.load()
         settings = StandardResearchSettings(
-            search_url=values["SEARCH_URL"], proxy=resolve_plugin_proxy(values["HTTP_PROXY"], field_name="HTTP_PROXY"), timeout_seconds=values["HTTP_TIMEOUT_SECONDS"], user_agent=values["USER_AGENT"], search_response_bytes=values["SEARCH_RESPONSE_BYTES"], fetch_response_bytes=values["FETCH_RESPONSE_BYTES"], fetch_text_chars=values["FETCH_TEXT_CHARS"], default_search_results=values["DEFAULT_SEARCH_RESULTS"], max_search_results=values["MAX_SEARCH_RESULTS"], query_max_chars=values["QUERY_MAX_CHARS"], allowed_url_schemes=_csv(values["ALLOWED_URL_SCHEMES"]), block_non_public_addresses=values["BLOCK_NON_PUBLIC_ADDRESSES"], kline_intervals=_csv(values["KLINE_INTERVALS"]), default_kline_interval=values["DEFAULT_KLINE_INTERVAL"], kline_default_limit=values["KLINE_DEFAULT_LIMIT"], kline_min_limit=values["KLINE_MIN_LIMIT"], kline_max_limit=values["KLINE_MAX_LIMIT"], market_default_results=values["MARKET_DEFAULT_RESULTS"], market_max_results=values["MARKET_MAX_RESULTS"], history_max_results=values["HISTORY_MAX_RESULTS"],
+            search_url=values["SEARCH_URL"], proxy=context.proxy_settings(str(values["HTTP_PROXY"]), field_name="HTTP_PROXY")["proxy"], timeout_seconds=values["HTTP_TIMEOUT_SECONDS"], user_agent=values["USER_AGENT"], search_response_bytes=values["SEARCH_RESPONSE_BYTES"], fetch_response_bytes=values["FETCH_RESPONSE_BYTES"], fetch_text_chars=values["FETCH_TEXT_CHARS"], default_search_results=values["DEFAULT_SEARCH_RESULTS"], max_search_results=values["MAX_SEARCH_RESULTS"], query_max_chars=values["QUERY_MAX_CHARS"], allowed_url_schemes=_csv(values["ALLOWED_URL_SCHEMES"]), block_non_public_addresses=values["BLOCK_NON_PUBLIC_ADDRESSES"], kline_intervals=_csv(values["KLINE_INTERVALS"]), default_kline_interval=values["DEFAULT_KLINE_INTERVAL"], kline_default_limit=values["KLINE_DEFAULT_LIMIT"], kline_min_limit=values["KLINE_MIN_LIMIT"], kline_max_limit=values["KLINE_MAX_LIMIT"], market_default_results=values["MARKET_DEFAULT_RESULTS"], market_max_results=values["MARKET_MAX_RESULTS"], history_max_results=values["HISTORY_MAX_RESULTS"],
         )
         integers = [settings.timeout_seconds, settings.search_response_bytes, settings.fetch_response_bytes, settings.fetch_text_chars, settings.default_search_results, settings.max_search_results, settings.query_max_chars, settings.kline_default_limit, settings.kline_min_limit, settings.kline_max_limit, settings.market_default_results, settings.market_max_results, settings.history_max_results]
         if any(value <= 0 for value in integers):
@@ -272,4 +273,4 @@ def initialize_plugin(context: PluginInitializationContext) -> PluginSpec:
             raise ValueError("DEFAULT_KLINE_INTERVAL must be listed in KLINE_INTERVALS")
         return StandardResearchContribution(settings)
 
-    return PluginSpec("research_tool", "standard_research", "可配置的网页、跨市场、行情刷新、K线和会话召回工具集。", str(context.module_path), factory, configuration, lambda: None)
+    return PluginSpec("research_tool", "standard_research", "可配置的网页、跨市场、行情刷新、K线和会话召回工具集。", str(context.module_path), factory, configuration, lambda: None, network_routes_callback=lambda: configured_proxy_route(load, "HTTP_PROXY", default="INHERIT", resolver=lambda value: context.proxy_settings(value, field_name="HTTP_PROXY")))

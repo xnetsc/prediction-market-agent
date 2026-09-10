@@ -94,6 +94,11 @@ class ConfigurationTests(unittest.TestCase):
             )
             loaded = Config.load(application)
             self.assertEqual(loaded.agent_max_tool_steps, 5)
+            self.assertEqual(loaded.shared_http_proxy, "HOST")
+            self.assertEqual(
+                loaded.host_proxy_file,
+                (loaded.working_directory / ".deployment" / "host-proxy.json").resolve(),
+            )
             self.assertEqual(loaded.application_config_file, application.resolve())
 
     def test_application_configuration_reset_restores_default(self) -> None:
@@ -127,6 +132,7 @@ class ConfigurationTests(unittest.TestCase):
             "min_liquidity",
         }
         self.assertFalse(forbidden & set(common.__dict__))
+        self.assertEqual(common.shared_http_proxy, "HOST")
 
     def test_all_research_tools_may_be_disabled(self) -> None:
         common = Config(

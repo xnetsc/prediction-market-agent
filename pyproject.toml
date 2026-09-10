@@ -4,12 +4,13 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "prediction-market-agent"
-version = "3.2.0"
+version = "3.3.0"
 description = "Deployable multi-platform prediction-market trading robot"
 license = "LicenseRef-PolyForm-Noncommercial-1.0.0"
 license-files = ["LICENSE"]
 requires-python = ">=3.11"
 dependencies = [
+  "cryptography>=44,<47",
   "fastapi>=0.117,<1",
   "mangum>=0.19,<1",
   "polymarket-client>=0.3,<0.4",
@@ -24,7 +25,7 @@ prediction-market-agent = "prediction_market_agent.__main__:main"
 where = ["src"]
 
 [tool.setuptools.package-data]
-prediction_market_agent = ["config/*.json", "plugins/strategies/prompts/*.md", "plugins/strategies/prompts/*.txt"]
+prediction_market_agent = ["config/*.json", "plugins/strategies/prompts/*.md", "plugins/strategies/prompts/*.txt", "plugins/providers/login_scripts/*", "runtime/static/*.js", "runtime/static/*.css"]
 
 [tool.pytest.ini_options]
 pythonpath = ["src"]

@@ -97,6 +97,12 @@ class RobotRuntimeManager:
                 global_reasons.append("No enabled decision provider is ready")
 
             global_plugins: dict[str, dict[str, Any]] = {}
+            ready_optional: dict[str, list[str]] = {
+                "research_tool": [],
+                "risk": [],
+                "hook": [],
+            }
+            ready_strategy = ""
             for kind, names in (
                 ("decision_strategy", (config.decision_strategy_name,)),
                 ("research_tool", config.research_tool_plugins),
@@ -108,10 +114,11 @@ class RobotRuntimeManager:
                         continue
                     readiness = self._safe_readiness(catalog, kind, name)
                     global_plugins[f"{kind}:{name}"] = readiness.manifest()
-                    if not readiness.ready:
-                        global_reasons.extend(
-                            f"{kind}:{name}: {reason}" for reason in readiness.reasons
-                        )
+                    if readiness.ready:
+                        if kind == "decision_strategy":
+                            ready_strategy = name
+                        else:
+                            ready_optional[kind].append(name)
 
             platform_states: dict[str, dict[str, Any]] = {}
             configured_platforms: list[str] = []
@@ -129,8 +136,8 @@ class RobotRuntimeManager:
                     )
                 paused = name in managed.paused_platforms
                 platform_states[name] = {
-                    "configured": readiness.ready,
-                    "configuration_reasons": list(readiness.reasons),
+                    "ready": readiness.ready,
+                    "startup_reasons": list(readiness.reasons),
                     "paused": paused,
                     "running": False,
                     "runtime": None,
@@ -139,6 +146,9 @@ class RobotRuntimeManager:
                     configured_platforms.append(name)
                 if readiness.ready and not paused:
                     active_platforms.append(name)
+
+            if config.market_api_plugins and not configured_platforms:
+                global_reasons.append("No enabled API platform is ready to start")
 
             global_ready = not global_reasons
             self._status = {
@@ -156,7 +166,15 @@ class RobotRuntimeManager:
                 return self.status()
 
             runtime_config = replace(
-                config, market_api_plugins=tuple(configured_platforms)
+                config,
+                decision_providers=tuple(
+                    name for name, state in provider_states.items() if state.ready
+                ),
+                market_api_plugins=tuple(configured_platforms),
+                decision_strategy_name=ready_strategy,
+                research_tool_plugins=tuple(ready_optional["research_tool"]),
+                risk_plugins=tuple(ready_optional["risk"]),
+                hook_plugins=tuple(ready_optional["hook"]),
             )
             try:
                 engine = TradingEngine(runtime_config, catalog=catalog)
@@ -169,12 +187,14 @@ class RobotRuntimeManager:
                     )
                     events.start()
                     self._events = events
+                    started_platforms: list[str] = []
                     for name in active_platforms:
                         spec = catalog.get("api", name)
                         if spec.runtime is None:
-                            raise ValueError(
-                                f"API plugin {name!r} does not provide a runtime lifecycle"
-                            )
+                            platform_states[name]["startup_reasons"] = [
+                                "API plugin does not provide a runtime lifecycle"
+                            ]
+                            continue
 
                         def submit_scan(
                             topics: tuple[Any, ...],
@@ -190,12 +210,40 @@ class RobotRuntimeManager:
                                 )
                             )
 
-                        spec.runtime.start(
-                            {"platform": name, "submit_scan": submit_scan}
+                        try:
+                            spec.runtime.start(
+                                {"platform": name, "submit_scan": submit_scan}
+                            )
+                            runtime_status = spec.runtime.status()
+                            if not runtime_status.get("running", False):
+                                raise RuntimeError(
+                                    "API plugin runtime returned without entering running state"
+                                )
+                            platform_states[name]["running"] = True
+                            platform_states[name]["runtime"] = runtime_status
+                            started_platforms.append(name)
+                        except Exception as error:
+                            platform_states[name]["startup_reasons"] = [
+                                f"Runtime failed to start: {error}"
+                            ]
+                            try:
+                                spec.runtime.stop()
+                            except Exception:
+                                LOGGER.exception(
+                                    "failed to clean up API plugin runtime %s", name
+                                )
+                    if not started_platforms:
+                        self._status["global_ready"] = False
+                        self._status["global_reasons"].append(
+                            "No enabled API platform runtime started successfully"
                         )
-                        platform_states[name]["running"] = True
-                        platform_states[name]["runtime"] = spec.runtime.status()
-                self._status["running"] = start_runtimes
+                        if events is not None:
+                            events.stop()
+                            self._events = None
+                        engine.close()
+                        self._engine = None
+                        return self.status()
+                self._status["running"] = bool(start_runtimes)
                 return self.status()
             except Exception as error:
                 self._status["global_ready"] = False

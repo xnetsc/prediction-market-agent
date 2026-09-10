@@ -36,12 +36,22 @@ Desktop 首次条款/WSL 配置或系统要求的重启由用户在系统界面�
 [Linux Engine 安装](https://docs.docker.com/engine/install/)。
 
 之后脚本始终拉取已安装完整应用的 GHCR 镜像并启动容器，不创建 Python 环境，也不在本地构建。
-已有 Docker 的等价命令：
+启动应用容器之前检测宿主机代理并从检查容器通过最终地址发起真实 HTTPS 请求；无法直达时先启动宿主机
+转发再做相同验证。检测到代理但验证失败时，交互式启动让用户明确选择直连继续或退出，非交互默认退出。
+正常直达不需要宿主机 Python，macOS/Linux 的备用代理转发才需要 Python 3.9+；Windows 使用 PowerShell/.NET。
+检测结果成为程序的统一代理，默认由 Codex、Claude、平台和研究插件继承；各插件保留 UI 独立覆盖，
+兼容 API 默认直连且不继承。见[宿主机代理](HOST_PROXY.md)。
+已有 Docker 时，仅启动应用容器的命令：
 
 ```bash
 docker compose pull
 docker compose up -d --no-build --wait
 ```
+
+一键脚本还会启动宿主机回调转发管理进程，按本次客户端回调地址临时发布端口，结束后撤销；
+这一步不是单独执行 Compose 的一部分。需要本地 Codex/Claude 网页直连登录时，优先用一键脚本，
+不用另外下载助手，也不需要本机 Python。自定义容器的手动转发命令见
+[客户端账号说明](CLIENT_ACCOUNTS.md#本地容器自动临时映射)。
 
 容器数据保存到 `runtime-data/`，管理界面为 `http://localhost:8765`。`serve` 同时负责管理界面和机器人运行
 监督：全局与插件配置就绪且未暂停时自动启动对应平台插件，无需再启动第二个 Worker 进程。
@@ -51,10 +61,20 @@ Compose 默认只绑定 `127.0.0.1:8765`，该访问免 Passkey 与业务加解�
 只控制容器部署。`docker compose logs -f` 查看日志，`docker compose down` 停止容器，保留宿主机数据。
 旧源码运行数据不会自动迁移；要迁移时将原配置、插件与数据库复制到 `runtime-data/`，并调整其中绝对路径。
 
-镜像包含 Python 应用、全部内置插件、Node.js、Git、Codex CLI 和 Claude CLI。CLI 登录材料在本地 Compose
-中保存在 `runtime-data/home/`；可以用 `docker compose exec robot codex login --device-auth` 或
-`docker compose exec robot claude` 完成各自登录，然后在界面将插件命令配置为 `codex` 或 `claude`。
-宿主机上的客户端登录状态不会自动进入容器。兼容 API 后端直接在界面填写对应私有配置。
+镜像包含 Python 应用、全部内置插件、Node.js、npm、Git、Codex CLI 和 Claude CLI。在界面的“模型服务”
+点击对应客户端登录，本地一键启动器临时发布本次回调端口；向导验证确实到达当前容器的本次流程后无需助手。
+不固定预留回调端口，不改写官方回跳地址；当前 Codex 客户端仍受其自身默认/备用端口限制。客户端验证方式
+默认自动按浏览器环境和访问地址选择，可手动切换为本地回调或设备码/验证码；远程码流程只需管理 HTTPS 入口。
+Codex 使用设备码，Claude 使用官方验证码页面和客户端输入，不影响管理员 Passkey 鉴权。
+本地无法验证时，也可在同一向导中选择系统、复制一次性终端命令运行，继续免手动授权码的回调方式。
+命令会校验脚本完整字节后执行，不需要下载 ZIP 或打开原生可执行文件；Bash/Python 和 PowerShell
+的依赖与故障提示直接出现在登录向导中。
+独立凭据默认保存在 `runtime-data/credentials/codex/` 和 `runtime-data/credentials/claude/`；
+升级安装在 `runtime-data/clients/`，不会继承宿主机或旧 `/root` 账号。兼容 API 的 URL、Key、模型、代理
+仍由其私有配置独立提供。回调映射与容器限制见 [CLIENT_ACCOUNTS.md](CLIENT_ACCOUNTS.md)。
+
+远程云部署无需宿主机代理采集脚本：HOST 在没有快照时读取服务器自身环境，显式 ENVIRONMENT 始终忽略
+宿主机快照，不改写回环地址或启动转发。云平台注入 HTTP(S)_PROXY/NO_PROXY 即可；详情见 [代理说明](HOST_PROXY.md)。
 
 ## GitHub Actions 镜像发布
 
@@ -63,6 +83,10 @@ Compose 默认只绑定 `127.0.0.1:8765`，该访问免 Passkey 与业务加解�
 默认镜像名 `ghcr.io/xnetsc/prediction-market-agent`；默认分支更新 `latest`，每次提交发布 `sha-<完整提交号>`，
 分支和 Git 标签也有对应镜像标签。发布使用工作流自带 `GITHUB_TOKEN` 的 `packages: write` 权限，无需保存 PAT。
 实现依据 [GitHub 镜像发布文档](https://docs.github.com/en/actions/tutorials/publish-packages/publish-docker-images)。
+
+发布前的 login-helpers 作业在 macOS/Linux 执行 Bash 助手测试，在 Windows 执行系统 Windows PowerShell
+助手测试，覆盖真实本机 TCP 回调、加密互通、过期释放及管道字节校验。不再编译/下载 PyInstaller 二进制；
+脚本直接作为 Python 包资源进入最终镜像。
 
 GHCR 新包默认可能为 private，首次发布后须在包设置中设为 public，之后即可匿名拉取；仓库 public 不自动代表
 包也 public。镜像只 COPY 明确列出的源码、元数据和入口脚本，真实配置、数据库、备份不进入镜像。

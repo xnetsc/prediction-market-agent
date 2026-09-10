@@ -10,6 +10,8 @@ from typing import Any, Callable
 
 from .managed_config import ManagedRuntimeConfig, PLUGIN_KINDS
 from .config import PluginDirectoryConfig
+from .config_io import resolve_proxy_settings
+from .network_diagnostics import DiagnosticNetworkRoute
 
 
 FIELD_TYPES = frozenset({"string", "integer", "number", "boolean", "enum", "secret"})
@@ -26,8 +28,11 @@ class PluginConfigField:
     field_type: str
     description: str
     required: bool = False
+
     default: Any = UNSET
     options: tuple[str, ...] = ()
+    selection_only: bool = False
+    choices_depend_on: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         if not _IDENTIFIER.fullmatch(self.name):
@@ -65,6 +70,8 @@ class PluginConfigField:
             "value": "" if self.secret else value,
             "configured": configured,
             "sensitive": self.secret,
+            "selection_only": self.selection_only,
+            "choices_depend_on": list(self.choices_depend_on),
         }
 
 
@@ -78,11 +85,24 @@ class PluginConfiguration:
     delete_callback: Callable[[], None]
     storage: dict[str, Any]
     required: bool = False
+    choices_callback: Callable[[str], list[dict[str, str]]] | None = None
+    choice_fields: tuple[str, ...] = ()
+    presets: tuple[dict[str, Any], ...] = ()
+    context_choices_callback: Callable[[str, dict[str, Any]], list[dict[str, str]]] | None = None
 
     def __post_init__(self) -> None:
         names = [field.name for field in self.fields]
         if len(names) != len(set(names)):
             raise ValueError("Plugin configuration schema contains duplicate fields")
+        if self.choice_fields and not (callable(self.choices_callback) or callable(self.context_choices_callback)):
+            raise ValueError("Dynamic choices require a callback")
+        for field in self.fields:
+            if set(field.choices_depend_on)-set(names):
+                raise ValueError("Unknown choice dependency")
+            if field.selection_only and field.name not in self.choice_fields:
+                raise ValueError("Selection-only field requires dynamic choices")
+        if set(self.choice_fields) - set(names):
+            raise ValueError("Unknown dynamic choice fields")
         if not all(
             callable(callback)
             for callback in (self.load_callback, self.save_callback, self.delete_callback)
@@ -140,9 +160,14 @@ class PluginConfiguration:
             return value
         raise AssertionError(field.field_type)
 
-    def save(self, submitted: dict[str, Any]) -> dict[str, Any]:
+    def save(self, submitted: dict[str, Any], *, clear_secrets: list[str] | None = None) -> dict[str, Any]:
         if not isinstance(submitted, dict):
             raise ValueError("Plugin configuration values must be an object")
+        clear_secrets = [] if clear_secrets is None else clear_secrets
+        if not isinstance(clear_secrets, list) or not all(isinstance(name, str) for name in clear_secrets):
+            raise ValueError("clear_secrets must be a list of field names")
+        if set(clear_secrets) - {field.name for field in self.fields if field.secret}:
+            raise ValueError("Only declared secret fields can be cleared")
         existing_raw = self.load_callback()
         if not isinstance(existing_raw, dict):
             raise ValueError("Plugin configuration load function must return a JSON object")
@@ -154,7 +179,7 @@ class PluginConfiguration:
         values = dict(submitted)
         for field in self.fields:
             if field.secret and values.get(field.name, "") == "":
-                if field.name in existing:
+                if field.name in existing and field.name not in clear_secrets:
                     values[field.name] = existing[field.name]
                 else:
                     values.pop(field.name, None)
@@ -210,11 +235,12 @@ class PluginConfiguration:
             "format": "json",
             "required": self.required,
             "storage": self.storage,
+            "presets": list(self.presets),
             "fields": [
-                field.manifest(
+                {**field.manifest(
                     values.get(field.name, None if field.default is UNSET else field.default),
                     field.name in raw and raw[field.name] not in {None, ""},
-                )
+                ), "dynamic_choices": field.name in self.choice_fields}
                 for field in self.fields
             ],
         }
@@ -225,6 +251,25 @@ class PluginInitializationContext:
     kind: str
     module_path: Path
     working_directory: Path
+    shared_http_proxy: str = "HOST"
+    shared_no_proxy: str = "localhost,127.0.0.1,::1"
+    host_proxy_file: Path | None = None
+
+    def proxy_settings(
+        self,
+        value: str,
+        *,
+        field_name: str = "HTTP_PROXY",
+        snapshot_file: Path | None = None,
+    ) -> dict[str, str]:
+        """Resolve a plugin override against the application's shared proxy."""
+        return resolve_proxy_settings(
+            value,
+            field_name=field_name,
+            inherited_value=self.shared_http_proxy,
+            inherited_no_proxy=self.shared_no_proxy,
+            snapshot_file=snapshot_file or self.host_proxy_file,
+        )
 
 
 @dataclass(frozen=True)
@@ -277,6 +322,19 @@ class PluginRuntime:
 
 
 @dataclass(frozen=True)
+class PluginControls:
+    """Optional management panel; protocols and credentials remain plugin-owned."""
+
+    status_callback: Callable[[], dict[str, Any]]
+    action_callback: Callable[[str, dict[str, Any]], dict[str, Any]]
+    helper_callback: Callable[[str, dict[str, Any]], dict[str, Any]] | None = None
+
+    def __post_init__(self) -> None:
+        if not callable(self.status_callback) or not callable(self.action_callback):
+            raise ValueError("Plugin controls require status and action callbacks")
+
+
+@dataclass(frozen=True)
 class PluginSpec:
     kind: str
     name: str
@@ -287,6 +345,8 @@ class PluginSpec:
     teardown: Callable[[], None] | None = None
     readiness_callback: Callable[[], PluginReadiness] | None = None
     runtime: PluginRuntime | None = None
+    controls: PluginControls | None = None
+    network_routes_callback: Callable[[], tuple[DiagnosticNetworkRoute, ...]] | None = None
 
     def __post_init__(self) -> None:
         if self.kind not in PLUGIN_KINDS:
@@ -297,6 +357,8 @@ class PluginSpec:
             raise ValueError(f"Plugin {self.kind}:{self.name} requires a description")
         if not callable(self.factory):
             raise ValueError(f"Plugin {self.kind}:{self.name} requires a callable factory")
+        if self.network_routes_callback is not None and not callable(self.network_routes_callback):
+            raise ValueError("Plugin network_routes_callback must be callable")
         if not callable(self.teardown):
             raise ValueError(f"Plugin {self.kind}:{self.name} requires a teardown callback")
         if self.readiness_callback is not None and not callable(self.readiness_callback):
@@ -334,6 +396,8 @@ class PluginSpec:
             "configuration": self.configuration.manifest() if self.configuration else None,
             "readiness": readiness,
             "has_runtime": self.runtime is not None,
+            "has_controls": self.controls is not None,
+            "has_network_routes": self.network_routes_callback is not None,
             "runtime": self.runtime.status() if self.runtime else None,
         }
 
@@ -441,9 +505,17 @@ def discover_plugin_catalog(
     *,
     enabled: dict[str, tuple[str, ...]],
     working_directory: Path | None = None,
+    shared_http_proxy: str = "HOST",
+    shared_no_proxy: str = "localhost,127.0.0.1,::1",
+    host_proxy_file: Path | None = None,
 ) -> PluginCatalog:
     catalog = PluginCatalog()
     root = (working_directory or Path.cwd()).resolve()
+    if host_proxy_file is not None:
+        host_proxy_file = Path(host_proxy_file).expanduser()
+        if not host_proxy_file.is_absolute():
+            host_proxy_file = root / host_proxy_file
+        host_proxy_file = host_proxy_file.resolve()
     index = 0
     for kind in PLUGIN_KINDS:
         for directory in directory_config.directories[kind]:
@@ -469,6 +541,9 @@ def discover_plugin_catalog(
                     kind=kind,
                     module_path=path.resolve(),
                     working_directory=root,
+                    shared_http_proxy=shared_http_proxy,
+                    shared_no_proxy=shared_no_proxy,
+                    host_proxy_file=host_proxy_file,
                 )
                 initialized = initializer(context)
                 if not isinstance(initialized, PluginSpec):
@@ -513,7 +588,7 @@ def load_plugin_catalog(config: Any) -> PluginCatalog:
             "decision_provider", config.decision_providers
         ),
         "decision_strategy": (
-            managed.decision_strategy or config.decision_strategy_name,
+            (managed.decision_strategy,) if managed.decision_strategy else ()
         ),
         "research_tool": managed.selected(
             "research_tool", config.research_tool_plugins
@@ -525,4 +600,9 @@ def load_plugin_catalog(config: Any) -> PluginCatalog:
         directory_config,
         enabled=enabled,
         working_directory=getattr(config, "working_directory", Path.cwd()),
+        shared_http_proxy=getattr(config, "shared_http_proxy", "HOST"),
+        shared_no_proxy=getattr(
+            config, "shared_no_proxy", "localhost,127.0.0.1,::1"
+        ),
+        host_proxy_file=getattr(config, "host_proxy_file", None),
     )

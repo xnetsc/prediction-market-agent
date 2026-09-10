@@ -2,6 +2,8 @@ services:
   robot:
     image: ${PREDICTION_AGENT_IMAGE:-ghcr.io/xnetsc/prediction-market-agent:latest}
     pull_policy: always
+    extra_hosts:
+      - "host.proxy.internal:host-gateway"
     ports:
       - "127.0.0.1:${PREDICTION_AGENT_PORT:-8765}:8765"
     volumes:

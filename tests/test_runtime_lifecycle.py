@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import threading
+import tempfile
 import unittest
 from dataclasses import replace
 from pathlib import Path
@@ -17,6 +18,9 @@ from prediction_market_agent.plugin_system.managed_config import ManagedRuntimeC
 from prediction_market_agent.plugins.api._binance.runtime import BinanceEventLoop
 from prediction_market_agent.plugins.api._polymarket.runtime import PolymarketEventLoop
 from prediction_market_agent.runtime.controller import RobotRuntimeManager
+from prediction_market_agent.runtime.bootstrap import bootstrap_engine
+from prediction_market_agent.agent.strategy import PassThroughDecisionStrategy
+from prediction_market_agent.core.risk import UnrestrictedExecutionRiskControl
 
 
 class PlatformOwnedLoopTests(unittest.TestCase):
@@ -245,6 +249,123 @@ class RuntimeManagerTests(unittest.TestCase):
             self.assertEqual(starts, ["ready"])
             self.assertTrue(status["platforms"]["ready"]["running"])
             self.assertFalse(status["platforms"]["incomplete"]["running"])
+            manager.stop()
+
+    def test_provider_and_one_platform_are_sufficient_without_optional_plugins(self) -> None:
+        class Platform:
+            name = "platform"
+            network_rule_engine = SimpleNamespace(target="network:platform")
+
+            def create_write_gateway(self, state, risk):
+                self.received_risk = risk
+                return SimpleNamespace(risk=risk, hooks=None)
+
+        platform = Platform()
+        api = PluginSpec(
+            "api", "platform", "platform", "/tmp/platform.py",
+            lambda config: platform, None, lambda: None,
+        )
+        provider = PluginSpec(
+            "decision_provider", "provider", "provider", "/tmp/provider.py",
+            lambda config: SimpleNamespace(name="provider"), None, lambda: None,
+        )
+
+        class Catalog:
+            def get(self, kind, name):
+                return {("api", "platform"): api,
+                        ("decision_provider", "provider"): provider}[(kind, name)]
+
+            def specs(self, kind):
+                return (api,) if kind == "api" else ()
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config = Config(
+                state_file=root / "state.json",
+                decision_providers=("provider",),
+                market_api_plugins=("platform",),
+            )
+            components = bootstrap_engine(config, catalog=Catalog())
+        self.assertIsInstance(components.decision_strategy, PassThroughDecisionStrategy)
+        self.assertIsInstance(platform.received_risk, UnrestrictedExecutionRiskControl)
+        self.assertEqual(components.platforms["platform"].state.starting_capital, 0.0)
+        self.assertEqual(components.provider.available_names, ("provider",))
+
+    def test_one_runtime_start_failure_does_not_stop_another_platform(self) -> None:
+        working_started = []
+        broken = PluginSpec(
+            "api", "broken", "broken", "/tmp/broken.py", lambda config: None,
+            None, lambda: None, lambda: PluginReadiness(True),
+            PluginRuntime(
+                lambda services: (_ for _ in ()).throw(RuntimeError("start failed")),
+                lambda: None,
+                lambda: {"running": False},
+            ),
+        )
+        working = PluginSpec(
+            "api", "working", "working", "/tmp/working.py", lambda config: None,
+            None, lambda: None, lambda: PluginReadiness(True),
+            PluginRuntime(
+                lambda services: working_started.append(services["platform"]),
+                lambda: None,
+                lambda: {"running": bool(working_started)},
+            ),
+        )
+        provider = PluginSpec(
+            "decision_provider", "provider", "provider", "/tmp/provider.py",
+            lambda config: None, None, lambda: None,
+        )
+        specs = {
+            ("api", "broken"): broken,
+            ("api", "working"): working,
+            ("decision_provider", "provider"): provider,
+        }
+
+        class Catalog:
+            def get(self, kind, name):
+                return specs[(kind, name)]
+
+            def specs(self, kind):
+                return (broken, working) if kind == "api" else ()
+
+            def shutdown(self):
+                return None
+
+        class Engine:
+            def __init__(self, config, *, catalog):
+                self.config = config
+
+            def process_platform_scan(self, platform, topics, decisions):
+                return {}
+
+            def close(self):
+                return None
+
+        config = replace(
+            self._config(),
+            market_api_plugins=("broken", "working"),
+            decision_strategy_name="",
+            risk_plugins=(),
+            hook_plugins=(),
+            research_tool_plugins=(),
+        )
+        manager = RobotRuntimeManager(Path("/tmp/application.json"))
+        with patch(
+            "prediction_market_agent.runtime.controller.Config.load", return_value=config
+        ), patch(
+            "prediction_market_agent.runtime.controller.ManagedRuntimeConfig.load",
+            return_value=ManagedRuntimeConfig(Path("/tmp/management.json")),
+        ), patch(
+            "prediction_market_agent.runtime.controller.load_plugin_catalog",
+            return_value=Catalog(),
+        ), patch(
+            "prediction_market_agent.runtime.controller.TradingEngine", Engine,
+        ):
+            status = manager.reconcile()
+            self.assertTrue(status["running"])
+            self.assertFalse(status["platforms"]["broken"]["running"])
+            self.assertIn("start failed", status["platforms"]["broken"]["startup_reasons"][0])
+            self.assertTrue(status["platforms"]["working"]["running"])
             manager.stop()
 
 

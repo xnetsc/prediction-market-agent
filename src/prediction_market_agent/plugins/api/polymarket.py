@@ -1,4 +1,5 @@
 from __future__ import annotations
+from prediction_market_agent.plugin_system.network_diagnostics import configured_proxy_route
 
 from prediction_market_agent.plugin_system.config_io import json_file_callbacks
 from prediction_market_agent.plugin_system.discovery import (
@@ -37,7 +38,7 @@ def initialize_plugin(context: PluginInitializationContext) -> PluginSpec:
         PluginConfigField("POLYMARKET_BUILDER_API_SECRET", "Builder API Secret", "secret", "使用 Builder relayer 身份时的 API Secret。"),
         PluginConfigField("POLYMARKET_BUILDER_API_PASSPHRASE", "Builder Passphrase", "secret", "使用 Builder relayer 身份时的 API Passphrase。"),
         PluginConfigField("POLYMARKET_TRANSFER_RECIPIENT", "转出地址", "string", "TRANSFER_OUT 操作默认接收 pUSD 的 EVM 地址。"),
-        PluginConfigField("POLYMARKET_HTTP_PROXY", "HTTP 代理", "string", "Polymarket 插件独立使用的代理。填 DIRECT 直连、SYSTEM 读取本机系统代理，或填写 http(s) URL。", required=True),
+        PluginConfigField("POLYMARKET_HTTP_PROXY", "代理使用方式", "string", "默认 INHERIT，使用程序设置里的统一代理。也可单独填 DIRECT、HOST、ENVIRONMENT、SYSTEM（仅原生 macOS）或完整 http(s) URL。", required=True, default="INHERIT"),
         PluginConfigField("POLYMARKET_NETWORK_RULES_JSON", "网络规则 JSON", "string", "Polymarket 插件允许访问的 scheme、host、HTTP method 与各 method 路径模式；由插件构造网络规则引擎。", required=True),
         PluginConfigField("POLYMARKET_SCAN_INTERVAL_SECONDS", "扫描间隔（秒）", "integer", "Polymarket 完成一个市场扫描与决策周期后等待到下一周期的秒数。", default=60),
         PluginConfigField("POLYMARKET_ERROR_BACKOFF_SECONDS", "失败退避初值（秒）", "integer", "Polymarket 周期失败后的首次重试等待秒数；连续失败时指数增长。", default=30),
@@ -50,10 +51,16 @@ def initialize_plugin(context: PluginInitializationContext) -> PluginSpec:
 
     instances = []
 
-    def settings() -> PolymarketPluginConfig:
-        return PolymarketPluginConfig.from_mapping(
-            {name: str(value) for name, value in configuration.load().items()}
+    def resolved_values() -> dict[str, str]:
+        values = {name: str(value) for name, value in configuration.load().items()}
+        route = context.proxy_settings(
+            values["POLYMARKET_HTTP_PROXY"], field_name="POLYMARKET_HTTP_PROXY"
         )
+        values["POLYMARKET_HTTP_PROXY"] = route["proxy"] or "DIRECT"
+        return values
+
+    def settings() -> PolymarketPluginConfig:
+        return PolymarketPluginConfig.from_mapping(resolved_values())
 
     def scan(maximum_topics: int, page_size: int):
         if not instances:
@@ -97,9 +104,7 @@ def initialize_plugin(context: PluginInitializationContext) -> PluginSpec:
 
     def factory(config):
         del config
-        instance = PolymarketApiPlugin(
-            {name: str(value) for name, value in configuration.load().items()}
-        )
+        instance = PolymarketApiPlugin(resolved_values())
         instances.append(instance)
         return instance
 
@@ -110,6 +115,14 @@ def initialize_plugin(context: PluginInitializationContext) -> PluginSpec:
         origin=str(context.module_path),
         factory=factory,
         configuration=configuration,
+        network_routes_callback=lambda: configured_proxy_route(
+            load,
+            "POLYMARKET_HTTP_PROXY",
+            default="INHERIT",
+            resolver=lambda value: context.proxy_settings(
+                value, field_name="POLYMARKET_HTTP_PROXY"
+            ),
+        ),
         teardown=lambda: close_plugin_instances(instances),
         readiness_callback=readiness,
         runtime=PluginRuntime(event_loop.start, event_loop.stop, event_loop.status),

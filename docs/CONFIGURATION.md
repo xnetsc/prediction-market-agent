@@ -3,8 +3,9 @@
 机器人不从 `.env` 读取运行参数。所有通用运行配置保存在最早加载的应用 JSON 中，默认位置为
 `config/application.json`；启动命令可通过 `--config` 指定其他文件。第一次安装运行
 `prediction-market-agent init` 会创建完整配置。文件不存在时使用程序内置默认值，管理界面保存后自动创建。
-应用启动配置与机器人运行就绪是两个阶段：Web 服务可在插件选择或私有配置尚未完成时启动；机器人逻辑
-只在结构性全局依赖与相应插件 readiness 通过后启动。
+应用启动配置与机器人运行就绪是两个阶段：Web 服务可在插件选择或私有配置尚未完成时启动；机器人主链
+只要求至少一个决策 Provider 可用，并且至少一个 API 平台 runtime 成功启动。策略、研究、风控和 Hook
+均为可选增强。通用框架不按字段名判断插件私有配置，只调用插件自己的 readiness/start/status 回调。
 
 启动顺序固定为：定位 `--config` → 校验全部应用字段 → 解析 `working_directory` → 把 `session_db`、
 `auth_db` 等相对路径变成绝对路径 → 加载插件目录和启用状态 → 初始化 SQLite、插件和 Web 应用。数据库
@@ -43,11 +44,18 @@
 | `agent_tool_result_chars` | 单个工具结果进入上下文的字符预算 |
 | `context_window_chars` | Provider 输入窗口预算 |
 | `history_per_market` | 自动召回的同市场历史条数 |
+| `shared_http_proxy` | 统一代理；除兼容 API 外，支持联网的内置插件默认继承 |
+| `shared_no_proxy` | 统一代理的绕过主机，回环地址始终自动加入 |
+| `host_proxy_file` | 一键启动器写入的宿主机代理检测/转发信息文件 |
 | `dashboard_host`、`dashboard_port` | 管理服务监听地址和端口 |
 | `dashboard_refresh_seconds` | 页面自动刷新间隔 |
 
-应用配置示例见 `examples/application.json`。通用 Config 不包含平台 URL、API Key、私钥、代理、资金、止损、
-网络路径、扫描间隔、分页/每轮规模、失败退避、Agent 动作策略或具体交易策略；这些只能由对应插件定义。
+应用配置示例见 `examples/application.json`。通用 Config 只提供各插件可选择继承的统一网络代理，不包含
+任何平台专属代理、平台 URL、API Key、私钥、资金、止损、网络白名单、扫描间隔、分页/每轮规模、失败退避、
+Agent 动作策略或具体交易策略；这些只能由对应插件定义。兼容 API 不继承统一代理，默认 `DIRECT`。
+
+`shared_http_proxy` 支持 `HOST`、`ENVIRONMENT`、`DIRECT`、`SYSTEM`（仅原生 macOS）或完整 HTTP(S) URL。
+平台、客户端和研究插件的私有代理字段默认 `INHERIT`；改成 `DIRECT` 或 URL 后只覆盖该插件。
 
 ## 插件扫描目录与启用状态
 
@@ -56,9 +64,11 @@
 其中一个当前配置目录写入新 `.py` 文件；不覆盖同名文件，安装后保持禁用。示例见
 `examples/plugin_directories.json`。
 
-`management_file` 保存每类插件的有序启用名单、当前决策策略、全局暂停及逐平台暂停名单。禁用插件不会被
+`management_file` 保存每类插件的有序启用名单、可为空的当前决策策略、全局暂停及逐平台暂停名单。禁用插件不会被
 导入或初始化，因此只能在启用后显示和管理其动态私有字段。API/Provider/策略允许暂时为空；运行状态页会
 显示全局或平台阻塞原因，补齐后自动激活。完整文件结构见 `examples/plugin_selection.json`。
+
+显式保存空 `decision_strategy` 表示不启用策略，不能回退到进程启动时的旧策略；此时使用中性候选透传。
 
 ## 插件私有配置
 

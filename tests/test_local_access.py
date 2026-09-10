@@ -13,6 +13,20 @@ from prediction_market_agent.runtime.dashboard import create_app
 
 
 class LocalAccessTests(unittest.TestCase):
+    def test_responsive_assets_are_public_but_only_allowlisted(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root=Path(directory)
+            config=Config(working_directory=root,session_db=root/'sessions.sqlite3',auth_db=root/'auth.sqlite3',
+                          management_file=root/'selection.json',plugin_directories_file=root/'directories.json')
+            with TestClient(create_app(config,start_robot=False),base_url='https://robot.example') as client:
+                for asset,kind in [('dashboard.css','text/css'),('dashboard-shell.js','application/javascript')]:
+                    response=client.get('/assets/'+asset)
+                    self.assertEqual(response.status_code,200)
+                    self.assertIn(kind,response.headers['content-type'])
+                self.assertEqual(client.get('/assets/not-public.json').status_code,404)
+                self.assertIn('/assets/dashboard.css',client.get('/').text)
+                self.assertEqual(client.post('/api/local',json={'url':'/api/plugins/controls'}).status_code,403)
+
     def test_loopback_hosts_use_plaintext_without_a_passkey_or_crypto(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -21,7 +35,9 @@ class LocalAccessTests(unittest.TestCase):
                 plugin_directories_file=root / "directories.json",
                 application_config_file=root / "application.json")
             app = create_app(config, start_robot=False)
-            for host in ("127.0.0.1", "127.0.0.2", "localhost", "[::1]"):
+            for host in ("127.0.0.1", "127.0.0.2", "localhost", "[::1]", "192.168.1.2",
+                         "10.2.3.4", "172.16.0.1", "172.31.255.254", "169.254.1.2",
+                         "[fd12::1]", "[fe80::1]", "[::ffff:192.168.1.2]"):
                 with self.subTest(host=host), TestClient(app, base_url="http://localhost", headers={"Host": host}) as client, patch.object(
                     AdminAuthStore, "decrypt", side_effect=AssertionError("Local request used crypto")
                 ), patch.object(AdminAuthStore, "session", side_effect=AssertionError("Local request used a session")):
@@ -43,8 +59,10 @@ class LocalAccessTests(unittest.TestCase):
                 auth_db=root / "auth.sqlite3", management_file=root / "selection.json",
                 plugin_directories_file=root / "directories.json")
             app = create_app(config, start_robot=False)
-            for host in ("robot.example", "localhost.evil.example", "192.168.1.2"):
-                with self.subTest(host=host), TestClient(app, base_url=f"https://{host}") as client:
+            for host in ("robot.example", "localhost.evil.example", "192.169.1.2",
+                         "172.15.1.1", "172.32.0.1", "0.0.0.0", "[::]", "100.64.0.1",
+                         "192.0.2.1", "224.0.0.1", "[2001:db8::1]"):
+                with self.subTest(host=host), TestClient(app, base_url="https://robot.example", headers={"Host": host}) as client:
                     self.assertIn("初始化管理员", client.get("/").text)
                     result = client.post("/api/local", json={"url": "/api/settings"},
                         headers={"X-Forwarded-For": "127.0.0.1", "X-Forwarded-Host": "localhost"})
