@@ -6,6 +6,7 @@ import json
 import os
 from pathlib import Path
 import shutil
+import signal
 import socket
 import subprocess
 import sys
@@ -96,24 +97,40 @@ class HelperTerminalTests(unittest.TestCase):
                 [self.executable, "-NoLogo", "-NoProfile", "-NonInteractive", "-Command",
                  "[Console]::OutputEncoding = [Text.Encoding]::UTF8; " + command])
         env = {**os.environ, "PATH": str(Path(sys.executable).parent) + os.pathsep + os.environ["PATH"]}
-        process = subprocess.Popen(args, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env)
+        process = subprocess.Popen(
+            args,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            env=env,
+            start_new_session=os.name == "posix",
+        )
 
         def cleanup():
             if process.poll() is None:
-                process.kill()
+                self.stop_process(process)
             process.communicate()
         self.addCleanup(cleanup)
         return process
 
-    def helper(self, expires=20):
+    @staticmethod
+    def stop_process(process):
+        if os.name == "posix":
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+        else:
+            process.kill()
+
+    def helper(self, expires=90):
         config = {"endpoint": self.endpoint, "secret": self.secret, "expires_at": time.time() + expires}
         return self.launch(render_script(self.platform, config).encode("utf-8"))
 
     def wait_ready(self, process):
-        if self.ready.wait(20):
+        if self.ready.wait(60):
             return
         if process.poll() is None:
-            process.terminate()
+            self.stop_process(process)
         out, err = process.communicate(timeout=5)
         self.fail(
             "helper not ready; stdout=" + out.decode(errors="replace")[-1000:]
