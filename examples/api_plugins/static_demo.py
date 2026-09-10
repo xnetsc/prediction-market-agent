@@ -214,6 +214,9 @@ def initialize_plugin(context: PluginInitializationContext) -> PluginSpec:
         submit = services.get("submit_scan")
         if not callable(submit):
             raise ValueError("Static demo runtime requires submit_scan")
+        discover = services.get("discover_markets")
+        if not callable(discover):
+            raise ValueError("Static demo runtime requires discover_markets")
         values = configuration.load()
         interval = int(values["SCAN_INTERVAL_SECONDS"])
         plugin = instances[-1]
@@ -221,9 +224,8 @@ def initialize_plugin(context: PluginInitializationContext) -> PluginSpec:
 
         def run():
             while not stop_event.is_set():
-                topics = plugin.list_topics(
-                    offset=0, limit=int(values["MAX_TOPICS_PER_CYCLE"])
-                ).topics
+                # This plugin owns the schedule only; the framework decides what to look at.
+                topics = discover(int(values["MAX_TOPICS_PER_CYCLE"]))
                 submit(topics, int(values["MAX_DECISIONS_PER_CYCLE"]))
                 if stop_event.wait(interval):
                     break

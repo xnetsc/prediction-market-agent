@@ -3,13 +3,42 @@ const CATEGORY_HELP = {
     api: {title:'交易平台', role:'连接市场与账户', description:'读取市场、持仓和订单，并接收机器人发出的操作。平台自己决定什么时候扫描，发现机会后通知机器人。', steps:['扫描市场','提交发现','接收查询或订单'], next:'启用你要使用的平台，填写它要求的账户、网络与扫描配置。不使用的平台保持关闭。'},
     decision_provider: {title:'AI 模型服务', role:'让模型理解信息并做判断', description:'提供实际执行推理的模型。客户端账号和兼容 API 是并列方式，与“采用什么交易策略”不是一回事。', steps:['接收策略与证据','调用所选模型','返回判断或工具请求'], next:'至少配置一种可用服务。顺序数字越小越先尝试，不可用时再尝试下一个；不会同时向所有服务发请求。'},
     decision_strategy: {title:'决策策略', role:'可选地告诉模型如何分析', description:'定义模型需要关注的证据、判断过程和输出要求。它是可选分析方法，不是模型账号，也不是机器人启动条件。', steps:['选择策略或中性透传','可选地读取策略文本','形成交易建议'], next:'可选择一项策略并查看其文本，也可选择“不使用决策策略”，让平台候选直接进入模型判断。'},
+    market_discovery: {title:'标的发现策略', role:'决定每轮先看哪些标的', description:'机器人每轮只能深入分析少数标的。发现策略决定把这几个名额给谁：宽扫平台、按实测结果排序、再由模型挑最终名单。未安装插件时使用内置策略。', steps:['宽扫平台全部标的','按实测优先级排序','模型挑出本轮名单'], next:'不装插件也在工作。要用自己的发现逻辑再安装插件；内置策略的当前全文可在下方导出查看。'},
     research_tool: {title:'信息与研究', role:'帮助模型补充证据', description:'在已有市场数据不够时，让模型主动查询外部资料。是否调用、查询什么，由当次决策过程决定。', steps:['模型提出问题','工具收集信息','结果回到决策'], next:'启用需要的信息工具，并补齐其访问配置。工具可用不代表每次都会被调用。'},
     risk: {title:'风险检查', role:'按你的规则检查行为', description:'在相关检查点审核决策、资金或网络请求。实际允许什么、限制什么，由已启用插件及其配置决定。', steps:['接收待检查行为','逐项应用规则','放行、调整或拒绝'], next:'逐个查看启用规则及适用范围。不要把“已启用”理解成已经配置了止损或保证不会亏损。'},
     hook: {title:'流程扩展', role:'在业务步骤前后增加处理', description:'在下单前后等指定位置执行额外逻辑，例如记录或通知。它与用于分析的策略、用于审核的规则分工不同。', steps:['进入业务步骤','执行扩展回调','继续后续处理'], next:'没有额外需求可以不启用。自定义扩展属于可执行代码，只安装你信任的内容。'}
 };
 const SERVICE_TITLES = {codex:'Codex',claude:'Claude',openai_compatible:'兼容 API · OpenRouter / 自定义'};
-const PLUGIN_CENTER_KINDS = ['api','decision_strategy','research_tool','risk','hook'];
+const PLUGIN_CENTER_KINDS = ['api','market_discovery','decision_strategy','research_tool','risk','hook'];
+const STRATEGY_LANES = {market_discovery:'discovery', decision_strategy:'decision'};
 const serviceTitle = name => SERVICE_TITLES[name] || name || '未记录';
+function strategyLanePanel(kind,m){
+    const lane=STRATEGY_LANES[kind],on=m.market_discovery_evolution!==false;
+    return '<article class="plugin configuration-card strategy-lane" id="lane_'+kind+'">'
+        +'<div class="section-heading"><h4>策略进化与导出</h4><span class="badge ready">内置策略持续进化</span></div>'
+        +'<p class="muted">未安装插件时由内置策略工作。内置策略不作为可编辑配置提供，但它实际发给模型的全文可以随时导出查看。它按已完成决策的实测结果自动调整，并且在你使用自己的插件期间也继续测量，所以切回来时不会是旧的。</p>'
+        +'<div class="selection-row"><label><input type="checkbox" id="evolutionToggle" '+(on?'checked':'')+'> 我自己的策略插件也自动进化</label></div>'
+        +'<p class="muted">关闭后，你的插件只用你写的原文；框架学到的内容不再附加。你的策略文件任何时候都不会被改写，进化只是可随时关闭的叠加层。内置策略不受此开关影响。</p>'
+        +'<div class="toolbar form-actions"><button onclick="exportStrategy(\''+lane+'\')">导出当前生效全文</button>'
+        +'<span id="exportStatus_'+lane+'" class="status" role="status"></span></div>'
+        +'<div id="exportResult_'+lane+'"></div></article>';
+}
+async function exportStrategy(lane){
+    const status=document.getElementById('exportStatus_'+lane),target=document.getElementById('exportResult_'+lane);
+    setOperationStatus(status,'正在导出…','pending');
+    try{
+        const result=await post('/api/strategies/export',{lane}),view=result.lanes[lane];
+        const blob=new Blob([JSON.stringify(result,null,2)],{type:'application/json'});
+        const parts=[section(view,'当前生效')];
+        if(view.built_in)parts.push(section(view.built_in,'内置策略（在你的插件运行期间仍在进化）'));
+        target.innerHTML=parts.join('')+'<p class="muted"><a download="strategy-'+lane+'.json" href="'+URL.createObjectURL(blob)+'">下载完整 JSON（含全部教训与测量表）</a></p>';
+        setOperationStatus(status,'已导出 '+view.prompt_chars+' 字符的策略全文');
+    }catch(e){setOperationStatus(status,e.message,'danger')}
+    function section(v,title){
+        return '<details class="diagnostic-detail"><summary>'+esc(title)+'：'+esc(v.strategy)+'（'+esc(v.source)+'，'+v.prompt_chars+' 字符，教训 '+v.lessons_applied.length+' 条生效 / '+v.lessons_all.length+' 条在库）</summary>'
+            +'<pre class="export-text">'+esc(v.prompt_text)+'</pre></details>';
+    }
+}
 const actionTitle = value => ({BUY:'买入',SELL:'卖出',HOLD:'观望',CANCEL:'撤单'}[value] || value || '尚未形成');
 const decisionStatusTitle = value => ({STARTED:'分析中',PROVIDER_ERROR:'模型调用失败',RISK_REJECTED:'规则拒绝，未执行',EXECUTION_ERROR:'执行失败',COMPLETED:'流程已完成',HOLD:'观望，未下单',ERROR:'出现错误',FAILED:'失败',PENDING:'处理中',EXECUTED:'已提交执行',REJECTED:'被拒绝'}[String(value).toUpperCase()]||'平台状态：'+(value||'未记录'));
 function managementFeedback(){return document.getElementById(location.hash.startsWith('#model')?'modelManageStatus':'manageStatus')}
@@ -34,6 +63,7 @@ function renderManager(m) {
         const parent=kind==='decision_provider'?document.getElementById('modelConfigurations'):manager;
         const group=controlNode('div','',parent);group.id='category_'+kind;group.className='plugin-category';group.dataset.kind=kind;
         const grid=controlNode('div','',group);grid.className='config-grid';
+        if(STRATEGY_LANES[kind])group.insertAdjacentHTML('afterbegin',strategyLanePanel(kind,m));
         if(kind==='decision_strategy'){
             const none=controlNode('article','',grid);none.className='plugin configuration-card strategy-none';
             const selected=!(m.plugins[kind]||[]).some(p=>p.enabled);

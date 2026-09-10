@@ -17,9 +17,21 @@ class PlatformScanEvent:
     created_at: int = field(default_factory=lambda: int(time.time()))
 
 
+@dataclass(frozen=True)
+class PlatformDiscoveryEvent:
+    """A platform runtime asking the framework to decide what this cycle should look at."""
+
+    platform: str
+    maximum_topics: int
+    created_at: int = field(default_factory=lambda: int(time.time()))
+
+
+BusinessEvent = PlatformScanEvent | PlatformDiscoveryEvent
+
+
 @dataclass
 class _Envelope:
-    event: PlatformScanEvent
+    event: BusinessEvent
     completed: threading.Event = field(default_factory=threading.Event)
     result: Any = None
     error: BaseException | None = None
@@ -28,7 +40,7 @@ class _Envelope:
 class RobotEventLoop:
     """Generic business-event consumer; platform plugins own event production timing."""
 
-    def __init__(self, handler: Callable[[PlatformScanEvent], Any]):
+    def __init__(self, handler: Callable[[BusinessEvent], Any]):
         self._handler = handler
         self._queue: queue.Queue[_Envelope | None] = queue.Queue()
         self._lock = threading.RLock()
@@ -69,7 +81,7 @@ class RobotEventLoop:
             finally:
                 self._queue.task_done()
 
-    def submit(self, event: PlatformScanEvent) -> Any:
+    def submit(self, event: BusinessEvent) -> Any:
         with self._lock:
             if self._thread is None or not self._thread.is_alive():
                 raise RuntimeError("Robot event loop is not running")

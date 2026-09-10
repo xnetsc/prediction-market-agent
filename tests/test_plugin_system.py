@@ -11,6 +11,7 @@ from prediction_market_agent.core.hooks import HookManager
 from prediction_market_agent.plugin_system.config_io import json_file_callbacks
 from prediction_market_agent.plugin_system.management import PluginManagementService
 from prediction_market_agent.plugin_system.managed_config import ManagedRuntimeConfig
+from prediction_market_agent.plugin_system.managed_config import PLUGIN_KINDS
 from prediction_market_agent.plugin_system.discovery import (
     PluginCatalog,
     PluginConfigField,
@@ -200,7 +201,7 @@ class PluginSystemTests(unittest.TestCase):
             )
             catalog = discover_plugin_catalog(
                 PluginDirectoryConfig.load(directory_path),
-                enabled={kind: () for kind in ("api", "decision_provider", "decision_strategy", "research_tool", "risk", "hook")},
+                enabled={kind: () for kind in PLUGIN_KINDS},
             )
             self.assertEqual(catalog.discovered_names("api"), ("danger",))
             self.assertEqual(catalog.names("api"), ())

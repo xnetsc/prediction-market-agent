@@ -19,7 +19,7 @@ from prediction_market_agent.plugins.api._binance.runtime import BinanceEventLoo
 from prediction_market_agent.plugins.api._polymarket.runtime import PolymarketEventLoop
 from prediction_market_agent.runtime.controller import RobotRuntimeManager
 from prediction_market_agent.runtime.bootstrap import bootstrap_engine
-from prediction_market_agent.agent.strategy import PassThroughDecisionStrategy
+from prediction_market_agent.agent.strategy import BuiltInDecisionStrategy
 from prediction_market_agent.core.risk import UnrestrictedExecutionRiskControl
 
 
@@ -36,17 +36,25 @@ class PlatformOwnedLoopTests(unittest.TestCase):
         for runtime_type in (BinanceEventLoop, PolymarketEventLoop):
             with self.subTest(runtime=runtime_type.__name__):
                 called = threading.Event()
-                values: list[tuple[int, int]] = []
-                runtime = runtime_type(lambda: settings, lambda topics, page: (topics, page))
+                values: list[tuple[object, int]] = []
+                asked: list[int] = []
+                runtime = runtime_type(lambda: settings)
+
+                def discover_markets(maximum_topics: int):
+                    asked.append(maximum_topics)
+                    return ("discovered",)
 
                 def submit_scan(topics, decisions: int) -> None:
                     values.append((topics, decisions))
                     called.set()
 
-                runtime.start({"submit_scan": submit_scan})
+                runtime.start(
+                    {"submit_scan": submit_scan, "discover_markets": discover_markets}
+                )
                 self.assertTrue(called.wait(1), "first plugin-owned cycle did not start")
                 runtime.stop()
-                self.assertEqual(values, [((3, 100), 2)])
+                self.assertEqual(asked, [3], "platform must ask the framework to discover")
+                self.assertEqual(values, [(("discovered",), 2)])
                 self.assertFalse(runtime.status()["running"])
 
 
@@ -286,7 +294,8 @@ class RuntimeManagerTests(unittest.TestCase):
                 market_api_plugins=("platform",),
             )
             components = bootstrap_engine(config, catalog=Catalog())
-        self.assertIsInstance(components.decision_strategy, PassThroughDecisionStrategy)
+        self.assertIsInstance(components.decision_strategy, BuiltInDecisionStrategy)
+        self.assertIn("HOLD IS THE DEFAULT", components.decision_strategy.instructions)
         self.assertIsInstance(platform.received_risk, UnrestrictedExecutionRiskControl)
         self.assertEqual(components.platforms["platform"].state.starting_capital, 0.0)
         self.assertEqual(components.provider.available_names, ("provider",))

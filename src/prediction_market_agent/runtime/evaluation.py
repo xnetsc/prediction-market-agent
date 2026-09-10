@@ -7,6 +7,7 @@ from dataclasses import asdict, replace
 from typing import Any
 
 from ..agent.decision import DecisionProviderError
+from ..agent.evolution import prompt_json_payload, render_overlay_block
 from ..agent.research import ResearchToolContext, ResearchToolbox
 from ..plugin_system.contracts import Market, OrderBook, Outcome, Topic, TopicDetail
 from .bootstrap import PlatformRuntime
@@ -54,6 +55,31 @@ def compact_market(
 class MarketEvaluationMixin:
     """Build explainable contexts, invoke the Agent, and apply risk decisions."""
 
+    def search_market_candidates(self, query: str, maximum: int) -> dict[str, Any]:
+        """Ask every registered platform for candidates; the Agent judges relevance."""
+        results: dict[str, Any] = {}
+        for name, item in self.platforms.items():
+            if not item.plugin.capabilities.market_search:
+                results[name] = {
+                    "available": False,
+                    "reason": "plugin has no market search",
+                }
+                continue
+            try:
+                candidates = item.plugin.search_market_candidates(query, maximum)
+                results[name] = {
+                    "available": True,
+                    "capabilities": item.plugin.capabilities.to_dict(),
+                    "candidates": [candidate.to_dict() for candidate in candidates],
+                }
+            except Exception as error:
+                results[name] = {"available": False, "reason": str(error)}
+        return {
+            "query": query,
+            "platforms": results,
+            "warning": "The Agent, not retrieval scores, must judge semantic equivalence.",
+        }
+
     def _evaluate_topic(self, runtime: PlatformRuntime, topic: Topic) -> None:
         detail = runtime.plugin.get_topic(topic.topic_id)
         if detail.end_time_ms is None:
@@ -92,6 +118,9 @@ class MarketEvaluationMixin:
         bid, ask = best_prices(book)
         runtime.gateway.mark(token_id, (bid + ask) / 2.0)
         position = runtime.state.positions.get(token_id)
+        # The strategy text reaches the model once, through the instruction block; the context
+        # JSON carries only which priors and lessons were applied.
+        strategy_payload = self.decision_evolution.payload()
         current = {
             "market": compact_market(platform, topic, detail, market),
             "outcome": {
@@ -121,7 +150,7 @@ class MarketEvaluationMixin:
                 for name, item in self.platforms.items()
             },
             "active_api_plugin": runtime.plugin.configuration_manifest(),
-            "decision_strategy_plugin": self.decision_strategy.to_prompt_payload(),
+            "decision_strategy_plugin": prompt_json_payload(strategy_payload),
             "execution_risk_manifest": runtime.gateway.risk.manifest(),
             "risk_rule_engines": self.risk.manifests(),
         }
@@ -143,34 +172,6 @@ class MarketEvaluationMixin:
             context=current,
         )
 
-        def search_markets(query: str, maximum: int) -> dict[str, Any]:
-            results: dict[str, Any] = {}
-            for name, item in self.platforms.items():
-                if not item.plugin.capabilities.market_search:
-                    results[name] = {
-                        "available": False,
-                        "reason": "plugin has no market search",
-                    }
-                    continue
-                try:
-                    candidates = item.plugin.search_market_candidates(query, maximum)
-                    results[name] = {
-                        "available": True,
-                        "capabilities": item.plugin.capabilities.to_dict(),
-                        "candidates": [
-                            candidate.to_dict() for candidate in candidates
-                        ],
-                    }
-                except Exception as error:
-                    results[name] = {"available": False, "reason": str(error)}
-            return {
-                "query": query,
-                "platforms": results,
-                "warning": (
-                    "The Agent, not retrieval scores, must judge semantic equivalence."
-                ),
-            }
-
         toolbox = ResearchToolbox(
             self.research_contributions,
             ResearchToolContext(
@@ -182,7 +183,7 @@ class MarketEvaluationMixin:
                 token_id=token_id,
                 symbol=detail.reference_symbol,
                 history_limit=self.config.history_per_market,
-                market_search=search_markets,
+                market_search=self.search_market_candidates,
             ),
         )
 
@@ -203,6 +204,9 @@ class MarketEvaluationMixin:
                 ),
                 tool_descriptions=toolbox.descriptions,
                 step_recorder=record_agent_step,
+                instructions=render_overlay_block(
+                    strategy_payload, "CONFIGURED_DECISION_STRATEGY"
+                ),
             )
         except DecisionProviderError as error:
             self.memory.record_turn(

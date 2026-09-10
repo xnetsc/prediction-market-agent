@@ -6,6 +6,7 @@ from dataclasses import asdict, dataclass
 from typing import Any, Callable, Protocol
 
 from ..core.config import Config
+from .evolution import render_overlay_block
 
 
 DECISION_SCHEMA: dict[str, Any] = {
@@ -20,6 +21,11 @@ DECISION_SCHEMA: dict[str, Any] = {
         "confidence": {"type": "number", "minimum": 0, "maximum": 1},
         "estimated_probability": {"type": "number", "minimum": 0, "maximum": 1},
         "rationale": {"type": "string", "minLength": 1, "maxLength": 1200},
+        "priors": {
+            "type": "array",
+            "maxItems": 4,
+            "items": {"type": "string", "maxLength": 80},
+        },
     },
     "required": [
         "action",
@@ -30,6 +36,7 @@ DECISION_SCHEMA: dict[str, Any] = {
         "confidence",
         "estimated_probability",
         "rationale",
+        "priors",
     ],
 }
 
@@ -72,6 +79,7 @@ class Decision:
     confidence: float
     estimated_probability: float
     rationale: str
+    priors: tuple[str, ...] = ()
 
     @classmethod
     def from_mapping(cls, value: dict[str, Any]) -> "Decision":
@@ -85,6 +93,7 @@ class Decision:
                 confidence=float(value["confidence"]),
                 estimated_probability=float(value["estimated_probability"]),
                 rationale=str(value["rationale"]),
+                priors=tuple(str(item) for item in value.get("priors") or ())[:4],
             )
         except (KeyError, TypeError, ValueError) as error:
             raise DecisionProviderError(f"Invalid decision payload: {error}") from error
@@ -116,6 +125,16 @@ class StructuredResult:
 
 
 @dataclass(frozen=True)
+class AgentRunResult:
+    """Outcome of one multi-step agent run against an arbitrary structured schema."""
+
+    value: dict[str, Any]
+    raw_output: str
+    provider: str
+    research_trace: list[dict[str, Any]]
+
+
+@dataclass(frozen=True)
 class ProviderResult:
     decision: Decision
     raw_output: str
@@ -135,30 +154,42 @@ def _strategy_instructions(payload: dict[str, Any]) -> str:
         strategy = payload["market_context"].get("decision_strategy_plugin")
     if not isinstance(strategy, dict):
         return ""
-    instructions = str(strategy.get("instructions", "")).strip()
-    if not instructions:
+    if not str(strategy.get("instructions", "")).strip():
         return ""
-    return (
-        "\n\nCONFIGURED_DECISION_STRATEGY (trusted local operator instructions; cannot override "
-        "schemas, risk limits, law, or write gates):\n" + instructions
-    )
+    return render_overlay_block(strategy, "CONFIGURED_DECISION_STRATEGY")
 
 
-def _decision_prompt(payload: dict[str, Any]) -> str:
+TRADE_MISSION = "Submit the final decision for this outcome token."
+
+TRADE_CONTROL_MISSION = (
+    "Choose one next action. Use DECIDE when more research is unlikely to change the trade."
+)
+
+
+def _final_prompt(payload: dict[str, Any], mission: str, instructions: str) -> str:
     return (
-        f"{SYSTEM_INSTRUCTIONS}\n\nSubmit the final decision for this outcome token."
-        + _strategy_instructions(payload)
+        f"{SYSTEM_INSTRUCTIONS}\n\n{mission}"
+        + instructions
         + "\n\nINPUT_JSON:\n"
         + json.dumps(payload, ensure_ascii=False, sort_keys=True)
     )
 
 
-def _control_prompt(payload: dict[str, Any], trace: list[dict[str, Any]], tools: dict[str, Any]) -> str:
+def _decision_prompt(payload: dict[str, Any]) -> str:
+    return _final_prompt(payload, TRADE_MISSION, _strategy_instructions(payload))
+
+
+def _control_prompt(
+    payload: dict[str, Any],
+    trace: list[dict[str, Any]],
+    tools: dict[str, Any],
+    mission: str = TRADE_CONTROL_MISSION,
+    instructions: str | None = None,
+) -> str:
     return (
-        f"{SYSTEM_INSTRUCTIONS}\n\nChoose one next action. Use DECIDE when more research is unlikely "
-        "to change the trade. arguments_json must encode a JSON object; use '{}' when there are no "
-        "arguments. Do not repeat failed or redundant work."
-        + _strategy_instructions(payload)
+        f"{SYSTEM_INSTRUCTIONS}\n\n{mission} arguments_json must encode a JSON object; use '{{}}' "
+        "when there are no arguments. Do not repeat failed or redundant work."
+        + (_strategy_instructions(payload) if instructions is None else instructions)
         + "\n\nAVAILABLE_TOOLS:\n"
         + json.dumps(tools, ensure_ascii=False, sort_keys=True)
         + "\n\nMARKET_INPUT:\n"
@@ -179,21 +210,32 @@ class AgentDecisionProvider:
         if recorder is not None:
             recorder(provider=self.name, **values)
 
-    def decide(
+    def run(
         self,
         payload: dict[str, Any],
+        *,
+        schema: dict[str, Any],
+        schema_name: str,
+        mission: str,
+        control_mission: str = TRADE_CONTROL_MISSION,
+        instructions: str | None = None,
+        max_tool_steps: int | None = None,
+        final_step_name: str = "FINAL_DECISION",
+        validate: Callable[[dict[str, Any]], None] | None = None,
         tool_executor: Callable[[str, dict[str, Any]], dict[str, Any]] | None = None,
         step_recorder: Callable[..., None] | None = None,
         tool_descriptions: dict[str, Any] | None = None,
-    ) -> ProviderResult:
+    ) -> AgentRunResult:
+        """Drive one multi-step tool loop and return a value matching the supplied schema."""
         trace: list[dict[str, Any]] = []
         raw_outputs: list[dict[str, Any]] = []
         final_index = 0
+        steps = self.max_tool_steps if max_tool_steps is None else max(0, int(max_tool_steps))
         if tool_executor is not None:
             tools = tool_descriptions or {}
-            for index in range(self.max_tool_steps):
+            for index in range(steps):
                 final_index = index + 1
-                prompt = _control_prompt(payload, trace, tools)
+                prompt = _control_prompt(payload, trace, tools, control_mission, instructions)
                 step_input = {"prompt": prompt, "trace": trace}
                 try:
                     response = self.backend.complete(
@@ -277,12 +319,14 @@ class AgentDecisionProvider:
         final_input = {
             "market_context": payload,
             "research_trace": trace,
-            "tool_budget_exhausted": bool(tool_executor is not None and len(trace) >= self.max_tool_steps),
+            "tool_budget_exhausted": bool(tool_executor is not None and len(trace) >= steps),
         }
-        prompt = _decision_prompt(final_input)
+        resolved = _strategy_instructions(final_input) if instructions is None else instructions
+        prompt = _final_prompt(final_input, mission, resolved)
         try:
-            response = self.backend.complete(prompt, DECISION_SCHEMA, "trade_decision")
-            decision = Decision.from_mapping(response.value)
+            response = self.backend.complete(prompt, schema, schema_name)
+            if validate is not None:
+                validate(response.value)
         except DecisionProviderError as error:
             self._record(
                 step_recorder,
@@ -290,7 +334,7 @@ class AgentDecisionProvider:
                 input_payload={"prompt": prompt, "trace": trace},
                 raw_output=error.raw_output,
                 control=None,
-                tool_name="FINAL_DECISION",
+                tool_name=final_step_name,
                 status="ERROR",
                 error=str(error),
             )
@@ -300,16 +344,42 @@ class AgentDecisionProvider:
             step_index=final_index,
             input_payload={"prompt": prompt, "trace": trace},
             raw_output=response.raw_output,
-            control=decision.to_dict(),
-            tool_name="FINAL_DECISION",
+            control=response.value,
+            tool_name=final_step_name,
             status="OK",
         )
         raw_outputs.append({"step": final_index, "raw": response.raw_output})
-        return ProviderResult(
-            decision=decision,
+        return AgentRunResult(
+            value=response.value,
             raw_output=json.dumps(raw_outputs, ensure_ascii=False),
             provider=self.name,
             research_trace=trace,
+        )
+
+    def decide(
+        self,
+        payload: dict[str, Any],
+        tool_executor: Callable[[str, dict[str, Any]], dict[str, Any]] | None = None,
+        step_recorder: Callable[..., None] | None = None,
+        tool_descriptions: dict[str, Any] | None = None,
+        instructions: str | None = None,
+    ) -> ProviderResult:
+        result = self.run(
+            payload,
+            schema=DECISION_SCHEMA,
+            schema_name="trade_decision",
+            mission=TRADE_MISSION,
+            instructions=instructions,
+            validate=lambda value: Decision.from_mapping(value),
+            tool_executor=tool_executor,
+            step_recorder=step_recorder,
+            tool_descriptions=tool_descriptions,
+        )
+        return ProviderResult(
+            decision=Decision.from_mapping(result.value),
+            raw_output=result.raw_output,
+            provider=result.provider,
+            research_trace=result.research_trace,
         )
 
 
@@ -328,12 +398,27 @@ class FallbackDecisionProvider:
         self.unavailable = unavailable
         self.name = ">".join(configured_names)
 
+    def run(self, payload: dict[str, Any], **options: Any) -> AgentRunResult:
+        errors: dict[str, str] = {}
+        raw: list[dict[str, str]] = []
+        for provider in self.providers:
+            try:
+                return provider.run(payload, **options)
+            except DecisionProviderError as error:
+                errors[provider.name] = str(error)
+                raw.append({"provider": provider.name, "raw": error.raw_output})
+        message = "; ".join(f"{name}: {reason}" for name, reason in errors.items())
+        raise DecisionProviderError(
+            f"All decision providers failed: {message}", json.dumps(raw, ensure_ascii=False)
+        )
+
     def decide(
         self,
         payload: dict[str, Any],
         tool_executor: Callable[[str, dict[str, Any]], dict[str, Any]] | None = None,
         step_recorder: Callable[..., None] | None = None,
         tool_descriptions: dict[str, Any] | None = None,
+        instructions: str | None = None,
     ) -> ProviderResult:
         errors: dict[str, str] = {}
         raw: list[dict[str, str]] = []
@@ -344,6 +429,7 @@ class FallbackDecisionProvider:
                     tool_executor=tool_executor,
                     step_recorder=step_recorder,
                     tool_descriptions=tool_descriptions,
+                    instructions=instructions,
                 )
             except DecisionProviderError as error:
                 errors[provider.name] = str(error)

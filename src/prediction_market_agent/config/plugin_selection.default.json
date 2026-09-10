@@ -3,6 +3,7 @@
   "enabled": {
     "api": ["binance", "polymarket"],
     "decision_provider": ["codex", "claude", "openai_compatible"],
+    "market_discovery": [],
     "research_tool": ["standard_research"],
     "risk": ["portfolio_limits", "agent_actions", "dynamic_python"],
     "hook": []

@@ -9,15 +9,14 @@ from .config import BinancePluginConfig
 
 
 class BinanceEventLoop:
-    """Binance-owned scan schedule and failure backoff."""
+    """Binance-owned scan schedule and failure backoff.
 
-    def __init__(
-        self,
-        load_settings: Callable[[], BinancePluginConfig],
-        scan: Callable[[int, int], tuple[Any, ...]],
-    ):
+    This plugin owns when a cycle runs. Which markets that cycle looks at, and which read
+    endpoints get called to find them, belong to the framework's discovery callback.
+    """
+
+    def __init__(self, load_settings: Callable[[], BinancePluginConfig]):
         self._load_settings = load_settings
-        self._scan = scan
         self._lock = threading.RLock()
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
@@ -35,6 +34,9 @@ class BinanceEventLoop:
         callback = services.get("submit_scan")
         if not callable(callback):
             raise ValueError("Binance runtime requires a callable submit_scan service")
+        discover = services.get("discover_markets")
+        if not callable(discover):
+            raise ValueError("Binance runtime requires a callable discover_markets service")
         settings = self._load_settings()
         with self._lock:
             if self._thread is not None and self._thread.is_alive():
@@ -43,23 +45,25 @@ class BinanceEventLoop:
             self._status.update({"running": True, "last_error": ""})
             self._thread = threading.Thread(
                 target=self._run,
-                args=(callback, settings),
+                args=(callback, discover, settings),
                 name="prediction-binance-runtime",
                 daemon=True,
             )
             self._thread.start()
 
-    def _run(self, callback: Callable[..., object], settings: BinancePluginConfig) -> None:
+    def _run(
+        self,
+        callback: Callable[..., object],
+        discover: Callable[..., Any],
+        settings: BinancePluginConfig,
+    ) -> None:
         consecutive_failures = 0
         try:
             while not self._stop.is_set():
                 with self._lock:
                     self._status["last_started_at"] = int(time.time())
                 try:
-                    topics = self._scan(
-                        settings.max_topics_per_cycle,
-                        settings.topic_page_size,
-                    )
+                    topics = discover(settings.max_topics_per_cycle)
                     callback(topics, settings.max_decisions_per_cycle)
                     consecutive_failures = 0
                     delay = settings.scan_interval_seconds

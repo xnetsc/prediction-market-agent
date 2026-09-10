@@ -104,7 +104,7 @@ class ProductionApiIntegrationTests(unittest.TestCase):
             available_names = ("integration-hold",)
             unavailable = {}
 
-            def decide(self, context, *, tool_executor=None, step_recorder=None, tool_descriptions=None):
+            def decide(self, context, *, tool_executor=None, step_recorder=None, tool_descriptions=None, instructions=None):
                 del context, tool_executor, step_recorder, tool_descriptions
                 return ProviderResult(
                     decision=Decision(
@@ -124,7 +124,9 @@ class ProductionApiIntegrationTests(unittest.TestCase):
 
         engine = TradingEngine(config)
         engine.provider = HoldProvider()
-        engine._all_topics = lambda plugin, maximum=500: list(
+        # Discovery itself needs an Agent; this test exercises the read and execution path,
+        # so it stands in for the discovery Agent with the platform's first two topics.
+        engine.discovery.discover = lambda *, platform, plugin, maximum_topics: tuple(
             plugin.list_topics(offset=0, limit=2).topics
         )
         status = engine.run_once()

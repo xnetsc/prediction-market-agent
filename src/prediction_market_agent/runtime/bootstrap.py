@@ -5,7 +5,8 @@ import logging
 from typing import Any
 
 from ..agent.decision import make_provider
-from ..agent.strategy import PassThroughDecisionStrategy
+from ..agent.market_discovery import BuiltInMarketDiscovery
+from ..agent.strategy import BuiltInDecisionStrategy
 from ..core.config import Config
 from ..core.domain import AccountState
 from ..core.hooks import HookManager
@@ -45,6 +46,8 @@ class EngineComponents:
     global_risk: Any
     provider: Any
     research_contributions: list[Any]
+    discovery_strategy: Any
+    discovery_evolution: bool
 
 
 def bootstrap_engine(
@@ -55,7 +58,7 @@ def bootstrap_engine(
     catalog = catalog or load_plugin_catalog(config)
     try:
         strategy_name = config.decision_strategy_name.strip().lower()
-        decision_strategy = PassThroughDecisionStrategy()
+        decision_strategy = BuiltInDecisionStrategy()
         if strategy_name:
             try:
                 decision_strategy = catalog.get(
@@ -63,7 +66,7 @@ def bootstrap_engine(
                 ).factory(config)
             except Exception:
                 LOGGER.exception(
-                    "optional decision strategy %s could not start; using unfiltered candidates",
+                    "optional decision strategy %s could not start; using the built-in strategy",
                     strategy_name,
                 )
 
@@ -164,11 +167,32 @@ def bootstrap_engine(
             global_risk=global_risk,
             provider=make_provider(config, catalog),
             research_contributions=_optional_research(config, catalog),
+            discovery_strategy=_discovery_strategy(config, catalog),
+            discovery_evolution=bool(config.market_discovery_evolution),
         )
     except Exception:
         if owns_catalog:
             catalog.shutdown()
         raise
+
+
+def _discovery_strategy(config: Config, catalog: PluginCatalog) -> Any:
+    """First ready discovery plugin, else the framework's own strategy.
+
+    The built-in is never registered as a plugin: its text is a runtime constraint rather than
+    operator configuration, so it has no configuration surface to expose.
+    """
+    for name in config.market_discovery_plugins:
+        try:
+            return catalog.get("market_discovery", name).factory(config)
+        except Exception as error:
+            LOGGER.warning(
+                "optional market discovery plugin %s could not start; using the built-in "
+                "strategy: %s",
+                name,
+                error,
+            )
+    return BuiltInMarketDiscovery()
 
 
 def _optional_research(config: Config, catalog: PluginCatalog) -> list[Any]:
