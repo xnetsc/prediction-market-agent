@@ -61,6 +61,7 @@
         $request.Headers['Authorization'] = 'Bearer ' + $config.secret
         $request.AllowAutoRedirect = $false
         $request.Timeout = 40000; $request.ReadWriteTimeout = 40000
+        if ($endpoint.Host -in @('localhost', '127.0.0.1')) { $request.Proxy = $null }
         $body = $utf8.GetBytes(((Seal-Message $payload) | ConvertTo-Json -Compress))
         $request.ContentLength = $body.Length
         $stream = $request.GetRequestStream()

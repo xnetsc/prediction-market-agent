@@ -14,8 +14,10 @@ import time
 import unittest
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from unittest.mock import patch
 
 from prediction_market_agent.plugins.providers._helper_scripts import command_for, render_script
+from prediction_market_agent.plugins.providers._login_helper import exchange as helper_exchange
 from prediction_market_agent.plugins.providers._login_relay import seal, unseal
 
 
@@ -118,6 +120,25 @@ class HelperTerminalTests(unittest.TestCase):
         self.assertEqual(process.returncode, 0, err.decode(errors="replace"))
         self.assertIn(literal, out.decode("utf-8").replace("\r\n", "\n"))
         self.assertIn("BEGIN", out.decode("utf-8"))
+
+    def test_loopback_management_endpoint_ignores_unreachable_system_proxy(self):
+        config = {
+            "endpoint": self.endpoint,
+            "secret": self.secret,
+            "expires_at": time.time() + 20,
+        }
+        poisoned_proxy = {
+            "HTTP_PROXY": "http://127.0.0.1:1",
+            "HTTPS_PROXY": "http://127.0.0.1:1",
+            "http_proxy": "http://127.0.0.1:1",
+            "https_proxy": "http://127.0.0.1:1",
+            "NO_PROXY": "",
+            "no_proxy": "",
+        }
+        with patch.dict(os.environ, poisoned_proxy, clear=False):
+            result = helper_exchange(config, {"action": "poll"})
+        self.assertEqual(result["redirect_uri"], self.redirect)
+        self.assertIn("$request.Proxy = $null", render_script("powershell", config))
 
     def test_corruption_truncation_and_http_failure_never_execute(self):
         script = b"echo SHOULD_NEVER_EXECUTE\n"
