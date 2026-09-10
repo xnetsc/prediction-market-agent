@@ -34,28 +34,33 @@ Prediction 与 Polymarket API 插件，以及 Codex、Claude、OpenAI-compatible
   提示；决策先显示结论与原因，技术详情按需展开。操作步骤见 [Web 控制台](docs/WEB_UI.md)。
 - quote、order、fill、cancel、redeem、transfer、Agent tool/decision 均有 before/after Hook。
 
-## 安装
+## 快速安装与启动
 
-本地推荐直接运行 `./start-local.sh`（macOS/Linux）或 `./start-local.ps1`（Windows）。脚本自动检查、
-安装并启动 Docker，拉取 `ghcr.io/xnetsc/prediction-market-agent:latest`，等待容器健康后输出访问地址。
-无需本地 Python 环境；数据保存在 `runtime-data/`。每次 Git 推送都会触发 GitHub Actions 构建和发布
-amd64、arm64 镜像。完整说明见 [部署文档](docs/DEPLOYMENT.md)。
+普通用户不需要安装 Python、创建 venv 或构建源码。先取得仓库中的启动脚本：
 
-需要直接安装 wheel 或开发源码时：
+macOS/Linux：
 
 ```bash
-cd /path/to/prediction-market-agent
-python3 -m venv .venv
-.venv/bin/python -m pip install --index-url https://pypi.org/simple .
-.venv/bin/prediction-market-agent init
+git clone https://github.com/xnetsc/prediction-market-agent.git
+cd prediction-market-agent
+./start-local.sh
 ```
 
-wheel 是机器人的完整安装包。安装后唯一的程序入口是 `prediction-market-agent`；也可以用等价入口
-`python -m prediction_market_agent`。`init` 在当前工作目录创建应用配置和插件启用状态，后续命令默认读取
-`config/application.json`，也可通过 `--config /path/to/application.json` 指定。
+Windows PowerShell：
 
-插件私有配置由插件回调读写；内置插件使用 `config/plugins/*.json`。运行配置和私有配置均已被
-版本控制忽略；可从 `examples/` 中的脱敏样例开始，禁止提交真实密钥、钱包材料或签名文件。
+```powershell
+git clone https://github.com/xnetsc/prediction-market-agent.git
+Set-Location prediction-market-agent
+.\start-local.ps1
+```
+
+脚本会检查并按需安装、启动 Docker，然后拉取
+`ghcr.io/xnetsc/prediction-market-agent:latest`，启动完整机器人并等待健康检查通过。应用数据保存在仓库的
+`runtime-data/`，升级镜像不会删除配置、登录凭据或 SQLite 台账。启动完成后直接访问
+`http://127.0.0.1:8765`；以后再次启动只需重新运行同一个脚本。
+
+每次 Git 推送都会触发 GitHub Actions 构建并发布 amd64、arm64 镜像。Docker 安装、代理检测、停止、升级、
+端口修改和云部署说明见 [部署文档](docs/DEPLOYMENT.md)。
 
 ## 使用
 
@@ -64,14 +69,8 @@ wheel 是机器人的完整安装包。安装后唯一的程序入口是 `predic
 “程序设置”可查看服务端环境详情、对比直连与统一继承代理访问相同目标时的公网出口，并单独查询环境代理/插件路径的 IP 与可选源端口，
 用于辅助核对平台 IP 白名单；不保证目标平台使用同一出口。[环境诊断与配置例子](docs/ENVIRONMENT.md)。
 
-安装后先启动管理界面：
-
-```bash
-.venv/bin/prediction-market-agent doctor
-.venv/bin/prediction-market-agent serve
-```
-
-管理界面默认位于 `http://127.0.0.1:8765`，回环或明确的私网 IP 访问无需 Passkey 或应用层加解密。
+一键脚本已经在容器中启动管理界面和机器人运行主管，无需再运行 `serve`。管理界面默认位于
+`http://127.0.0.1:8765`，回环或明确的私网 IP 访问无需 Passkey 或应用层加解密。
 公网访问必须使用 HTTPS 和 admin Passkey。客户端登录向导会验证本次实际回调映射，匹配后免助手；
 本地容器一键脚本会临时发布客户端本次回调端口，流程结束后释放，无需另下载助手。端口跟随官方客户端，
 不在机器人中写死；Codex 当前客户端的端口限制见下述说明。
@@ -87,23 +86,26 @@ wheel 是机器人的完整安装包。安装后唯一的程序入口是 `predic
 平台自己的事件循环；策略、研究、风控和 Hook 是可选增强。通用框架不检查插件字段，只读取插件
 readiness 与 runtime 启动结果；
 配置不全的平台保持停止并显示原因。配置保存、启用/禁用、刷新或暂停会立即重新评估，无需另开 Worker。
-也可显式执行一次或使用无 Web 的前台运行入口：
+需要从终端检查状态、测试 Provider 或显式触发一次扫描时，在仓库目录执行：
 
 ```bash
-.venv/bin/prediction-market-agent once
-.venv/bin/prediction-market-agent run
+docker compose exec robot prediction-market-agent doctor
+docker compose exec robot prediction-market-agent provider-test
+docker compose exec robot prediction-market-agent status
+docker compose exec robot prediction-market-agent report --since-hours 12
+docker compose exec robot prediction-market-agent once
 ```
 
-其他运维入口：
+查看日志、停止机器人或拉取最新版并重启：
 
 ```bash
-.venv/bin/prediction-market-agent provider-test
-.venv/bin/prediction-market-agent status
-.venv/bin/prediction-market-agent report --since-hours 12
+docker compose logs -f robot
+docker compose down
+./start-local.sh
 ```
 
-`once` 是明确的人工/外部单次触发，不创建后台定时器；`run` 启动同一套插件自有循环并在前台等待。
-不要同时对同一工作目录启动 `serve` 和 `run`，否则会形成两个机器人实例。
+Windows 更新时将最后一条替换为 `.\start-local.ps1`。`once` 是明确的人工/外部单次触发，不创建后台
+定时器。容器已经运行 `serve`，不要再对同一份数据启动第二个 `serve` 或 `run` 实例。
 
 ## 文档与例子
 
@@ -122,7 +124,21 @@ readiness 与 runtime 启动结果；
 - [敏感信息与发布安全](SECURITY.md)
 - `examples/`：六类插件、动态 Python 规则、插件 JSON 和插件目录配置的完整例子。
 
-## 验收命令
+## 源码开发与测试（可选）
+
+下面只适用于需要修改源码、构建 wheel 或运行测试的开发者；普通安装和运行不使用 venv：
+
+```bash
+python3 -m venv .venv
+.venv/bin/python -m pip install --index-url https://pypi.org/simple -e .
+.venv/bin/prediction-market-agent init
+```
+
+wheel 是完整机器人安装包。安装后入口为 `prediction-market-agent`，也可使用等价入口
+`python -m prediction_market_agent`。`init` 在当前工作目录创建应用配置和插件启用状态；其他命令默认读取
+`config/application.json`，也可通过 `--config /path/to/application.json` 指定。
+
+开发验收命令：
 
 ```bash
 PYTHONPATH=src .venv/bin/python -m compileall -q src tests examples
@@ -134,6 +150,9 @@ PYTHONPATH=src .venv/bin/python -m pytest -q tests/test_api_integration.py
 写端点发送真实未认证请求；使用无效资源标识和极小金额，当前预期是服务器拒绝，本地提前失败不算通过。
 它没有执行模式或测试跳过开关。API 权限或远端行为改变前应重新复核这些测试输入。历史测试和模型输出
 都不构成收益保证。
+
+插件私有配置由插件回调读写；内置插件使用 `config/plugins/*.json`。运行配置和私有配置均已被版本控制
+忽略；可从 `examples/` 中的脱敏样例开始，禁止提交真实密钥、钱包材料或签名文件。
 
 ## 许可
 
