@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import json
 import math
+import time
 from dataclasses import asdict, dataclass
 from typing import Any, Callable, Protocol
 
 from ..core.config import Config
 from .evolution import render_overlay_block
+from .provider_health import ProviderHealthRegistry
 
 
 DECISION_SCHEMA: dict[str, Any] = {
@@ -384,11 +386,20 @@ class AgentDecisionProvider:
 
 
 class FallbackDecisionProvider:
+    """Route each call to the healthiest provider and keep failing ones out of the way.
+
+    Providers go down for reasons that heal: a quota window, an expired session, a loaded
+    endpoint. Trying them in a fixed order means paying a failed round trip on every single
+    decision until the outage ends, so the health registry paces retries by failure kind and
+    orders the rest by measured quality.
+    """
+
     def __init__(
         self,
         providers: list[AgentDecisionProvider],
         unavailable: dict[str, str],
         configured_names: tuple[str, ...],
+        health: ProviderHealthRegistry | None = None,
     ) -> None:
         if not providers:
             detail = "; ".join(f"{name}: {reason}" for name, reason in unavailable.items())
@@ -397,20 +408,35 @@ class FallbackDecisionProvider:
         self.available_names = tuple(item.name for item in providers)
         self.unavailable = unavailable
         self.name = ">".join(configured_names)
+        self.health = health or ProviderHealthRegistry(self.available_names)
 
-    def run(self, payload: dict[str, Any], **options: Any) -> AgentRunResult:
+    def _ordered(self) -> list[AgentDecisionProvider]:
+        by_name = {provider.name: provider for provider in self.providers}
+        return [by_name[name] for name in self.health.order(self.available_names) if name in by_name]
+
+    def _attempt(self, call: Callable[[AgentDecisionProvider], Any]) -> Any:
         errors: dict[str, str] = {}
         raw: list[dict[str, str]] = []
-        for provider in self.providers:
+        for provider in self._ordered():
+            started = time.monotonic()
             try:
-                return provider.run(payload, **options)
+                result = call(provider)
             except DecisionProviderError as error:
-                errors[provider.name] = str(error)
+                kind = self.health.record_failure(provider.name, str(error))
+                errors[provider.name] = f"[{kind}] {error}"
                 raw.append({"provider": provider.name, "raw": error.raw_output})
+                continue
+            self.health.record_success(
+                provider.name, latency_seconds=time.monotonic() - started
+            )
+            return result
         message = "; ".join(f"{name}: {reason}" for name, reason in errors.items())
         raise DecisionProviderError(
             f"All decision providers failed: {message}", json.dumps(raw, ensure_ascii=False)
         )
+
+    def run(self, payload: dict[str, Any], **options: Any) -> AgentRunResult:
+        return self._attempt(lambda provider: provider.run(payload, **options))
 
     def decide(
         self,
@@ -420,23 +446,14 @@ class FallbackDecisionProvider:
         tool_descriptions: dict[str, Any] | None = None,
         instructions: str | None = None,
     ) -> ProviderResult:
-        errors: dict[str, str] = {}
-        raw: list[dict[str, str]] = []
-        for provider in self.providers:
-            try:
-                return provider.decide(
-                    payload,
-                    tool_executor=tool_executor,
-                    step_recorder=step_recorder,
-                    tool_descriptions=tool_descriptions,
-                    instructions=instructions,
-                )
-            except DecisionProviderError as error:
-                errors[provider.name] = str(error)
-                raw.append({"provider": provider.name, "raw": error.raw_output})
-        message = "; ".join(f"{name}: {reason}" for name, reason in errors.items())
-        raise DecisionProviderError(
-            f"All decision providers failed: {message}", json.dumps(raw, ensure_ascii=False)
+        return self._attempt(
+            lambda provider: provider.decide(
+                payload,
+                tool_executor=tool_executor,
+                step_recorder=step_recorder,
+                tool_descriptions=tool_descriptions,
+                instructions=instructions,
+            )
         )
 
 
