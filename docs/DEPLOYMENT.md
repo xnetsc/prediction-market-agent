@@ -27,14 +27,53 @@ Windows PowerShell：
 ./start-local.ps1
 ```
 
-脚本会创建 `.venv`、安装完整 wheel、首次初始化配置并启动 Web 应用。也可使用容器：
+脚本会检查 Docker CLI、Docker 服务和 Compose；缺少时安装，服务未启动则启动，并等待就绪。
+macOS 从 Docker 官方 DMG 安装 Docker Desktop；Windows 下载并验证官方签名安装器；Linux 使用
+Docker 官方安装脚本安装 Engine，必要时安装 Compose 插件。安装会使用系统的管理员权限提示，Docker
+Desktop 首次条款/WSL 配置或系统要求的重启由用户在系统界面完成，再运行脚本即可继续。
+参考 [macOS 安装](https://docs.docker.com/desktop/setup/install/mac-install/)、
+[Windows 安装](https://docs.docker.com/desktop/setup/install/windows-install/)、
+[Linux Engine 安装](https://docs.docker.com/engine/install/)。
+
+之后脚本始终拉取已安装完整应用的 GHCR 镜像并启动容器，不创建 Python 环境，也不在本地构建。
+已有 Docker 的等价命令：
 
 ```bash
-docker compose up --build
+docker compose pull
+docker compose up -d --no-build --wait
 ```
 
 容器数据保存到 `runtime-data/`，管理界面为 `http://localhost:8765`。`serve` 同时负责管理界面和机器人运行
 监督：全局与插件配置就绪且未暂停时自动启动对应平台插件，无需再启动第二个 Worker 进程。
+
+Compose 默认只绑定 `127.0.0.1:8765`，该访问免 Passkey 与业务加解密。可用环境变量 `PREDICTION_AGENT_PORT`
+修改本机端口，`PREDICTION_AGENT_IMAGE` 指定其他标签或固定 digest。应用/插件配置仍在挂载目录内，环境变量
+只控制容器部署。`docker compose logs -f` 查看日志，`docker compose down` 停止容器，保留宿主机数据。
+旧源码运行数据不会自动迁移；要迁移时将原配置、插件与数据库复制到 `runtime-data/`，并调整其中绝对路径。
+
+镜像包含 Python 应用、全部内置插件、Node.js、Git、Codex CLI 和 Claude CLI。CLI 登录材料在本地 Compose
+中保存在 `runtime-data/home/`；可以用 `docker compose exec robot codex login --device-auth` 或
+`docker compose exec robot claude` 完成各自登录，然后在界面将插件命令配置为 `codex` 或 `claude`。
+宿主机上的客户端登录状态不会自动进入容器。兼容 API 后端直接在界面填写对应私有配置。
+
+## GitHub Actions 镜像发布
+
+`.github/workflows/container.yml` 在每次 push（所有分支和标签）或手动触发时执行：构建最终安装态镜像，
+启动隔离容器验证 CLI、Web 健康、回环明文访问及公网认证，然后发布 `linux/amd64` 与 `linux/arm64`。
+默认镜像名 `ghcr.io/xnetsc/prediction-market-agent`；默认分支更新 `latest`，每次提交发布 `sha-<完整提交号>`，
+分支和 Git 标签也有对应镜像标签。发布使用工作流自带 `GITHUB_TOKEN` 的 `packages: write` 权限，无需保存 PAT。
+实现依据 [GitHub 镜像发布文档](https://docs.github.com/en/actions/tutorials/publish-packages/publish-docker-images)。
+
+GHCR 新包默认可能为 private，首次发布后须在包设置中设为 public，之后即可匿名拉取；仓库 public 不自动代表
+包也 public。镜像只 COPY 明确列出的源码、元数据和入口脚本，真实配置、数据库、备份不进入镜像。
+
+无需克隆完整仓库时也可直接运行：
+
+```bash
+docker run -d --name prediction-market-agent --restart unless-stopped \
+  -p 127.0.0.1:8765:8765 -v prediction-agent-data:/data \
+  -v prediction-agent-home:/root ghcr.io/xnetsc/prediction-market-agent:latest
+```
 
 除回环地址本地开发外，Passkey 要求 HTTPS。Railway、Vercel、API Gateway 和函数计算的公网入口都应保留
 平台 TLS 终止与转发的原始 HTTPS scheme/host；不要用裸 HTTP 公网地址初始化管理员。

@@ -1,4 +1,13 @@
 .git
+.env
+.env.*
+CURRENT_TASK.md
+PROGRESS.md
+docs/REQUIREMENTS_STATUS.md
+*.key
+*.pem
+*.backup
+*.bak
 .venv
 build
 dist

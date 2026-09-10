@@ -198,7 +198,7 @@ class AuthenticationTests(unittest.TestCase):
             app = create_app(config, start_robot=False)
             self.assertTrue(decision_db.exists())
             self.assertTrue(auth_db.exists())
-            with TestClient(app, base_url="http://localhost") as client:
+            with TestClient(app, base_url="https://robot.example") as client:
                 page = client.get("/")
                 self.assertEqual(page.status_code, 200)
                 self.assertIn("初始化管理员", page.text)
@@ -256,7 +256,7 @@ class AuthenticationTests(unittest.TestCase):
             session = store.create_session(b"z" * 32, b"one", "Browser", "127.0.0.1")
             request_envelope = store.encrypt(session, {"url": "/api/summary", "body": None},
                                              aad="POST /api/secure")
-            with TestClient(app, base_url="http://localhost") as client:
+            with TestClient(app, base_url="https://robot.example") as client:
                 client.cookies.set(SESSION_COOKIE, session.token)
                 response = client.post("/api/secure", json=request_envelope,
                                        headers={"X-Admin-CSRF": session.csrf_token})

@@ -23,6 +23,8 @@ class DeploymentTests(unittest.TestCase):
             "deploy/container-entrypoint.sh",
             "deploy/container-with-worker.sh",
             "deploy/aliyun/build.sh",
+            "deploy/ensure-docker.sh",
+            "deploy/check-container.sh",
         ):
             completed = subprocess.run(
                 ["sh", "-n", str(ROOT / relative)], capture_output=True, text=True, check=False
