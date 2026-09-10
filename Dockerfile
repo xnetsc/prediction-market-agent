@@ -9,7 +9,7 @@ COPY --from=clients /usr/local/bin/node /usr/local/bin/node
 COPY --from=clients /usr/local/lib/node_modules /usr/local/lib/node_modules
 RUN apt-get update && apt-get install -y --no-install-recommends git ca-certificates \
     && ln -s /usr/local/lib/node_modules/@openai/codex/bin/codex.js /usr/local/bin/codex \
-    && ln -s /usr/local/lib/node_modules/@anthropic-ai/claude-code/cli.js /usr/local/bin/claude \
+    && ln -s "/usr/local/lib/node_modules/@anthropic-ai/claude-code/$(node -p 'require("/usr/local/lib/node_modules/@anthropic-ai/claude-code/package.json").bin.claude')" /usr/local/bin/claude \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
