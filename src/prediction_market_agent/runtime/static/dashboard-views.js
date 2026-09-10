@@ -12,6 +12,16 @@ const SERVICE_TITLES = {codex:'Codex',claude:'Claude',openai_compatible:'兼容 
 const PLUGIN_CENTER_KINDS = ['api','market_discovery','decision_strategy','research_tool','risk','hook'];
 const STRATEGY_LANES = {market_discovery:'discovery', decision_strategy:'decision'};
 const serviceTitle = name => SERVICE_TITLES[name] || name || '未记录';
+function downloadCredentialBundle(name,status){
+    const bundle=status?.credential_export;
+    if(!bundle)throw Error('服务端没有返回凭据内容');
+    const stamp=new Date().toISOString().slice(0,19).replace(/[:T]/g,'-');
+    const url=URL.createObjectURL(new Blob([JSON.stringify(bundle,null,2)],{type:'application/json'}));
+    const link=document.createElement('a');link.href=url;link.download=name+'-credentials-'+stamp+'.json';
+    document.body.appendChild(link);link.click();link.remove();
+    setTimeout(()=>URL.revokeObjectURL(url),10000);
+    document.getElementById('clientControlError').textContent='';
+}
 function renderProviderHealth(status){
     const host=document.getElementById('providerHealth');if(!host)return;
     const health=status?.decision_provider_health,rows=health?.providers||[];
@@ -172,9 +182,9 @@ function renderServiceConnections(){
                 if(action.id==='cancel'&&s.state!=='authorizing')continue;
                 const prominent=action.id==='login'&&s.state!=='authenticated'&&s.state!=='authorizing';
                 const box=controlNode('div','',prominent?bar:maintenance);box.className='action-item';const inputs={};
-                for(const field of action.fields||[]){const label=controlNode('label',field.label,box);label.className='field';const input=controlNode('input','',label);input.type=field.type==='secret'?'password':'text';input.autocomplete='off';input.setAttribute('aria-label',field.label);inputs[field.name]=input;controlNode('small',field.description,label)}
+                for(const field of action.fields||[]){const label=controlNode('label',field.label,box);label.className='field';const input=controlNode('input','',label);input.type=field.type==='secret'?'password':field.type==='file'?'file':'text';if(field.type==='file'){input.accept='application/json,.json'}else{input.autocomplete='off'}input.setAttribute('aria-label',field.label);inputs[field.name]=input;controlNode('small',field.description,label)}
                 const button=controlNode('button',action.label,box);button.disabled=!!action.disabled;button.className=prominent?'primary':action.id==='logout'?'danger':'';
-                button.onclick=async()=>{if(action.confirm&&!confirm(action.confirm))return;button.disabled=true;const values={flow_id:s.flow_id};for(const [key,input]of Object.entries(inputs)){values[key]=input.value;input.value=''}try{const status=await post('/api/plugins/controls/action',{kind:item.kind,name,action:action.id==='login'?loginAction(name):action.id,values});if(['login','login_remote'].includes(action.id))showLoginWizard({...item,status});document.getElementById('clientControlError').textContent='';button.blur();await refreshClientControls()}catch(e){document.getElementById('clientControlError').textContent=e.message}finally{button.disabled=!!action.disabled}};
+                button.onclick=async()=>{if(action.confirm&&!confirm(action.confirm))return;button.disabled=true;const values={flow_id:s.flow_id};try{for(const [key,input]of Object.entries(inputs)){if(input.type==='file'){const file=input.files&&input.files[0];if(!file)throw Error('请先选择凭据文件');values[key]=await file.text()}else{values[key]=input.value}input.value=''}const status=await post('/api/plugins/controls/action',{kind:item.kind,name,action:action.id==='login'?loginAction(name):action.id,values});if(['login','login_remote'].includes(action.id))showLoginWizard({...item,status});if(action.id==='export_credentials')downloadCredentialBundle(name,status);document.getElementById('clientControlError').textContent='';button.blur();await refreshClientControls()}catch(e){document.getElementById('clientControlError').textContent=e.message}finally{button.disabled=!!action.disabled}};
             }
         }
     }

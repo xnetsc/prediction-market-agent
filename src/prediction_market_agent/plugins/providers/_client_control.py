@@ -1,6 +1,7 @@
 """Persistent CLI accounts and versioned client installs, owned by provider plugins."""
 from __future__ import annotations
 
+import base64
 import json
 import os
 import re
@@ -27,6 +28,22 @@ from ._login_relay import BrowserLoginRelay
 from ._host_proxy import client_proxy
 from prediction_market_agent.plugin_system.network_diagnostics import DiagnosticNetworkRoute
 
+
+CREDENTIAL_BUNDLE_KIND = "prediction-market-agent/client-credentials"
+CREDENTIAL_BUNDLE_VERSION = 1
+
+CREDENTIAL_FILES = {
+    "codex": (".codex/auth.json",),
+    "claude": (".claude/.credentials.json",),
+}
+"""Files that restore a signed-in session, per client.
+
+Deliberately narrow: the client home also accumulates local settings, project history and logs,
+none of which is needed to stay logged in and some of which an operator would not expect to leave
+the machine inside a credential file.
+"""
+
+CREDENTIAL_FILE_MAX_BYTES = 1_048_576
 
 def client_configuration_loader(load, prefix: str):
     """Read pre-script configurations without altering credentials or private files."""
@@ -234,6 +251,13 @@ class ClientControl:
                 {"id": "cancel", "label": "取消登录"},
                 {"id": "logout", "label": "退出账号", "confirm": "退出此客户端账号？"},
                 {"id": "check", "label": "检查登录与版本"},
+                {"id": "export_credentials", "label": "导出登录凭据",
+                 "disabled": value["state"] != "authenticated",
+                 "confirm": "导出的文件包含可直接使用的登录令牌。任何拿到它的人都能以此账号发起请求；请只保存在你信任的位置。"},
+                {"id": "import_credentials", "label": "导入登录凭据",
+                 "fields": [{"name": "bundle", "label": "凭据文件", "type": "file",
+                             "description": "选择本机器人导出的同一客户端凭据文件；导入会覆盖当前登录状态。"}],
+                 "confirm": "用文件中的凭据覆盖当前登录状态？"},
                 {"id": "upgrade", "label": "升级客户端", "disabled": not value["update_available"] or value["update_state"] == "installing",
                  "confirm": "安装官方最新客户端？成功后用于后续请求，已有请求继续使用旧版本。"},
             ]
@@ -277,9 +301,90 @@ class ClientControl:
             self._background_check()
         elif action == "upgrade":
             self.upgrade()
+        elif action == "export_credentials":
+            return {**self.snapshot(), "credential_export": self.export_credentials()}
+        elif action == "import_credentials":
+            self.import_credentials(values.get("bundle", ""))
         else:
             raise ValueError("Unknown client action")
         return self.snapshot()
+
+    def export_credentials(self) -> dict[str, Any]:
+        """Package the files that restore this client's signed-in session.
+
+        Logging in happens through the official client, in a browser, on the operator's device.
+        That is fine once; repeating it for every fresh container is not, so the session is made
+        portable. The bundle carries live tokens, which is why the surrounding action states that
+        plainly rather than presenting it as an ordinary settings file.
+        """
+        home = self.directory("AUTH")
+        files: dict[str, str] = {}
+        for relative in CREDENTIAL_FILES.get(self.name, ()):
+            path = home / relative
+            if not path.is_file():
+                continue
+            raw = path.read_bytes()
+            if len(raw) > CREDENTIAL_FILE_MAX_BYTES:
+                raise ValueError(f"凭据文件过大，无法导出：{relative}")
+            files[relative] = base64.b64encode(raw).decode("ascii")
+        if not files:
+            raise ValueError("当前没有可导出的登录凭据，请先在界面完成登录")
+        return {
+            "kind": CREDENTIAL_BUNDLE_KIND,
+            "version": CREDENTIAL_BUNDLE_VERSION,
+            "client": self.name,
+            "exported_at": int(time.time()),
+            "warning": "This file contains live login tokens for the named client.",
+            "files": files,
+        }
+
+    def import_credentials(self, bundle: str) -> None:
+        """Restore a previously exported session into this client's private home."""
+        text = str(bundle or "").strip()
+        if not text:
+            raise ValueError("请选择要导入的凭据文件")
+        if len(text) > 8 * CREDENTIAL_FILE_MAX_BYTES:
+            raise ValueError("凭据文件过大")
+        try:
+            payload = json.loads(text)
+        except json.JSONDecodeError as error:
+            raise ValueError(f"凭据文件不是有效 JSON：{error}") from error
+        if not isinstance(payload, dict) or payload.get("kind") != CREDENTIAL_BUNDLE_KIND:
+            raise ValueError("这不是本机器人导出的凭据文件")
+        if int(payload.get("version", 0)) != CREDENTIAL_BUNDLE_VERSION:
+            raise ValueError("凭据文件版本不受支持")
+        if str(payload.get("client", "")) != self.name:
+            raise ValueError(
+                f"凭据属于 {payload.get('client', '未知')} 客户端，不能导入到 {self.name}"
+            )
+        files = payload.get("files")
+        if not isinstance(files, dict) or not files:
+            raise ValueError("凭据文件不包含任何内容")
+        allowed = set(CREDENTIAL_FILES.get(self.name, ()))
+        decoded: dict[str, bytes] = {}
+        for relative, encoded in files.items():
+            if relative not in allowed:
+                raise ValueError(f"凭据文件包含不接受的条目：{relative}")
+            try:
+                raw = base64.b64decode(str(encoded), validate=True)
+            except (ValueError, TypeError) as error:
+                raise ValueError(f"凭据内容无法解码：{relative}") from error
+            if len(raw) > CREDENTIAL_FILE_MAX_BYTES:
+                raise ValueError(f"凭据文件过大：{relative}")
+            decoded[relative] = raw
+        self.cancel()
+        home = self.directory("AUTH")
+        home.mkdir(parents=True, exist_ok=True, mode=0o700)
+        home.chmod(0o700)
+        for relative, raw in decoded.items():
+            path = home / relative
+            path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+            path.parent.chmod(0o700)
+            path.write_bytes(raw)
+            path.chmod(0o600)
+        (home / "reauthentication.json").unlink(missing_ok=True)
+        self.state.update(message="已导入登录凭据，正在验证…")
+        self.inspect()
 
     def login(self, *, origin: str = "", remote: bool = False) -> None:
         with self.lock:
