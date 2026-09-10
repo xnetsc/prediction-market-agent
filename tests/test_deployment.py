@@ -39,10 +39,9 @@ class DeploymentTests(unittest.TestCase):
         dockerfile = (ROOT / "Dockerfile").read_text(encoding="utf-8")
         self.assertIn("FORWARDED_ALLOW_IPS=127.0.0.1,100.0.0.0/8", dockerfile)
         self.assertIn("prediction_market_agent.runtime.cloud.lambda_handler", aws)
-        self.assertIn("Type: ScheduleV2", aws)
+        self.assertNotIn("Type: ScheduleV2", aws)
         self.assertIn("custom.debian12", aliyun)
-        self.assertIn("triggerType: timer", aliyun)
-        self.assertIn("enable: false", aliyun)
+        self.assertNotIn("triggerType: timer", aliyun)
         self.assertIn("nasConfig: auto", aliyun)
 
     def test_function_compute_reserved_invoke_route_runs_one_cycle(self) -> None:

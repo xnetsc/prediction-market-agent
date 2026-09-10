@@ -1,4 +1,8 @@
 {
   "BASE_URL": "https://example.invalid",
-  "API_TOKEN": "<API_TOKEN>"
+  "API_TOKEN": "<API_TOKEN>",
+  "SCAN_INTERVAL_SECONDS": 60,
+  "MAX_TOPICS_PER_CYCLE": 10,
+  "MAX_DECISIONS_PER_CYCLE": 6,
+  "TOPIC_PAGE_SIZE": 100
 }

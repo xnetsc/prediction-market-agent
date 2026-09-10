@@ -84,11 +84,7 @@ class ProductionApiIntegrationTests(unittest.TestCase):
             )
 
     def test_03_binance_and_polymarket_run_in_one_registry(self) -> None:
-        config = replace(
-            self._config(("binance", "polymarket")),
-            max_topics_per_cycle=1,
-            max_decisions_per_cycle=1,
-        )
+        config = self._config(("binance", "polymarket"))
         registry, plugins = load_api_plugins(config)
         self.assertEqual(tuple(item.name for item in plugins), ("binance", "polymarket"))
         self.assertEqual(set(registry.registered_names), {"binance", "polymarket"})

@@ -228,6 +228,55 @@ class PluginInitializationContext:
 
 
 @dataclass(frozen=True)
+class PluginReadiness:
+    """Plugin-owned answer to whether its current private configuration can run."""
+
+    ready: bool
+    reasons: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        if self.ready and self.reasons:
+            raise ValueError("A ready plugin cannot report blocking reasons")
+        if not self.ready and not self.reasons:
+            raise ValueError("A blocked plugin must report at least one reason")
+
+    def manifest(self) -> dict[str, Any]:
+        return {"ready": self.ready, "reasons": list(self.reasons)}
+
+
+@dataclass(frozen=True)
+class PluginRuntime:
+    """Optional plugin-owned background lifecycle; the host only invokes callbacks."""
+
+    start_callback: Callable[[dict[str, Any]], None]
+    stop_callback: Callable[[], None]
+    status_callback: Callable[[], dict[str, Any]]
+
+    def __post_init__(self) -> None:
+        if not all(
+            callable(callback)
+            for callback in (
+                self.start_callback,
+                self.stop_callback,
+                self.status_callback,
+            )
+        ):
+            raise ValueError("Plugin runtime callbacks must be callable")
+
+    def start(self, services: dict[str, Any]) -> None:
+        self.start_callback(services)
+
+    def stop(self) -> None:
+        self.stop_callback()
+
+    def status(self) -> dict[str, Any]:
+        value = self.status_callback()
+        if not isinstance(value, dict):
+            raise ValueError("Plugin runtime status callback must return an object")
+        return value
+
+
+@dataclass(frozen=True)
 class PluginSpec:
     kind: str
     name: str
@@ -236,6 +285,8 @@ class PluginSpec:
     factory: Callable[..., Any]
     configuration: PluginConfiguration | None = None
     teardown: Callable[[], None] | None = None
+    readiness_callback: Callable[[], PluginReadiness] | None = None
+    runtime: PluginRuntime | None = None
 
     def __post_init__(self) -> None:
         if self.kind not in PLUGIN_KINDS:
@@ -248,14 +299,42 @@ class PluginSpec:
             raise ValueError(f"Plugin {self.kind}:{self.name} requires a callable factory")
         if not callable(self.teardown):
             raise ValueError(f"Plugin {self.kind}:{self.name} requires a teardown callback")
+        if self.readiness_callback is not None and not callable(self.readiness_callback):
+            raise ValueError(
+                f"Plugin {self.kind}:{self.name} readiness callback must be callable"
+            )
+
+    def readiness(self) -> PluginReadiness:
+        if self.readiness_callback is not None:
+            result = self.readiness_callback()
+            if not isinstance(result, PluginReadiness):
+                raise ValueError(
+                    f"Plugin {self.kind}:{self.name} readiness callback must return "
+                    "PluginReadiness"
+                )
+            return result
+        if self.configuration is None:
+            return PluginReadiness(True)
+        try:
+            self.configuration.load()
+        except (KeyError, TypeError, ValueError) as error:
+            return PluginReadiness(False, (str(error),))
+        return PluginReadiness(True)
 
     def manifest(self) -> dict[str, Any]:
+        try:
+            readiness = self.readiness().manifest()
+        except Exception as error:
+            readiness = PluginReadiness(False, (str(error),)).manifest()
         return {
             "kind": self.kind,
             "name": self.name,
             "description": self.description,
             "origin": self.origin,
             "configuration": self.configuration.manifest() if self.configuration else None,
+            "readiness": readiness,
+            "has_runtime": self.runtime is not None,
+            "runtime": self.runtime.status() if self.runtime else None,
         }
 
 
@@ -325,6 +404,8 @@ class PluginCatalog:
         specs = [spec for kind in PLUGIN_KINDS for spec in self.specs(kind)]
         for spec in reversed(specs):
             try:
+                if spec.runtime is not None:
+                    spec.runtime.stop()
                 assert spec.teardown is not None
                 spec.teardown()
             except Exception as error:
@@ -421,7 +502,10 @@ def close_plugin_instances(instances: list[Any]) -> None:
 
 def load_plugin_catalog(config: Any) -> PluginCatalog:
     """Load category locations from plugin-directory config, then initialize every discovered plugin."""
-    directory_config = PluginDirectoryConfig.load(config.plugin_directories_file)
+    directory_config = PluginDirectoryConfig.load(
+        config.plugin_directories_file,
+        working_directory=getattr(config, "working_directory", Path.cwd()),
+    )
     managed = ManagedRuntimeConfig.load(config.management_file)
     enabled = {
         "api": managed.selected("api", config.market_api_plugins),

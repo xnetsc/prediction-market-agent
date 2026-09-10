@@ -298,6 +298,45 @@ class PluginSystemTests(unittest.TestCase):
             self.assertEqual(refreshed["plugins"]["hook"], [])
             self.assertEqual(service.catalog.names("hook"), ())
 
+    def test_ui_service_installs_new_plugin_disabled_without_importing_it(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            hook_dir = root / "plugins" / "hook"
+            directory_path = root / "plugin-directories.json"
+            directory_path.write_text(
+                json.dumps({"categories": {
+                    "api": [], "decision_provider": [], "decision_strategy": [],
+                    "research_tool": [], "risk": [], "hook": [str(hook_dir)],
+                }}),
+                encoding="utf-8",
+            )
+            config = Config(
+                working_directory=root,
+                plugin_directories_file=directory_path,
+                management_file=root / "management.json",
+                market_api_plugins=(), decision_providers=(),
+                research_tool_plugins=(), risk_plugins=(), hook_plugins=(),
+                decision_strategy_name="",
+            )
+            service = PluginManagementService(config)
+            marker = root / "imported.txt"
+            result = service.install_plugin(
+                "hook",
+                "new_hook",
+                "from pathlib import Path\n"
+                f"Path({str(marker)!r}).write_text('imported')\n"
+                "def initialize_plugin(context):\n    raise RuntimeError('disabled')\n",
+                str(hook_dir),
+            )
+            self.assertTrue(Path(result["installed"]).is_file())
+            self.assertFalse(marker.exists())
+            installed = next(
+                item for item in result["management"]["plugins"]["hook"]
+                if item["name"] == "new_hook"
+            )
+            self.assertFalse(installed["initialized"])
+            service.shutdown()
+
     def test_polymarket_official_client_surface_all_write_workflows(self) -> None:
         settings = PolymarketPluginConfig.from_mapping(
             values={

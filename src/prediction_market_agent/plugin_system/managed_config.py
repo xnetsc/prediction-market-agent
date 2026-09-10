@@ -40,6 +40,8 @@ class ManagedRuntimeConfig:
     path: Path
     enabled: dict[str, tuple[str, ...]] = field(default_factory=dict)
     decision_strategy: str = ""
+    robot_paused: bool = False
+    paused_platforms: tuple[str, ...] = ()
     source_path: Path | None = None
 
     @classmethod
@@ -61,10 +63,18 @@ class ManagedRuntimeConfig:
             if values is not None:
                 enabled[kind] = values
         strategy = str(raw.get("decision_strategy", "")).strip().lower()
+        robot_paused = raw.get("robot_paused", False)
+        if not isinstance(robot_paused, bool):
+            raise ValueError("Managed plugin setting robot_paused must be a boolean")
+        paused_platforms = _string_list(
+            raw.get("paused_platforms", []), "paused_platforms"
+        )
         return cls(
             path=resolved,
             enabled=enabled,
             decision_strategy=strategy,
+            robot_paused=robot_paused,
+            paused_platforms=paused_platforms or (),
             source_path=source,
         )
 
@@ -76,6 +86,8 @@ class ManagedRuntimeConfig:
             "version": 1,
             "enabled": {kind: list(names) for kind, names in self.enabled.items()},
             "decision_strategy": self.decision_strategy,
+            "robot_paused": self.robot_paused,
+            "paused_platforms": list(self.paused_platforms),
         }
 
 
@@ -104,6 +116,8 @@ def save_managed_config(path: Path, value: dict[str, Any]) -> ManagedRuntimeConf
         "version": 1,
         "enabled": value.get("enabled", {}),
         "decision_strategy": value.get("decision_strategy", ""),
+        "robot_paused": value.get("robot_paused", False),
+        "paused_platforms": value.get("paused_platforms", []),
     }
     encoded = json.dumps(candidate, ensure_ascii=False, indent=2) + "\n"
     atomic_write_text(path.expanduser().resolve(), encoded)

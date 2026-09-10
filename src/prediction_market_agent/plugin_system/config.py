@@ -17,7 +17,9 @@ class PluginDirectoryConfig:
     source_path: Path
 
     @classmethod
-    def load(cls, configured: Path) -> "PluginDirectoryConfig":
+    def load(
+        cls, configured: Path, *, working_directory: Path | None = None
+    ) -> "PluginDirectoryConfig":
         path = configured.expanduser().resolve()
         source_path = path if path.exists() else DEFAULT_PLUGIN_DIRECTORY_CONFIG.resolve()
         try:
@@ -30,6 +32,7 @@ class PluginDirectoryConfig:
         if not isinstance(categories, dict):
             raise ValueError("Plugin directory configuration must contain a categories object")
         package_root = Path(__file__).resolve().parents[1]
+        runtime_root = (working_directory or Path.cwd()).expanduser().resolve()
         resolved: dict[str, tuple[Path, ...]] = {}
         for kind in PLUGIN_KINDS:
             values = categories.get(kind, [])
@@ -38,6 +41,7 @@ class PluginDirectoryConfig:
             paths: list[Path] = []
             for value in values:
                 expanded = value.replace("${PACKAGE_ROOT}", str(package_root))
+                expanded = expanded.replace("${WORKING_DIRECTORY}", str(runtime_root))
                 candidate = Path(expanded).expanduser()
                 if not candidate.is_absolute():
                     candidate = source_path.parent / candidate
@@ -46,7 +50,13 @@ class PluginDirectoryConfig:
         return cls(path=path, directories=resolved, source_path=source_path)
 
     @classmethod
-    def save(cls, path: Path, categories: dict[str, object]) -> "PluginDirectoryConfig":
+    def save(
+        cls,
+        path: Path,
+        categories: dict[str, object],
+        *,
+        working_directory: Path | None = None,
+    ) -> "PluginDirectoryConfig":
         if not isinstance(categories, dict):
             raise ValueError("Plugin directories must be an object")
         unknown = sorted(set(categories) - set(PLUGIN_KINDS))
@@ -68,14 +78,16 @@ class PluginDirectoryConfig:
             )
             + "\n",
         )
-        return cls.load(target)
+        return cls.load(target, working_directory=working_directory)
 
     @classmethod
-    def reset(cls, path: Path) -> "PluginDirectoryConfig":
+    def reset(
+        cls, path: Path, *, working_directory: Path | None = None
+    ) -> "PluginDirectoryConfig":
         target = path.expanduser().resolve()
         if target.exists():
             target.unlink()
-        return cls.load(target)
+        return cls.load(target, working_directory=working_directory)
 
     def manifest(self) -> dict[str, object]:
         return {

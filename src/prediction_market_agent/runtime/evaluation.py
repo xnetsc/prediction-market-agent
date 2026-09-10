@@ -65,7 +65,7 @@ class MarketEvaluationMixin:
             self._settle_if_possible(runtime, detail)
             return
         for market in self.decision_strategy.select_markets(detail.markets):
-            if self._decisions_this_cycle >= self.config.max_decisions_per_cycle:
+            if self._decisions_this_cycle >= self._max_decisions_this_cycle:
                 break
             for outcome in self.decision_strategy.select_outcomes(market.outcomes):
                 self._evaluate_outcome(
@@ -81,7 +81,7 @@ class MarketEvaluationMixin:
         outcome: Outcome,
         seconds_remaining: float,
     ) -> None:
-        if self._decisions_this_cycle >= self.config.max_decisions_per_cycle:
+        if self._decisions_this_cycle >= self._max_decisions_this_cycle:
             return
         self._decisions_this_cycle += 1
         platform = runtime.plugin.name

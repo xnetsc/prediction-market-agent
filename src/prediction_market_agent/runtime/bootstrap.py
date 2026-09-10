@@ -37,9 +37,12 @@ class EngineComponents:
     research_contributions: list[Any]
 
 
-def bootstrap_engine(config: Config) -> EngineComponents:
+def bootstrap_engine(
+    config: Config, *, catalog: PluginCatalog | None = None
+) -> EngineComponents:
     """Initialize enabled plugins and wire their runtime services."""
-    catalog = load_plugin_catalog(config)
+    owns_catalog = catalog is None
+    catalog = catalog or load_plugin_catalog(config)
     try:
         strategy_name = config.decision_strategy_name.strip().lower()
         if not strategy_name:
@@ -130,5 +133,6 @@ def bootstrap_engine(config: Config) -> EngineComponents:
             ],
         )
     except Exception:
-        catalog.shutdown()
+        if owns_catalog:
+            catalog.shutdown()
         raise

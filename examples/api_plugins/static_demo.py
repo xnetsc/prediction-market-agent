@@ -1,6 +1,7 @@
 """Complete API plugin example with static reads and an online HTTP write transport."""
 
 import json
+import threading
 import urllib.parse
 import urllib.request
 
@@ -22,6 +23,8 @@ from prediction_market_agent.plugin_system.discovery import (
     PluginConfiguration,
     PluginInitializationContext,
     PluginSpec,
+    PluginReadiness,
+    PluginRuntime,
 )
 from prediction_market_agent.core.risk import NetworkWriteGate
 
@@ -81,7 +84,7 @@ class StaticDemoPlugin:
         supported_transfer_directions=("INBOUND", "OUTBOUND"),
     )
 
-    def __init__(self, base_url, api_token):
+    def __init__(self, base_url, api_token, maximum_topics=10, maximum_decisions=6, page_size=100):
         parsed = urllib.parse.urlparse(base_url)
         if parsed.scheme not in {"http", "https"} or not parsed.hostname:
             raise ValueError("BASE_URL must be an HTTP(S) URL")
@@ -94,6 +97,8 @@ class StaticDemoPlugin:
             target_name="network:static_demo",
         )
         self._write_transport = ExampleHttpWriteTransport(base_url, api_token, self.network_rule_engine)
+        self._cycle_limits = (maximum_topics, maximum_decisions)
+        self._page_size = page_size
 
     def sync_time(self):
         return None
@@ -135,6 +140,12 @@ class StaticDemoPlugin:
     def configuration_manifest(self):
         return {"external_network": True, "api_token_present": bool(self._write_transport.token)}
 
+    def cycle_limits(self):
+        return self._cycle_limits
+
+    def topic_page_size(self):
+        return self._page_size
+
     def outcome_won(self, detail, market, outcome):
         del detail, market, outcome
         return None
@@ -151,6 +162,10 @@ def initialize_plugin(context: PluginInitializationContext) -> PluginSpec:
         fields=(
             PluginConfigField("BASE_URL", "服务 URL", "string", "实现示例 quote/order/cancel/redeem/transfer JSON 端点的 HTTP(S) 服务根地址。", required=True),
             PluginConfigField("API_TOKEN", "API Token", "secret", "示例服务 Authorization Bearer 凭证；原样交给远端验证。"),
+            PluginConfigField("SCAN_INTERVAL_SECONDS", "扫描间隔", "integer", "示例平台定时扫描间隔秒数。", default=60),
+            PluginConfigField("MAX_TOPICS_PER_CYCLE", "主题上限", "integer", "示例平台每轮最多提交的主题数。", default=10),
+            PluginConfigField("MAX_DECISIONS_PER_CYCLE", "决策上限", "integer", "示例平台事件进入通用循环后的最大决策数。", default=6),
+            PluginConfigField("TOPIC_PAGE_SIZE", "分页大小", "integer", "示例平台每次列表请求的记录数。", default=100),
         ),
         load_callback=load,
         save_callback=save,
@@ -158,17 +173,73 @@ def initialize_plugin(context: PluginInitializationContext) -> PluginSpec:
         storage=storage,
     )
     instances = []
+    stop_event = threading.Event()
+    runtime_thread = None
 
     def factory(config):
         del config
         values = configuration.load()
-        instance = StaticDemoPlugin(values["BASE_URL"], values.get("API_TOKEN", ""))
+        instance = StaticDemoPlugin(
+            values["BASE_URL"], values.get("API_TOKEN", ""),
+            int(values["MAX_TOPICS_PER_CYCLE"]),
+            int(values["MAX_DECISIONS_PER_CYCLE"]),
+            int(values["TOPIC_PAGE_SIZE"]),
+        )
         instances.append(instance)
         return instance
 
     def teardown():
+        stop_runtime()
         while instances:
             instances.pop().close()
+
+    def readiness():
+        try:
+            values = configuration.load()
+            if min(
+                int(values["SCAN_INTERVAL_SECONDS"]),
+                int(values["MAX_TOPICS_PER_CYCLE"]),
+                int(values["MAX_DECISIONS_PER_CYCLE"]),
+                int(values["TOPIC_PAGE_SIZE"]),
+            ) <= 0:
+                raise ValueError("Example runtime numbers must be positive")
+        except (KeyError, TypeError, ValueError) as error:
+            return PluginReadiness(False, (str(error),))
+        return PluginReadiness(True)
+
+    def start_runtime(services):
+        nonlocal runtime_thread
+        if not instances:
+            raise RuntimeError("Static demo API instance is not active")
+        submit = services.get("submit_scan")
+        if not callable(submit):
+            raise ValueError("Static demo runtime requires submit_scan")
+        values = configuration.load()
+        interval = int(values["SCAN_INTERVAL_SECONDS"])
+        plugin = instances[-1]
+        stop_event.clear()
+
+        def run():
+            while not stop_event.is_set():
+                topics = plugin.list_topics(
+                    offset=0, limit=int(values["MAX_TOPICS_PER_CYCLE"])
+                ).topics
+                submit(topics, int(values["MAX_DECISIONS_PER_CYCLE"]))
+                if stop_event.wait(interval):
+                    break
+
+        runtime_thread = threading.Thread(target=run, daemon=True)
+        runtime_thread.start()
+
+    def stop_runtime():
+        nonlocal runtime_thread
+        stop_event.set()
+        if runtime_thread is not None and runtime_thread is not threading.current_thread():
+            runtime_thread.join()
+        runtime_thread = None
+
+    def runtime_status():
+        return {"running": runtime_thread is not None and runtime_thread.is_alive()}
 
     return PluginSpec(
         kind="api",
@@ -178,4 +249,6 @@ def initialize_plugin(context: PluginInitializationContext) -> PluginSpec:
         factory=factory,
         configuration=configuration,
         teardown=teardown,
+        readiness_callback=readiness,
+        runtime=PluginRuntime(start_runtime, stop_runtime, runtime_status),
     )

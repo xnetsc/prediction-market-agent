@@ -6,8 +6,12 @@ from prediction_market_agent.plugin_system.discovery import (
     PluginConfiguration,
     PluginInitializationContext,
     PluginSpec,
+    PluginReadiness,
+    PluginRuntime,
     close_plugin_instances,
 )
+from prediction_market_agent.plugins.api._polymarket.config import PolymarketPluginConfig
+from prediction_market_agent.plugins.api._polymarket.runtime import PolymarketEventLoop
 from prediction_market_agent.plugins.api._polymarket.adapter import PolymarketApiPlugin
 
 
@@ -35,10 +39,61 @@ def initialize_plugin(context: PluginInitializationContext) -> PluginSpec:
         PluginConfigField("POLYMARKET_TRANSFER_RECIPIENT", "转出地址", "string", "TRANSFER_OUT 操作默认接收 pUSD 的 EVM 地址。"),
         PluginConfigField("POLYMARKET_HTTP_PROXY", "HTTP 代理", "string", "Polymarket 插件独立使用的代理。填 DIRECT 直连、SYSTEM 读取本机系统代理，或填写 http(s) URL。", required=True),
         PluginConfigField("POLYMARKET_NETWORK_RULES_JSON", "网络规则 JSON", "string", "Polymarket 插件允许访问的 scheme、host、HTTP method 与各 method 路径模式；由插件构造网络规则引擎。", required=True),
+        PluginConfigField("POLYMARKET_SCAN_INTERVAL_SECONDS", "扫描间隔（秒）", "integer", "Polymarket 完成一个市场扫描与决策周期后等待到下一周期的秒数。", default=60),
+        PluginConfigField("POLYMARKET_ERROR_BACKOFF_SECONDS", "失败退避初值（秒）", "integer", "Polymarket 周期失败后的首次重试等待秒数；连续失败时指数增长。", default=30),
+        PluginConfigField("POLYMARKET_ERROR_BACKOFF_MAX_SECONDS", "失败退避上限（秒）", "integer", "Polymarket 连续失败重试等待的最大秒数。", default=900),
+        PluginConfigField("POLYMARKET_MAX_TOPICS_PER_CYCLE", "每轮主题上限", "integer", "Polymarket 每次事件循环最多进入策略筛选的候选主题数。", default=10),
+        PluginConfigField("POLYMARKET_MAX_DECISIONS_PER_CYCLE", "每轮决策上限", "integer", "Polymarket 每次事件循环最多交给 Agent 的 outcome 决策数。", default=6),
+        PluginConfigField("POLYMARKET_TOPIC_PAGE_SIZE", "主题分页大小", "integer", "Polymarket 每次事件列表网络请求加载的记录数。", default=100),
     )
     configuration = PluginConfiguration(fields, load, save, delete, storage)
 
     instances = []
+
+    def settings() -> PolymarketPluginConfig:
+        return PolymarketPluginConfig.from_mapping(
+            {name: str(value) for name, value in configuration.load().items()}
+        )
+
+    def scan(maximum_topics: int, page_size: int):
+        if not instances:
+            raise RuntimeError("Polymarket API instance is not active")
+        plugin = instances[-1]
+        plugin.sync_time()
+        topics = []
+        offset = 0
+        while len(topics) < maximum_topics:
+            page = plugin.list_topics(
+                offset=offset,
+                limit=min(page_size, maximum_topics - len(topics)),
+            )
+            topics.extend(page.topics)
+            if not page.has_more or not page.topics:
+                break
+            offset = page.next_offset
+        return tuple(topics)
+
+    event_loop = PolymarketEventLoop(settings, scan)
+
+    def readiness() -> PluginReadiness:
+        try:
+            values = configuration.load()
+            settings()
+        except (KeyError, TypeError, ValueError) as error:
+            return PluginReadiness(False, (str(error),))
+        required = (
+            "POLYMARKET_PRIVATE_KEY",
+            "POLYMARKET_API_KEY",
+            "POLYMARKET_API_SECRET",
+            "POLYMARKET_API_PASSPHRASE",
+            "POLYMARKET_FUNDER_ADDRESS",
+        )
+        missing = tuple(name for name in required if not str(values.get(name, "")).strip())
+        return (
+            PluginReadiness(False, tuple(f"Missing runtime field: {name}" for name in missing))
+            if missing
+            else PluginReadiness(True)
+        )
 
     def factory(config):
         del config
@@ -56,4 +111,6 @@ def initialize_plugin(context: PluginInitializationContext) -> PluginSpec:
         factory=factory,
         configuration=configuration,
         teardown=lambda: close_plugin_instances(instances),
+        readiness_callback=readiness,
+        runtime=PluginRuntime(event_loop.start, event_loop.stop, event_loop.status),
     )

@@ -1,6 +1,6 @@
 AWSTemplateFormatVersion: "2010-09-09"
 Transform: AWS::Serverless-2016-10-31
-Description: Prediction Market Agent HTTP application and scheduled robot cycle
+Description: Prediction Market Agent management HTTP application
 
 Resources:
   PredictionMarketAgent:
@@ -16,13 +16,6 @@ Resources:
       Events:
         Http:
           Type: HttpApi
-        ScheduledCycle:
-          Type: ScheduleV2
-          Properties:
-            ScheduleExpression: rate(5 minutes)
-            State: DISABLED
-            FlexibleTimeWindow:
-              Mode: OFF
 
 Outputs:
   HttpApiUrl:

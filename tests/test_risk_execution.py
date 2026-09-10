@@ -183,6 +183,12 @@ class RiskAndExecutionTests(unittest.TestCase):
             def configuration_manifest(self):
                 return {}
 
+            def cycle_limits(self):
+                return (1, 1)
+
+            def topic_page_size(self):
+                return 1
+
             def outcome_won(self, detail, market, outcome):
                 del detail, market, outcome
                 return None
@@ -209,8 +215,6 @@ class RiskAndExecutionTests(unittest.TestCase):
                 state_file=root / "state.json",
                 session_db=root / "session.sqlite3",
                 market_api_plugins=("fake",),
-                max_topics_per_cycle=1,
-                max_decisions_per_cycle=1,
                 risk_plugins=("test_portfolio", "test_action"),
                 research_tool_plugins=(),
                 decision_strategy_name="general_agent",

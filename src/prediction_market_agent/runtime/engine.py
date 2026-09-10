@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 import logging
-import time
+import threading
 from typing import Any
 
 from ..core.config import Config
 from ..plugin_system.contracts import PredictionMarketApiPlugin, Topic
+from ..plugin_system.discovery import PluginCatalog
 from .actions import ExecutionActionsMixin
 from .bootstrap import PlatformRuntime, bootstrap_engine
 from .broker import ExecutionError
@@ -18,11 +19,13 @@ LOGGER = logging.getLogger(__name__)
 class TradingEngine(MarketEvaluationMixin, ExecutionActionsMixin):
     """Coordinate one decision cycle across all enabled market plugins."""
 
-    def __init__(self, config: Config):
+    def __init__(self, config: Config, *, catalog: PluginCatalog | None = None):
         self.config = config
+        self._cycle_lock = threading.RLock()
+        self._owns_catalog = catalog is None
         self.memory = SessionMemory(config.session_db)
         try:
-            components = bootstrap_engine(config)
+            components = bootstrap_engine(config, catalog=catalog)
         except Exception:
             self.memory.close()
             raise
@@ -37,16 +40,18 @@ class TradingEngine(MarketEvaluationMixin, ExecutionActionsMixin):
         self.provider = components.provider
         self.research_contributions = components.research_contributions
         self._decisions_this_cycle = 0
+        self._max_decisions_this_cycle = 0
 
     @staticmethod
     def _all_topics(
-        plugin: PredictionMarketApiPlugin, maximum: int = 500
+        plugin: PredictionMarketApiPlugin, maximum: int
     ) -> list[Topic]:
         topics: list[Topic] = []
         offset = 0
         while len(topics) < maximum:
             page = plugin.list_topics(
-                offset=offset, limit=min(100, maximum - len(topics))
+                offset=offset,
+                limit=min(plugin.topic_page_size(), maximum - len(topics)),
             )
             topics.extend(page.topics)
             if not page.has_more or not page.topics:
@@ -55,47 +60,90 @@ class TradingEngine(MarketEvaluationMixin, ExecutionActionsMixin):
         return topics
 
     def run_once(self) -> dict[str, float | int | bool | str]:
+        with self._cycle_lock:
+            for runtime in self.platforms.values():
+                maximum_topics, maximum_decisions = runtime.plugin.cycle_limits()
+                topics = self._collect_platform_topics(runtime, maximum_topics)
+                self._process_platform_topics(runtime, topics, maximum_decisions)
+            return self.status()
+
+    def run_platform_once(
+        self, platform: str, maximum_topics: int, maximum_decisions: int
+    ) -> dict[str, float | int | bool | str]:
+        """Execute one platform cycle when invoked by that platform plugin runtime."""
+        if maximum_topics <= 0 or maximum_decisions <= 0:
+            raise ValueError("Platform cycle limits must be positive")
+        with self._cycle_lock:
+            try:
+                runtime = self.platforms[platform]
+            except KeyError as error:
+                raise ValueError(f"Unknown active platform: {platform}") from error
+            topics = self._collect_platform_topics(runtime, maximum_topics)
+            self._process_platform_topics(runtime, topics, maximum_decisions)
+            return self.status()
+
+    def process_platform_scan(
+        self, platform: str, topics: tuple[Topic, ...], maximum_decisions: int
+    ) -> dict[str, float | int | bool | str]:
+        """Consume a normalized scan event emitted by one platform plugin."""
+        if maximum_decisions <= 0:
+            raise ValueError("Platform decision limit must be positive")
+        with self._cycle_lock:
+            try:
+                runtime = self.platforms[platform]
+            except KeyError as error:
+                raise ValueError(f"Unknown active platform: {platform}") from error
+            self._process_platform_topics(runtime, list(topics), maximum_decisions)
+            return self.status()
+
+    def _collect_platform_topics(
+        self, runtime: PlatformRuntime, maximum_topics: int
+    ) -> list[Topic]:
         self.global_risk.refresh_halt()
-        topics_by_platform: dict[str, list[Topic]] = {}
-        for runtime in self.platforms.values():
-            if runtime.state.halted:
-                LOGGER.warning(
-                    "%s account halted: %s",
-                    runtime.plugin.name,
-                    runtime.state.halt_reason,
-                )
-                continue
-            runtime.plugin.sync_time()
-            topics_by_platform[runtime.plugin.name] = self._all_topics(runtime.plugin)
-        for runtime in self.platforms.values():
-            if runtime.plugin.name not in topics_by_platform:
-                continue
-            self._decisions_this_cycle = 0
-            topics = topics_by_platform[runtime.plugin.name]
-            eligible = self.decision_strategy.select_topics(topics)[
-                : self.config.max_topics_per_cycle
-            ]
-            LOGGER.info(
-                "platform=%s scanned=%d candidates=%d provider=%s",
+        if runtime.state.halted:
+            LOGGER.warning(
+                "%s account halted: %s",
                 runtime.plugin.name,
-                len(topics),
-                len(eligible),
-                self.provider.name,
+                runtime.state.halt_reason,
             )
-            for topic in eligible:
-                if self._decisions_this_cycle >= self.config.max_decisions_per_cycle:
-                    break
-                try:
-                    self._evaluate_topic(runtime, topic)
-                except (KeyError, ValueError, RuntimeError, ExecutionError) as error:
-                    LOGGER.warning(
-                        "skip %s topic %s: %s",
-                        runtime.plugin.name,
-                        topic.topic_id,
-                        error,
-                    )
-            runtime.store.save(runtime.state)
-        return self.status()
+            return []
+        runtime.plugin.sync_time()
+        return self._all_topics(runtime.plugin, maximum_topics)
+
+    def _process_platform_topics(
+        self, runtime: PlatformRuntime, topics: list[Topic], maximum_decisions: int
+    ) -> None:
+        self.global_risk.refresh_halt()
+        if runtime.state.halted:
+            LOGGER.warning(
+                "%s account halted before scan processing: %s",
+                runtime.plugin.name,
+                runtime.state.halt_reason,
+            )
+            return
+        self._decisions_this_cycle = 0
+        self._max_decisions_this_cycle = maximum_decisions
+        eligible = self.decision_strategy.select_topics(topics)
+        LOGGER.info(
+            "platform=%s scanned=%d candidates=%d provider=%s",
+            runtime.plugin.name,
+            len(topics),
+            len(eligible),
+            self.provider.name,
+        )
+        for topic in eligible:
+            if self._decisions_this_cycle >= maximum_decisions:
+                break
+            try:
+                self._evaluate_topic(runtime, topic)
+            except (KeyError, ValueError, RuntimeError, ExecutionError) as error:
+                LOGGER.warning(
+                    "skip %s topic %s: %s",
+                    runtime.plugin.name,
+                    topic.topic_id,
+                    error,
+                )
+        runtime.store.save(runtime.state)
 
     @staticmethod
     def _platform_status(runtime: PlatformRuntime) -> dict[str, Any]:
@@ -147,30 +195,10 @@ class TradingEngine(MarketEvaluationMixin, ExecutionActionsMixin):
             key: round(value, 6) for key, value in sorted(totals.items())
         }
 
-    def run_forever(self) -> None:
-        while True:
-            if self.config.run_until_epoch and time.time() >= self.config.run_until_epoch:
-                LOGGER.info("configured run-until time reached")
-                break
-            try:
-                status = self.run_once()
-                LOGGER.info("status=%s", status)
-            except KeyboardInterrupt:
-                raise
-            except Exception:
-                LOGGER.exception("cycle failed; state was not discarded")
-            sleep_for = self.config.interval_seconds
-            if self.config.run_until_epoch:
-                sleep_for = min(
-                    sleep_for,
-                    max(0, self.config.run_until_epoch - int(time.time())),
-                )
-            if sleep_for > 0:
-                time.sleep(sleep_for)
-
     def close(self) -> None:
         """Release session and plugin-owned resources for this engine instance."""
         try:
             self.memory.close()
         finally:
-            self.plugin_catalog.shutdown()
+            if self._owns_catalog:
+                self.plugin_catalog.shutdown()
