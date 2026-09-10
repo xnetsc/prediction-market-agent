@@ -81,7 +81,7 @@ def export_strategies(
     owns_memory = memory is None
     store = memory or SessionMemory(config.session_db)
     now_ms = int(time.time() * 1000)
-    evolution_enabled = bool(config.market_discovery_evolution)
+    evolution_enabled = bool(config.strategy_evolution)
     try:
         result: dict[str, Any] = {
             "generated_at": now_ms,

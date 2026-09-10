@@ -275,7 +275,7 @@ class Config:
     application_config_file: Path = DEFAULT_APPLICATION_CONFIG
     market_api_plugins: tuple[str, ...] = ()
     market_discovery_plugins: tuple[str, ...] = ()
-    market_discovery_evolution: bool = True
+    strategy_evolution: bool = True
     research_tool_plugins: tuple[str, ...] = ()
     dashboard_host: str = "127.0.0.1"
     dashboard_port: int = 8765
@@ -312,7 +312,7 @@ class Config:
             application_config_file=store.path,
             market_api_plugins=managed.selected("api", ()),
             market_discovery_plugins=managed.selected("market_discovery", ()),
-            market_discovery_evolution=managed.market_discovery_evolution,
+            strategy_evolution=managed.strategy_evolution,
             research_tool_plugins=managed.selected("research_tool", ()),
             dashboard_host=str(values["dashboard_host"]),
             dashboard_port=int(values["dashboard_port"]),

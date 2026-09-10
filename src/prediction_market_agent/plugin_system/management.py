@@ -82,7 +82,7 @@ class PluginManagementService:
             "restart_required_after_change": False,
             "enabled": selected,
             "decision_strategy": strategy,
-            "market_discovery_evolution": managed.market_discovery_evolution,
+            "strategy_evolution": managed.strategy_evolution,
             "robot_paused": managed.robot_paused,
             "paused_platforms": list(managed.paused_platforms),
             "plugins": result,
@@ -184,15 +184,15 @@ class PluginManagementService:
         if strategy and strategy not in self.catalog.discovered_names("decision_strategy"):
             raise ValueError(f"Unknown decision strategy plugin: {strategy!r}")
         normalized["decision_strategy"] = [strategy] if strategy else []
-        evolution = payload.get("market_discovery_evolution", self._managed().market_discovery_evolution)
+        evolution = payload.get("strategy_evolution", self._managed().strategy_evolution)
         if not isinstance(evolution, bool):
-            raise ValueError("market_discovery_evolution must be a boolean")
+            raise ValueError("strategy_evolution must be a boolean")
         save_managed_config(
             self.config.management_file,
             {
                 "enabled": normalized,
                 "decision_strategy": strategy,
-                "market_discovery_evolution": evolution,
+                "strategy_evolution": evolution,
                 "robot_paused": self._managed().robot_paused,
                 "paused_platforms": list(self._managed().paused_platforms),
             },
@@ -298,6 +298,7 @@ class PluginManagementService:
         normalized = {
             "enabled": enabled,
             "decision_strategy": strategy,
+            "strategy_evolution": managed.strategy_evolution,
             "robot_paused": managed.robot_paused,
             "paused_platforms": paused,
         }

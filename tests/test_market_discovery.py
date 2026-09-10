@@ -514,5 +514,64 @@ class StrategyExportTests(unittest.TestCase):
         self.assertIn("lessons_applied", stripped)
 
 
+class EvolutionSwitchTests(unittest.TestCase):
+    """The switch is the operator's only control over evolution, so it must actually stick."""
+
+    def setUp(self) -> None:
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name)
+
+    def _service(self):
+        from prediction_market_agent.core.config import Config
+        from prediction_market_agent.plugin_system.management import PluginManagementService
+
+        config = Config(
+            working_directory=self.root,
+            management_file=self.root / "bot_management.json",
+            session_db=self.root / "session.sqlite3",
+            state_file=self.root / "state.json",
+        )
+        return PluginManagementService(config)
+
+    def test_turning_evolution_off_survives_the_refresh_that_follows_the_save(self) -> None:
+        service = self._service()
+        self.assertTrue(service.manifest()["strategy_evolution"], "default is on")
+        service.save_enabled(
+            {"enabled": {"api": []}, "decision_strategy": "", "strategy_evolution": False}
+        )
+        self.assertFalse(
+            service.manifest()["strategy_evolution"],
+            "saving the switch off must persist",
+        )
+        service.refresh()
+        self.assertFalse(
+            service.manifest()["strategy_evolution"],
+            "refresh re-saves the managed file and must not reset the switch",
+        )
+        service.save_enabled(
+            {"enabled": {"api": []}, "decision_strategy": "", "strategy_evolution": True}
+        )
+        self.assertTrue(service.manifest()["strategy_evolution"])
+
+    def test_an_omitted_switch_keeps_its_stored_value(self) -> None:
+        service = self._service()
+        service.save_enabled(
+            {"enabled": {"api": []}, "decision_strategy": "", "strategy_evolution": False}
+        )
+        service.save_enabled({"enabled": {"api": []}, "decision_strategy": ""})
+        self.assertFalse(
+            service.manifest()["strategy_evolution"],
+            "a payload without the switch must not silently re-enable it",
+        )
+
+    def test_a_non_boolean_switch_is_rejected(self) -> None:
+        service = self._service()
+        with self.assertRaises(ValueError):
+            service.save_enabled(
+                {"enabled": {"api": []}, "decision_strategy": "", "strategy_evolution": "yes"}
+            )
+
+
 if __name__ == "__main__":
     unittest.main()

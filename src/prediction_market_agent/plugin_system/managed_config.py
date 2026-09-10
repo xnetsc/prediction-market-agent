@@ -41,7 +41,7 @@ class ManagedRuntimeConfig:
     path: Path
     enabled: dict[str, tuple[str, ...]] = field(default_factory=dict)
     decision_strategy: str = ""
-    market_discovery_evolution: bool = True
+    strategy_evolution: bool = True
     robot_paused: bool = False
     paused_platforms: tuple[str, ...] = ()
     source_path: Path | None = None
@@ -65,10 +65,10 @@ class ManagedRuntimeConfig:
             if values is not None:
                 enabled[kind] = values
         strategy = str(raw.get("decision_strategy", "")).strip().lower()
-        evolution = raw.get("market_discovery_evolution", True)
+        evolution = raw.get("strategy_evolution", True)
         if not isinstance(evolution, bool):
             raise ValueError(
-                "Managed plugin setting market_discovery_evolution must be a boolean"
+                "Managed plugin setting strategy_evolution must be a boolean"
             )
         robot_paused = raw.get("robot_paused", False)
         if not isinstance(robot_paused, bool):
@@ -80,7 +80,7 @@ class ManagedRuntimeConfig:
             path=resolved,
             enabled=enabled,
             decision_strategy=strategy,
-            market_discovery_evolution=evolution,
+            strategy_evolution=evolution,
             robot_paused=robot_paused,
             paused_platforms=paused_platforms or (),
             source_path=source,
@@ -94,7 +94,7 @@ class ManagedRuntimeConfig:
             "version": 1,
             "enabled": {kind: list(names) for kind, names in self.enabled.items()},
             "decision_strategy": self.decision_strategy,
-            "market_discovery_evolution": self.market_discovery_evolution,
+            "strategy_evolution": self.strategy_evolution,
             "robot_paused": self.robot_paused,
             "paused_platforms": list(self.paused_platforms),
         }
@@ -125,7 +125,7 @@ def save_managed_config(path: Path, value: dict[str, Any]) -> ManagedRuntimeConf
         "version": 1,
         "enabled": value.get("enabled", {}),
         "decision_strategy": value.get("decision_strategy", ""),
-        "market_discovery_evolution": value.get("market_discovery_evolution", True),
+        "strategy_evolution": value.get("strategy_evolution", True),
         "robot_paused": value.get("robot_paused", False),
         "paused_platforms": value.get("paused_platforms", []),
     }
