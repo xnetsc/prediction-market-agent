@@ -30,7 +30,7 @@ prediction_login_main() (
             exit 1
         }
         helper_python="$helper_temp/venv/bin/python"
-        "$helper_python" -m pip --disable-pip-version-check install --quiet 'cryptography>=44,<47'
+        "$helper_python" -m pip --disable-pip-version-check install --quiet 'cryptography>=49,<51'
     fi
     "$helper_python" - <<'PREDICTION_LOGIN_PY'
 import base64

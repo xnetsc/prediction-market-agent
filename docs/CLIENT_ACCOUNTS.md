@@ -132,7 +132,7 @@ Windows 对应命令：
 4. 完成、取消或超时后监听关闭。停止终端可用 Ctrl+C，并在向导取消该流程；失败时重新开始以生成新命令。
 
 macOS/Linux 需要 curl、Bash 和 Python 3.9+，缺少 Python 会明确提示，不自动安装。若当前 Python 没有
-`cryptography`，脚本创建权限受限的临时 venv，通过 pip 从 PyPI 安装 `cryptography>=44,<47`；
+`cryptography`，脚本创建权限受限的临时 venv，通过 pip 从 PyPI 安装 `cryptography>=49,<51`；
 正常结束或信号退出后清理，不改系统 Python。缺少 venv/pip 支持时同样明确报错。Windows 使用系统
 PowerShell 5.1+/.NET，不需要 Python。企业脚本策略、代理或防火墙仍可能阻止执行，脚本不会绕过这些限制。
 curl/pip 使用本机的相关代理配置；Python 助手的请求使用系统代理设置，PowerShell 使用系统网络栈，
