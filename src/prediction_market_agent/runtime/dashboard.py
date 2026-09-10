@@ -347,7 +347,7 @@ def create_app(config: Config, *, start_robot: bool = True) -> FastAPI:
             return (
                 HTML.replace("REFRESH_MS", str(config.dashboard_refresh_seconds * 1000))
                 .replace("CSRF_TOKEN", "")
-                .replace("SESSION_ID", "")
+                .replace("'SESSION_ID'", "''")
                 .replace("LOCAL_ACCESS_VALUE", "true")
                 .replace("<section><h3>管理员安全</h3>", '<section hidden><h3>管理员安全</h3>')
             )
@@ -365,7 +365,7 @@ def create_app(config: Config, *, start_robot: bool = True) -> FastAPI:
         return (
             HTML.replace("REFRESH_MS", str(config.dashboard_refresh_seconds * 1000))
             .replace("CSRF_TOKEN", session.csrf_token)
-            .replace("SESSION_ID", session.session_id)
+            .replace("'SESSION_ID'", json.dumps(session.session_id))
             .replace("LOCAL_ACCESS_VALUE", "false")
         )
 
