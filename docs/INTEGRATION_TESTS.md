@@ -7,6 +7,11 @@ PYTHONPATH=src .venv/bin/python -m compileall -q src tests examples
 PYTHONPATH=src .venv/bin/python -m pytest -q
 ```
 
+当前依赖修复后的完整结果为 `159 passed, 2 failed, 101 subtests passed, 0 skipped`。两项失败都来自
+Binance 公共时间接口的真实 `HTTP 451`；Polymarket 与其余本地/联网测试通过。另在 Python 3.12 干净
+环境从 PyPI 安装项目后执行 `pip check`，确认 `cryptography 50.0.1`、`webauthn 3.0.0` 与
+`polymarket-client 0.3.0` 无依赖冲突；Linux Python 3.13 slim 容器安装同一 wheel 也通过。
+
 当前矩阵覆盖：
 
 - 配置字段说明、默认值、秘密保留和 JSON 存储约束；

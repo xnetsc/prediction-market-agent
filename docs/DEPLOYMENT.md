@@ -86,7 +86,8 @@ Codex 使用设备码，Claude 使用官方验证码页面和客户端输入，�
 
 发布前的 login-helpers 作业在 macOS/Linux 执行 Bash 助手测试，在 Windows 执行系统 Windows PowerShell
 助手测试，覆盖真实本机 TCP 回调、加密互通、过期释放及管道字节校验。不再编译/下载 PyInstaller 二进制；
-脚本直接作为 Python 包资源进入最终镜像。
+脚本直接作为 Python 包资源进入最终镜像。作业先执行完整项目依赖安装，因此依赖解析失败会阻止镜像发布；
+WebAuthn 3 与主程序、Bash 助手统一使用兼容的 `cryptography>=49,<51` 范围。
 
 GHCR 新包默认可能为 private，首次发布后须在包设置中设为 public，之后即可匿名拉取；仓库 public 不自动代表
 包也 public。镜像只 COPY 明确列出的源码、元数据和入口脚本，真实配置、数据库、备份不进入镜像。
