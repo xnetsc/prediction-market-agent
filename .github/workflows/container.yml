@@ -34,6 +34,8 @@ jobs:
         id: metadata
         with:
           images: ${{ steps.image.outputs.name }}
+          labels: |
+            org.opencontainers.image.licenses=LicenseRef-PolyForm-Noncommercial-1.0.0
           tags: |
             type=raw,value=latest,enable={{is_default_branch}}
             type=ref,event=branch
