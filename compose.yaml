@@ -1,8 +1,10 @@
 services:
   robot:
-    build: .
+    image: ${PREDICTION_AGENT_IMAGE:-ghcr.io/xnetsc/prediction-market-agent:latest}
+    pull_policy: always
     ports:
-      - "8765:8765"
+      - "127.0.0.1:${PREDICTION_AGENT_PORT:-8765}:8765"
     volumes:
       - ./runtime-data:/data
+      - ./runtime-data/home:/root
     restart: unless-stopped

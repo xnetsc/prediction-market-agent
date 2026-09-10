@@ -7,7 +7,7 @@
 - `*.key`、`*.pem`、`*.p12`、`*.pfx`、`*.jks`、`*.keystore` 等签名材料。
 - SQLite 决策库、Passkey/认证库、账户镜像、日志、PID、构建目录和测试缓存。
 
-公开示例只放在 `examples/plugin_configs/`，秘密字段必须为空。插件管理界面对秘密字段不回显，保存空值
+公开示例只放在 `examples/plugin_configs/`，秘密字段必须使用 placeholder。插件管理界面对秘密字段不回显，保存空值
 时保留已有秘密；这项界面行为不能代替版本控制与运维侧的密钥管理。
 
 ## 发布前检查
@@ -28,7 +28,9 @@ git grep -n -I -E '(BEGIN (RSA |EC |OPENSSH )?PRIVATE KEY|api[_-]?key[[:space:]]
 
 ## 管理面
 
-首次访问必须注册 admin Passkey，且至少保留一个凭据。线上 Origin 必须为 HTTPS。每次登录使用由 Passkey
+回环主机访问默认免认证并使用明文 JSON；本地 Compose 仅绑定 127.0.0.1。公网代理必须校验允许的 Host 并
+保留原始公网域名，不得把它重写为 localhost 或回环 IP。其他主机首次访问必须注册 admin Passkey，且至少
+保留一个凭据。线上 Origin 必须为 HTTPS。每次登录使用由 Passkey
 签名绑定的 P-256 ECDH 交换派生 AES-GCM 会话密钥，业务请求/响应采用认证加密并拒绝 nonce 重放。连续
 72 小时未操作会失效，有效操作刷新闲置计时，但登录满 7 天后无条件重新认证。TLS 仍负责保护页面代码、
 认证引导数据、Cookie 头和流量元数据，应用层信封不能代替 HTTPS。管理员可在界面查看各 Passkey 的设备

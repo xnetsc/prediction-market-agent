@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "prediction-market-agent"
-version = "3.1.0"
+version = "3.2.0"
 description = "Deployable multi-platform prediction-market trading robot"
 license = "LicenseRef-PolyForm-Noncommercial-1.0.0"
 license-files = ["LICENSE"]

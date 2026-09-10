@@ -1,10 +1,8 @@
 $ErrorActionPreference = "Stop"
 Set-Location $PSScriptRoot
-if (-not (Test-Path ".venv/Scripts/python.exe")) {
-  python -m venv .venv
-}
-& .venv/Scripts/python.exe -m pip install --index-url https://pypi.org/simple .
-if (-not (Test-Path "config/application.json")) {
-  & .venv/Scripts/prediction-market-agent.exe init
-}
-& .venv/Scripts/prediction-market-agent.exe serve
+. "$PSScriptRoot/deploy/ensure-docker.ps1"
+Ensure-Docker
+Invoke-Docker compose -f "$PSScriptRoot/compose.yaml" pull
+Invoke-Docker compose -f "$PSScriptRoot/compose.yaml" up -d --no-build --wait --wait-timeout 180
+$port = if ($env:PREDICTION_AGENT_PORT) { $env:PREDICTION_AGENT_PORT } else { "8765" }
+Write-Host "Robot is ready: http://127.0.0.1:$port"

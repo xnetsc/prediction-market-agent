@@ -5,6 +5,9 @@
 | 功能族 | 实现位置 | 文档 | 例子 | 自动验证 |
 |---|---|---|---|---|
 | 六类插件自动扫描与插件目录 | `plugin_system/config.py`、`plugin_system/discovery.py` | [PLUGIN_SYSTEM.md](PLUGIN_SYSTEM.md) | [plugin_directories.json](../examples/plugin_directories.json) | [test_plugin_system.py](../tests/test_plugin_system.py)、[test_architecture_contracts.py](../tests/test_architecture_contracts.py) |
+| 回环地址免认证、明文业务与公网认证隔离 | `runtime/local_access.py`、`runtime/dashboard.py` | [AUTHENTICATION.md](AUTHENTICATION.md) | `/api/local` JSON 例子见 [HTTP_AUDIT.md](HTTP_AUDIT.md) | [test_local_access.py](../tests/test_local_access.py)、容器冒烟 |
+| Push 自动构建发布 GHCR，多架构最终安装态 | `.github/workflows/container.yml`、`Dockerfile` | [DEPLOYMENT.md](DEPLOYMENT.md) | Compose 与 `docker run` 命令 | `deploy/check-container.sh` 验证安装入口、客户端与两条 Web 通道 |
+| 本地检查安装 Docker 并拉取镜像启动 | `start-local.*`、`deploy/ensure-docker.*` | [DEPLOYMENT.md](DEPLOYMENT.md) | macOS/Linux/Windows 一键启动命令 | 启动脚本检查、Compose 配置及真实拉取启动验证 |
 | 从界面安装新插件源码、禁用态发现与刷新 | `plugin_system/management.py`、`runtime/dashboard.py` | [PLUGIN_SYSTEM.md](PLUGIN_SYSTEM.md)、[HTTP_AUDIT.md](HTTP_AUDIT.md) | [static_demo.py](../examples/api_plugins/static_demo.py) 及其余五类插件例子 | `test_management_service_installs_new_plugin_without_importing_it` |
 | 启用/禁用、优先级、刷新、删除后注销、teardown | `plugin_system/managed_config.py`、`plugin_system/management.py` | [PLUGIN_SYSTEM.md](PLUGIN_SYSTEM.md) | 六类示例的 `initialize_plugin` / `teardown` | `test_disabled_file...`、`test_management...`、`test_manual_refresh...` |
 | 应用 JSON、插件目录及全部配置管理 | `core/config.py`、`plugin_system/management.py`、管理界面 | [CONFIGURATION.md](CONFIGURATION.md) | [application.json](../examples/application.json)、[plugin_directories.json](../examples/plugin_directories.json) | `ConfigurationTests`、配置 UI 冒烟 |

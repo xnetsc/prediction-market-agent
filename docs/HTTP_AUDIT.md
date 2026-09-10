@@ -26,6 +26,8 @@
 浏览器中的逻辑操作仍使用 `/api/summary`、`/api/decisions`、`/api/records`、`/api/manifest`、
 `/api/plugins/manage`、`/api/runtime` 和 `/api/settings` 等稳定名称，但不会直接发这些明文 URL 请求。登录后页面把逻辑 URL、
 参数和正文一起放进 AES-GCM 信封，统一提交到 `POST /api/secure`，服务端解密分派后再加密响应。
+回环地址页面则通过 `POST /api/local` 发送明文 JSON `{ "url": "/api/settings", "body": null }`，无需会话、
+Passkey 或加解密；写操作使用相同封装并在 `body` 中提供字段。两条通道复用同一业务分派逻辑。
 
 ## 插件管理
 
@@ -41,7 +43,7 @@
 - `/api/runtime`、`/api/runtime/control`
 - `/api/auth/manage`、`/api/auth/passkeys/*`、`/api/auth/sessions/kick`
 
-管理操作要求有效的 HttpOnly 会话 Cookie、会话请求 token 和 ECDH 派生密钥。保存配置时插件系统只调用
+非回环访问的管理操作要求有效的 HttpOnly 会话 Cookie、会话请求 token 和 ECDH 派生密钥。保存配置时插件系统只调用
 插件的 `save_callback` 或 `delete_callback`。刷新会卸载旧注册表并按磁盘最新状态重建。完整认证和信封协议
 见 [AUTHENTICATION.md](AUTHENTICATION.md)。
 

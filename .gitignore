@@ -3,6 +3,7 @@
 config/application.json
 config/plugin_directories.json
 .venv/
+runtime-data/
 __pycache__/
 *.pyc
 .pytest_cache/

@@ -19,6 +19,7 @@ from .reporting import build_report
 from .memory import SessionMemory
 from .auth import AdminAuthStore, AdminSession, SESSION_COOKIE
 from .controller import RobotRuntimeManager
+from .local_access import is_loopback_request, require_local_request
 
 
 HTML = r"""<!doctype html><html lang="zh-CN"><head><meta charset="utf-8">
@@ -42,6 +43,7 @@ body{font:14px system-ui;margin:0;background:#0b1020;color:#e8eefc}header{positi
 <section><h3>运行清单</h3><pre id="manifest"></pre></section></main>
 <script>
 const TOKEN='CSRF_TOKEN',SESSION_ID='SESSION_ID',KINDS=['api','decision_provider','decision_strategy','research_tool','risk','hook'];
+const LOCAL_ACCESS=LOCAL_ACCESS_VALUE;
 const LABELS={api:'市场 API',decision_provider:'决策 Provider',decision_strategy:'决策策略',research_tool:'研究工具',risk:'风控',hook:'Hook'};
 let LAST_MANAGER=null;
 const esc=s=>String(s??'').replace(/[&<>\"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','\"':'&quot;'}[c]));
@@ -53,8 +55,9 @@ async function storedKey(){let d=await keyDb();return new Promise((ok,no)=>{let 
 async function dropKey(id=SESSION_ID){let d=await keyDb();return new Promise((ok,no)=>{let r=d.transaction('sessions','readwrite').objectStore('sessions').delete(id);r.onsuccess=()=>ok();r.onerror=()=>no(r.error)})}
 let SESSION_KEY;
 async function secure(u,v=null){if(!SESSION_KEY)SESSION_KEY=await storedKey();if(!SESSION_KEY){location='/api/auth/clear';throw Error('本机缺少此登录会话的加密密钥，请重新登录')}let nonce=crypto.getRandomValues(new Uint8Array(12)),plain=new TextEncoder().encode(JSON.stringify({url:u,body:v})),cipher=await crypto.subtle.encrypt({name:'AES-GCM',iv:nonce,additionalData:new TextEncoder().encode('POST /api/secure')},SESSION_KEY,plain),r=await fetch('/api/secure',{method:'POST',headers:{'Content-Type':'application/json','X-Admin-CSRF':TOKEN},body:JSON.stringify({nonce:b64u(nonce),ciphertext:b64u(cipher)})}),envelope=await r.json(),decoded;try{decoded=JSON.parse(new TextDecoder().decode(await crypto.subtle.decrypt({name:'AES-GCM',iv:unb64u(envelope.nonce),additionalData:new TextEncoder().encode('RESPONSE /api/secure')},SESSION_KEY,unb64u(envelope.ciphertext))))}catch(e){if(r.status===401){await dropKey();location='/api/auth/clear'}throw Error('加密响应认证失败')}if(!r.ok)throw Error(decoded.error||r.statusText);return decoded}
-async function get(u){return secure(u)}
-async function post(u,v){return secure(u,v)}
+async function business(u,v=null){if(!LOCAL_ACCESS)return secure(u,v);let r=await fetch('/api/local',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({url:u,body:v})}),result=await r.json();if(!r.ok)throw Error(result.error||result.detail||r.statusText);return result}
+async function get(u){return business(u)}
+async function post(u,v){return business(u,v)}
 function table(rows,cols){return '<table><thead><tr>'+cols.map(c=>'<th>'+c[0]+'</th>').join('')+'</tr></thead><tbody>'+rows.map(r=>'<tr>'+cols.map(c=>'<td>'+c[1](r)+'</td>').join('')+'</tr>').join('')+'</tbody></table>'}
 function fieldHtml(kind,name,f){let id='cfg_'+kind+'_'+name+'_'+f.name,attrs=' id="'+esc(id)+'" data-field="'+esc(f.name)+'" data-type="'+esc(f.type)+'"';let input;if(f.type==='boolean')input='<input type="checkbox"'+attrs+(f.value?' checked':'')+'>';else if(f.type==='enum')input='<select'+attrs+'>'+f.options.map(o=>'<option'+(o===f.value?' selected':'')+'>'+esc(o)+'</option>').join('')+'</select>';else input='<input type="'+(f.sensitive?'password':(f.type==='integer'||f.type==='number'?'number':'text'))+'"'+attrs+' value="'+esc(f.value??'')+'" '+(f.type==='number'?'step="any"':'')+' placeholder="'+(f.sensitive&&f.configured?'已保存；留空保持不变':'')+'">';return '<div class="field"><label><b>'+esc(f.label)+(f.required?' *':'')+'</b>'+input+'<span class="description">'+esc(f.description)+(f.has_default?' 默认值：'+esc(JSON.stringify(f.default)):'')+'</span></label><button onclick="resetPluginField(\''+kind+'\',\''+name+'\',\''+f.name+'\')">删除此字段值</button></div>'}
 function renderManager(m){LAST_MANAGER=m;let out='';for(let kind of KINDS){out+='<h3>'+LABELS[kind]+'</h3><div class="plugin-grid">';for(let p of m.plugins[kind]){let key=kind+'_'+p.name;let selector=kind==='decision_strategy'?'<label><input type="radio" name="strategy" value="'+esc(p.name)+'" '+(p.enabled?'checked':'')+'> 使用此策略</label>':'<label><input class="enable" type="checkbox" data-kind="'+kind+'" data-name="'+esc(p.name)+'" '+(p.enabled?'checked':'')+'> 启用</label> <label>优先级 <input class="priority" type="number" min="1" data-kind="'+kind+'" data-name="'+esc(p.name)+'" value="'+esc(p.priority??99)+'" style="width:70px"></label>';let ready=p.readiness?(p.readiness.ready?'<span class="good">配置就绪</span>':'<span class="danger">待配置：'+esc(p.readiness.reasons.join('；'))+'</span>'):'';let fields=p.configuration?p.configuration.fields.map(f=>fieldHtml(kind,p.name,f)).join(''):'<p class="muted">此插件没有私有配置。</p>';let save=p.configuration?'<div class="toolbar"><button onclick="savePluginConfig(\''+kind+'\',\''+p.name+'\')">保存插件配置</button><button onclick="deletePluginConfig(\''+kind+'\',\''+p.name+'\')">删除配置并恢复默认</button></div>':'';out+='<div class="plugin '+(p.enabled?'':'off')+'" id="plugin_'+key+'"><div class="toolbar"><b>'+esc(p.name)+'</b>'+selector+ready+'</div><p>'+esc(p.description)+'</p><div class="description">来源：'+esc(p.origin)+'</div>'+fields+save+'</div>'}out+='</div>'}document.getElementById('pluginManager').innerHTML=out;let k=document.getElementById('installKind');k.innerHTML=KINDS.map(x=>'<option value="'+x+'">'+LABELS[x]+'</option>').join('');renderInstallTargets()}
@@ -340,6 +343,14 @@ def create_app(config: Config, *, start_robot: bool = True) -> FastAPI:
 
     @app.get("/", response_class=HTMLResponse)
     def home(request: Request) -> str:
+        if is_loopback_request(request):
+            return (
+                HTML.replace("REFRESH_MS", str(config.dashboard_refresh_seconds * 1000))
+                .replace("CSRF_TOKEN", "")
+                .replace("SESSION_ID", "")
+                .replace("LOCAL_ACCESS_VALUE", "true")
+                .replace("<section><h3>管理员安全</h3>", '<section hidden><h3>管理员安全</h3>')
+            )
         session = auth.session(request.cookies.get(SESSION_COOKIE, ""), touch=False)
         if not session:
             initialized = auth.has_admin()
@@ -355,6 +366,7 @@ def create_app(config: Config, *, start_robot: bool = True) -> FastAPI:
             HTML.replace("REFRESH_MS", str(config.dashboard_refresh_seconds * 1000))
             .replace("CSRF_TOKEN", session.csrf_token)
             .replace("SESSION_ID", session.session_id)
+            .replace("LOCAL_ACCESS_VALUE", "false")
         )
 
     @app.get("/healthz")
@@ -363,6 +375,9 @@ def create_app(config: Config, *, start_robot: bool = True) -> FastAPI:
 
     @app.get("/api/auth/status")
     def auth_status(request: Request) -> dict[str, Any]:
+        if is_loopback_request(request):
+            return {"local_access": True, "authentication_required": False,
+                    "encryption_required": False, "session_id": None}
         session = auth.session(request.cookies.get(SESSION_COOKIE, ""), touch=False)
         return {"initialized": auth.has_admin(), "authenticated": bool(session),
                 "session_id": session.session_id if session else None,
@@ -422,7 +437,7 @@ def create_app(config: Config, *, start_robot: bool = True) -> FastAPI:
     def query_value(query: dict[str, list[str]], name: str, default: str = "") -> str:
         return query.get(name, [default])[0]
 
-    def dispatch(request: Request, session: AdminSession, route: str, body: Any) -> Any:
+    def dispatch(request: Request, session: AdminSession | None, route: str, body: Any) -> Any:
         parts = urlsplit(route)
         path = parts.path
         query = parse_qs(parts.query)
@@ -525,7 +540,7 @@ def create_app(config: Config, *, start_robot: bool = True) -> FastAPI:
                 runtime.reconcile()
             return result
         if path == "/api/auth/manage":
-            return {"passkeys": auth.credentials(), "sessions": auth.sessions(session.session_id)}
+            return {"passkeys": auth.credentials(), "sessions": auth.sessions(session.session_id if session else "")}
         if path == "/api/auth/passkeys/add/options":
             return auth.registration_options(origin(request), adding=True)
         if path == "/api/auth/passkeys/add/verify":
@@ -540,9 +555,20 @@ def create_app(config: Config, *, start_robot: bool = True) -> FastAPI:
         if path == "/api/auth/sessions/kick":
             return {"kicked": auth.kick_sessions(payload.get("ids", []))}
         if path == "/api/auth/logout":
-            auth.logout(session.token)
+            if session:
+                auth.logout(session.token)
             return {"ok": True}
         raise ValueError(f"Unknown protected operation: {path}")
+
+    @app.post("/api/local")
+    async def local_api(request: Request) -> JSONResponse:
+        require_local_request(request)
+        if request.headers.get("content-type", "").split(";", 1)[0].strip() != "application/json":
+            raise HTTPException(status_code=415, detail="Local operations require JSON")
+        message = await request.json()
+        if not isinstance(message, dict) or not isinstance(message.get("url"), str):
+            raise ValueError("Local operation must include a URL")
+        return JSONResponse(dispatch(request, None, message["url"], message.get("body")))
 
     @app.post("/api/secure")
     async def secure_api(request: Request) -> JSONResponse:

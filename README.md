@@ -24,7 +24,7 @@ Prediction 与 Polymarket API 插件，以及 Codex、Claude、OpenAI-compatible
 - 研究工具由插件动态贡献，工具名会动态进入 Agent 控制 schema；内置网页、URL、跨市场、行情刷新、
   K 线和历史召回工具集。
 - SQLite 保存每轮完整输入输出、Agent 工具轨迹、风险判定、执行请求/结果以及专门的决策台账。
-- Web 界面强制首次注册 admin Passkey；每次登录把 P-256 ECDH 参数绑定进 WebAuthn challenge，登录后的
+- Web 界面通过 localhost、127.0.0.0/8 或 ::1 访问时直接使用，无需认证或加解密；其他主机首次访问注册 admin Passkey，每次登录把 P-256 ECDH 参数绑定进 WebAuthn challenge，登录后的
   业务请求与响应使用 AES-GCM 会话密钥加密，并可管理 Passkey 与设备会话。
 - Web 界面可筛选查看“上下文 → 证据 → 模型提案 → 风控调整 → 最终动作 → 执行 → 后续盘口”，并查看、
   修改、删除全部程序配置、插件目录、插件启用状态和动态私有配置；也可安装新插件、暂停全部机器人或
@@ -32,6 +32,13 @@ Prediction 与 Polymarket API 插件，以及 Codex、Claude、OpenAI-compatible
 - quote、order、fill、cancel、redeem、transfer、Agent tool/decision 均有 before/after Hook。
 
 ## 安装
+
+本地推荐直接运行 `./start-local.sh`（macOS/Linux）或 `./start-local.ps1`（Windows）。脚本自动检查、
+安装并启动 Docker，拉取 `ghcr.io/xnetsc/prediction-market-agent:latest`，等待容器健康后输出访问地址。
+无需本地 Python 环境；数据保存在 `runtime-data/`。每次 Git 推送都会触发 GitHub Actions 构建和发布
+amd64、arm64 镜像。完整说明见 [部署文档](docs/DEPLOYMENT.md)。
+
+需要直接安装 wheel 或开发源码时：
 
 ```bash
 cd /path/to/prediction-market-agent
@@ -56,7 +63,7 @@ wheel 是机器人的完整安装包。安装后唯一的程序入口是 `predic
 .venv/bin/prediction-market-agent serve
 ```
 
-管理界面默认位于 `http://127.0.0.1:8765`。首次访问必须注册 admin Passkey；线上部署必须使用 HTTPS。
+管理界面默认位于 `http://127.0.0.1:8765`，回环地址访问无需 Passkey 或加解密。公网访问必须使用 HTTPS 和 admin Passkey。
 `serve` 同时承载管理界面和运行主管：全局依赖与平台私有配置齐全后自动启动相应平台自己的事件循环；
 配置不全的平台保持停止并显示原因。配置保存、启用/禁用、刷新或暂停会立即重新评估，无需另开 Worker。
 也可显式执行一次或使用无 Web 的前台运行入口：
