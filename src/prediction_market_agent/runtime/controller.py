@@ -10,7 +10,7 @@ from ..core.config import Config
 from ..plugin_system.discovery import PluginCatalog, PluginReadiness, load_plugin_catalog
 from ..plugin_system.managed_config import ManagedRuntimeConfig
 from .engine import TradingEngine
-from .events import PlatformScanEvent, RobotEventLoop
+from .events import PlatformDiscoveryEvent, PlatformScanEvent, RobotEventLoop
 
 
 LOGGER = logging.getLogger(__name__)
@@ -180,11 +180,16 @@ class RobotRuntimeManager:
                 engine = TradingEngine(runtime_config, catalog=catalog)
                 self._engine = engine
                 if start_runtimes:
-                    events = RobotEventLoop(
-                        lambda event: engine.process_platform_scan(
+                    def handle_business_event(event: Any) -> Any:
+                        if isinstance(event, PlatformDiscoveryEvent):
+                            return engine.discover_platform_topics(
+                                event.platform, event.maximum_topics
+                            )
+                        return engine.process_platform_scan(
                             event.platform, event.topics, event.maximum_decisions
                         )
-                    )
+
+                    events = RobotEventLoop(handle_business_event)
                     events.start()
                     self._events = events
                     started_platforms: list[str] = []
@@ -210,9 +215,23 @@ class RobotRuntimeManager:
                                 )
                             )
 
+                        def discover_markets(
+                            maximum_topics: int, *, platform: str = name
+                        ) -> tuple[Any, ...]:
+                            """Framework-owned discovery; the plugin only decides when to ask."""
+                            return events.submit(
+                                PlatformDiscoveryEvent(
+                                    platform=platform, maximum_topics=maximum_topics
+                                )
+                            )
+
                         try:
                             spec.runtime.start(
-                                {"platform": name, "submit_scan": submit_scan}
+                                {
+                                    "platform": name,
+                                    "submit_scan": submit_scan,
+                                    "discover_markets": discover_markets,
+                                }
                             )
                             runtime_status = spec.runtime.status()
                             if not runtime_status.get("running", False):
@@ -252,6 +271,15 @@ class RobotRuntimeManager:
                 for platform in self._status["platforms"].values():
                     platform["running"] = False
                 return self.status()
+
+    def export_strategies(self, lane: str = "") -> dict[str, Any]:
+        """Report what the discovery and decision strategies currently send to the model."""
+        from .strategy_export import export_strategies
+
+        with self._lock:
+            engine = self._engine
+            config = Config.load(self.application_config_file)
+        return export_strategies(config, engine=engine, lane=lane)
 
     def execute_once(self) -> dict[str, Any]:
         status = self.reconcile(start_runtimes=False)

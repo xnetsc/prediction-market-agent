@@ -2,6 +2,10 @@
 
 ## 固定类别与自动扫描
 
+类别为 `api`、`decision_provider`、`decision_strategy`、`market_discovery`、`research_tool`、`risk`、
+`hook`。`market_discovery` 决定每轮把决策名额给哪些标的；不安装插件时由框架内置策略工作，内置策略
+没有配置面，但当前全文可在插件中心导出。
+
 应用配置的 `plugin_directories_file` 所指向 JSON，其 `categories` 必须包含 `api`、`decision_provider`、
 `decision_strategy`、`research_tool`、`risk`、`hook` 六个目录列表。`${PACKAGE_ROOT}` 可展开为安装包
 目录。`${WORKING_DIRECTORY}` 展开为机器人工作目录。默认每类先扫描工作目录下可写的 `plugins/<类别>`，

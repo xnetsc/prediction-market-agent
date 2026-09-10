@@ -518,7 +518,7 @@ def discover_plugin_catalog(
         host_proxy_file = host_proxy_file.resolve()
     index = 0
     for kind in PLUGIN_KINDS:
-        for directory in directory_config.directories[kind]:
+        for directory in directory_config.directories.get(kind, ()):
             if not directory.exists():
                 continue
             if not directory.is_dir():

@@ -30,6 +30,7 @@ class PluginManagementService:
             "api": self.config.market_api_plugins,
             "decision_provider": self.config.decision_providers,
             "decision_strategy": (),
+            "market_discovery": self.config.market_discovery_plugins,
             "research_tool": self.config.research_tool_plugins,
             "risk": self.config.risk_plugins,
             "hook": self.config.hook_plugins,
@@ -81,6 +82,7 @@ class PluginManagementService:
             "restart_required_after_change": False,
             "enabled": selected,
             "decision_strategy": strategy,
+            "market_discovery_evolution": managed.market_discovery_evolution,
             "robot_paused": managed.robot_paused,
             "paused_platforms": list(managed.paused_platforms),
             "plugins": result,
@@ -182,11 +184,15 @@ class PluginManagementService:
         if strategy and strategy not in self.catalog.discovered_names("decision_strategy"):
             raise ValueError(f"Unknown decision strategy plugin: {strategy!r}")
         normalized["decision_strategy"] = [strategy] if strategy else []
+        evolution = payload.get("market_discovery_evolution", self._managed().market_discovery_evolution)
+        if not isinstance(evolution, bool):
+            raise ValueError("market_discovery_evolution must be a boolean")
         save_managed_config(
             self.config.management_file,
             {
                 "enabled": normalized,
                 "decision_strategy": strategy,
+                "market_discovery_evolution": evolution,
                 "robot_paused": self._managed().robot_paused,
                 "paused_platforms": list(self._managed().paused_platforms),
             },

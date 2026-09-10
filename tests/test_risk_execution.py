@@ -198,8 +198,8 @@ class RiskAndExecutionTests(unittest.TestCase):
             available_names = ("buy-test",)
             unavailable = {}
 
-            def decide(self, context, *, tool_executor=None, step_recorder=None, tool_descriptions=None):
-                del context, tool_executor, step_recorder, tool_descriptions
+            def decide(self, context, *, tool_executor=None, step_recorder=None, tool_descriptions=None, instructions=None):
+                del context, tool_executor, step_recorder, tool_descriptions, instructions
                 from prediction_market_agent.agent.decision import ProviderResult
 
                 return ProviderResult(

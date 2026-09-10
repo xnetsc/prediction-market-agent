@@ -21,6 +21,7 @@ from prediction_market_agent.plugins.providers._host_proxy import client_proxy
 from prediction_market_agent.plugins.providers._shared import subprocess_environment
 from prediction_market_agent.plugin_system.config_io import resolve_proxy_settings
 from prediction_market_agent.plugin_system.config import PluginDirectoryConfig
+from prediction_market_agent.plugin_system.managed_config import PLUGIN_KINDS
 from prediction_market_agent.plugin_system.discovery import (
     PluginInitializationContext,
     discover_plugin_catalog,
@@ -170,9 +171,7 @@ class HostProxyTests(unittest.TestCase):
                 },
             )
             package = ROOT / "src" / "prediction_market_agent"
-            directories = {kind: () for kind in (
-                "api", "decision_provider", "decision_strategy", "research_tool", "risk", "hook"
-            )}
+            directories = {kind: () for kind in PLUGIN_KINDS}
             directories["api"] = (package / "plugins" / "api",)
             directory_config = PluginDirectoryConfig(
                 root / "dirs.json",

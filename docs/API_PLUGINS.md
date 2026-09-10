@@ -14,8 +14,9 @@ API 插件还必须把平台订单状态归一化为 `OPEN`、`FILLED`、`CANCEL
 
 API 插件还提供两组互补能力：标准业务接口供通用框架随时主动调用；正式后台运行所需的 runtime 只负责
 该平台何时执行扫描。没有 runtime 的 API 插件仍可被显式调用，但运行监督器会把它标为未就绪，不会假装
-已经自动运行。runtime 到点后调用本插件读取接口，向通用 `RobotEventLoop` 提交标准化主题，后续详情/盘口、
-跨平台研究、Agent、风控与写动作全部回到通用框架。平台配置不完整或被暂停时 runtime 不启动，但管理
+已经自动运行。runtime 到点后调用框架注入的 `discover_markets(maximum_topics)` 回调而不是自己拉列表，再把返回的标准化
+主题通过 `submit_scan` 提交给通用 `RobotEventLoop`。宽扫多深、调用哪些读接口由发现策略决定，插件不再
+关心访问了哪些数据；后续详情/盘口、跨平台研究、Agent、风控与写动作同样回到通用框架。平台配置不完整或被暂停时 runtime 不启动，但管理
 界面和其他就绪平台照常工作。
 
 ## Binance
@@ -28,7 +29,8 @@ REDEEM、TRANSFER_IN、TRANSFER_OUT。私有 JSON 拥有 REST URL、Key/Secret�
 代理字段默认 `INHERIT`，使用程序设置中的统一代理；改成 `DIRECT` 或完整 HTTP(S) URL 只覆盖 Binance。
 
 同一 Binance JSON 还拥有扫描间隔、错误退避初值/上限、每轮主题/决策上限和主题分页大小，默认分别为
-60 秒、30 秒、900 秒、10、6、100。正式机器人 readiness 要求 URL/规则等基础字段和 Key、Secret、
+60 秒、30 秒、900 秒、10、6、100。其中主题上限和分页大小现在表示本平台允许框架消耗的提交上限与请求
+粒度，属于限频属性；选哪些标的由发现策略决定。正式机器人 readiness 要求 URL/规则等基础字段和 Key、Secret、
 wallet address/id 齐全；直接集成测试不走该 readiness 门，因此仍能验证真实网络拒绝。
 
 ## Polymarket

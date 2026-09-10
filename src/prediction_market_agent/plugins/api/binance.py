@@ -33,9 +33,9 @@ def initialize_plugin(context: PluginInitializationContext) -> PluginSpec:
             PluginConfigField("BINANCE_SCAN_INTERVAL_SECONDS", "扫描间隔（秒）", "integer", "Binance 完成一个市场扫描与决策周期后等待到下一周期的秒数。", default=60),
             PluginConfigField("BINANCE_ERROR_BACKOFF_SECONDS", "失败退避初值（秒）", "integer", "Binance 周期失败后的首次重试等待秒数；连续失败时指数增长。", default=30),
             PluginConfigField("BINANCE_ERROR_BACKOFF_MAX_SECONDS", "失败退避上限（秒）", "integer", "Binance 连续失败重试等待的最大秒数。", default=900),
-            PluginConfigField("BINANCE_MAX_TOPICS_PER_CYCLE", "每轮主题上限", "integer", "Binance 每次事件循环最多进入策略筛选的候选主题数。", default=10),
+            PluginConfigField("BINANCE_MAX_TOPICS_PER_CYCLE", "每轮主题上限", "integer", "Binance 每轮允许框架发现后提交给业务队列的主题上限；发现范围和调用哪些读接口由发现策略决定。", default=10),
             PluginConfigField("BINANCE_MAX_DECISIONS_PER_CYCLE", "每轮决策上限", "integer", "Binance 每次事件循环最多交给 Agent 的 outcome 决策数。", default=6),
-            PluginConfigField("BINANCE_TOPIC_PAGE_SIZE", "主题分页大小", "integer", "Binance 每次主题列表网络请求加载的记录数。", default=100),
+            PluginConfigField("BINANCE_TOPIC_PAGE_SIZE", "主题分页大小", "integer", "框架发现标的时，Binance 每次主题列表网络请求加载的记录数。", default=100),
         ),
         load_callback=load,
         save_callback=save,
@@ -56,25 +56,7 @@ def initialize_plugin(context: PluginInitializationContext) -> PluginSpec:
     def settings() -> BinancePluginConfig:
         return BinancePluginConfig.from_mapping(resolved_values())
 
-    def scan(maximum_topics: int, page_size: int):
-        if not instances:
-            raise RuntimeError("Binance API instance is not active")
-        plugin = instances[-1]
-        plugin.sync_time()
-        topics = []
-        offset = 0
-        while len(topics) < maximum_topics:
-            page = plugin.list_topics(
-                offset=offset,
-                limit=min(page_size, maximum_topics - len(topics)),
-            )
-            topics.extend(page.topics)
-            if not page.has_more or not page.topics:
-                break
-            offset = page.next_offset
-        return tuple(topics)
-
-    event_loop = BinanceEventLoop(settings, scan)
+    event_loop = BinanceEventLoop(settings)
 
     def readiness() -> PluginReadiness:
         try:

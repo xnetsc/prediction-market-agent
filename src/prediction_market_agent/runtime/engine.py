@@ -5,12 +5,14 @@ import threading
 from typing import Any
 
 from ..core.config import Config
-from ..plugin_system.contracts import PredictionMarketApiPlugin, Topic
+from ..plugin_system.contracts import Topic
 from ..plugin_system.discovery import PluginCatalog
 from .actions import ExecutionActionsMixin
 from .bootstrap import PlatformRuntime, bootstrap_engine
 from .broker import ExecutionError
 from .evaluation import MarketEvaluationMixin
+from .decision_strategy import DecisionEvolution
+from .market_discovery import DiscoveryEngine
 from .memory import SessionMemory
 
 LOGGER = logging.getLogger(__name__)
@@ -39,25 +41,21 @@ class TradingEngine(MarketEvaluationMixin, ExecutionActionsMixin):
         self.global_risk = components.global_risk
         self.provider = components.provider
         self.research_contributions = components.research_contributions
+        self.discovery_strategy = components.discovery_strategy
+        self.discovery = DiscoveryEngine(
+            memory=self.memory,
+            strategy=components.discovery_strategy,
+            provider=components.provider,
+            evolution_enabled=components.discovery_evolution,
+            cross_platform_search=self.search_market_candidates,
+        )
+        self.decision_evolution = DecisionEvolution(
+            memory=self.memory,
+            strategy=components.decision_strategy,
+            evolution_enabled=components.discovery_evolution,
+        )
         self._decisions_this_cycle = 0
         self._max_decisions_this_cycle = 0
-
-    @staticmethod
-    def _all_topics(
-        plugin: PredictionMarketApiPlugin, maximum: int
-    ) -> list[Topic]:
-        topics: list[Topic] = []
-        offset = 0
-        while len(topics) < maximum:
-            page = plugin.list_topics(
-                offset=offset,
-                limit=min(plugin.topic_page_size(), maximum - len(topics)),
-            )
-            topics.extend(page.topics)
-            if not page.has_more or not page.topics:
-                break
-            offset = page.next_offset
-        return topics
 
     def run_once(self) -> dict[str, float | int | bool | str]:
         with self._cycle_lock:
@@ -96,6 +94,19 @@ class TradingEngine(MarketEvaluationMixin, ExecutionActionsMixin):
             self._process_platform_topics(runtime, list(topics), maximum_decisions)
             return self.status()
 
+    def discover_platform_topics(
+        self, platform: str, maximum_topics: int
+    ) -> tuple[Topic, ...]:
+        """Framework-side market discovery, invoked by a platform runtime on its own schedule."""
+        if maximum_topics <= 0:
+            raise ValueError("Platform topic limit must be positive")
+        with self._cycle_lock:
+            try:
+                runtime = self.platforms[platform]
+            except KeyError as error:
+                raise ValueError(f"Unknown active platform: {platform}") from error
+            return tuple(self._collect_platform_topics(runtime, maximum_topics))
+
     def _collect_platform_topics(
         self, runtime: PlatformRuntime, maximum_topics: int
     ) -> list[Topic]:
@@ -108,7 +119,23 @@ class TradingEngine(MarketEvaluationMixin, ExecutionActionsMixin):
             )
             return []
         runtime.plugin.sync_time()
-        return self._all_topics(runtime.plugin, maximum_topics)
+        for name, review in (
+            ("discovery", self.discovery.review),
+            ("decision", self.decision_evolution.review),
+        ):
+            try:
+                review()
+            except Exception:
+                LOGGER.exception(
+                    "%s strategy review failed; continuing with stored measurements", name
+                )
+        return list(
+            self.discovery.discover(
+                platform=runtime.plugin.name,
+                plugin=runtime.plugin,
+                maximum_topics=maximum_topics,
+            )
+        )
 
     def _process_platform_topics(
         self, runtime: PlatformRuntime, topics: list[Topic], maximum_decisions: int
