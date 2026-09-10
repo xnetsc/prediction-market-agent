@@ -17,11 +17,15 @@ docker exec "$container_id" codex --version
 docker exec "$container_id" claude --version
 docker exec -i "$container_id" python - <<'PY'
 import json
+import subprocess
 import urllib.error
 import urllib.request
 
 base = "http://127.0.0.1:8765"
-assert "LOCAL_ACCESS=true" in urllib.request.urlopen(base).read().decode()
+page = urllib.request.urlopen(base).read().decode()
+assert "LOCAL_ACCESS=true" in page
+script = page.split("<script>", 1)[1].split("</script>", 1)[0]
+subprocess.run(["node", "--check"], input=script, text=True, check=True)
 body = json.dumps({"url": "/api/settings", "body": None}).encode()
 request = urllib.request.Request(base + "/api/local", data=body,
                                  headers={"Content-Type": "application/json"})
