@@ -47,13 +47,13 @@ class TradingEngine(MarketEvaluationMixin, ExecutionActionsMixin):
             memory=self.memory,
             strategy=components.discovery_strategy,
             provider=components.provider,
-            evolution_enabled=components.discovery_evolution,
+            evolution_enabled=components.strategy_evolution,
             cross_platform_search=self.search_market_candidates,
         )
         self.decision_evolution = DecisionEvolution(
             memory=self.memory,
             strategy=components.decision_strategy,
-            evolution_enabled=components.discovery_evolution,
+            evolution_enabled=components.strategy_evolution,
         )
         self.provider_quality = ProviderQuality(memory=self.memory, provider=self.provider)
         self._decisions_this_cycle = 0

@@ -2,7 +2,7 @@
 const CATEGORY_HELP = {
     api: {title:'交易平台', role:'连接市场与账户', description:'读取市场、持仓和订单，并接收机器人发出的操作。平台自己决定什么时候扫描，发现机会后通知机器人。', steps:['扫描市场','提交发现','接收查询或订单'], next:'启用你要使用的平台，填写它要求的账户、网络与扫描配置。不使用的平台保持关闭。'},
     decision_provider: {title:'AI 模型服务', role:'让模型理解信息并做判断', description:'提供实际执行推理的模型。客户端账号和兼容 API 是并列方式，与“采用什么交易策略”不是一回事。', steps:['接收策略与证据','调用所选模型','返回判断或工具请求'], next:'至少配置一种可用服务。顺序数字越小越先尝试，不可用时再尝试下一个；不会同时向所有服务发请求。'},
-    decision_strategy: {title:'决策策略', role:'可选地告诉模型如何分析', description:'定义模型需要关注的证据、判断过程和输出要求。它是可选分析方法，不是模型账号，也不是机器人启动条件。', steps:['选择策略或中性透传','可选地读取策略文本','形成交易建议'], next:'可选择一项策略并查看其文本，也可选择“不使用决策策略”，让平台候选直接进入模型判断。'},
+    decision_strategy: {title:'决策策略', role:'可选地告诉模型如何分析', description:'定义模型需要关注的证据、判断过程和输出要求。它是可选分析方法，不是模型账号，也不是机器人启动条件。', steps:['选择插件或使用内置策略','读取策略文本与实测叠加层','形成交易建议'], next:'可安装并选择一项策略插件；不选时由内置决策策略工作，它的当前全文可在下方导出。'},
     market_discovery: {title:'标的发现策略', role:'决定每轮先看哪些标的', description:'机器人每轮只能深入分析少数标的。发现策略决定把这几个名额给谁：宽扫平台、按实测结果排序、再由模型挑最终名单。未安装插件时使用内置策略。', steps:['宽扫平台全部标的','按实测优先级排序','模型挑出本轮名单'], next:'不装插件也在工作。要用自己的发现逻辑再安装插件；内置策略的当前全文可在下方导出查看。'},
     research_tool: {title:'信息与研究', role:'帮助模型补充证据', description:'在已有市场数据不够时，让模型主动查询外部资料。是否调用、查询什么，由当次决策过程决定。', steps:['模型提出问题','工具收集信息','结果回到决策'], next:'启用需要的信息工具，并补齐其访问配置。工具可用不代表每次都会被调用。'},
     risk: {title:'风险检查', role:'按你的规则检查行为', description:'在相关检查点审核决策、资金或网络请求。实际允许什么、限制什么，由已启用插件及其配置决定。', steps:['接收待检查行为','逐项应用规则','放行、调整或拒绝'], next:'逐个查看启用规则及适用范围。不要把“已启用”理解成已经配置了止损或保证不会亏损。'},
@@ -12,8 +12,22 @@ const SERVICE_TITLES = {codex:'Codex',claude:'Claude',openai_compatible:'兼容 
 const PLUGIN_CENTER_KINDS = ['api','market_discovery','decision_strategy','research_tool','risk','hook'];
 const STRATEGY_LANES = {market_discovery:'discovery', decision_strategy:'decision'};
 const serviceTitle = name => SERVICE_TITLES[name] || name || '未记录';
+function renderProviderHealth(status){
+    const host=document.getElementById('providerHealth');if(!host)return;
+    const health=status?.decision_provider_health,rows=health?.providers||[];
+    if(!rows.length){host.innerHTML='<p class="muted">还没有调用记录。机器人跑起来后，这里显示每个模型服务的可用状态、限流退避剩余时间和实测质量。</p>';return}
+    const measured=health.measured||{};
+    host.innerHTML='<div class="table-scroll"><table><thead><tr><th>服务</th><th>状态</th><th>成功率</th><th>校准 Brier</th><th>他评</th><th>质量权重</th><th>最近失败</th></tr></thead><tbody>'
+        +rows.map(r=>{const m=measured[r.provider]||{};
+            const state=r.available?'<span class="badge ready">可用</span>':'<span class="badge">退避中 '+r.cooldown_seconds_remaining+'s</span>';
+            return '<tr><td>'+esc(serviceTitle(r.provider))+'</td><td>'+state+'</td><td>'+(r.attempts?Math.round(r.success_rate*100)+'%':'—')
+                +'</td><td>'+(m.brier_score??'—')+(m.settled_decisions?' <span class="muted">n='+m.settled_decisions+'</span>':'')
+                +'</td><td>'+(m.peer_average??'—')+(m.peer_reviews?' <span class="muted">n='+m.peer_reviews+'</span>':'')
+                +'</td><td>'+esc(String(r.quality??'—'))+'</td><td>'+(r.last_error_kind?esc(r.last_error_kind)+'：'+esc(String(r.last_error).slice(0,80)):'—')+'</td></tr>'}).join('')
+        +'</tbody></table></div><p class="muted">限流或掉线的服务按失败类型退避，退避结束自动放行一次探测，恢复即回到轮换。质量权重由送达率、已结算校准和他评合成，样本不足时向 1.0 收缩；服务给自己打的分不计入。</p>';
+}
 function strategyLanePanel(kind,m){
-    const lane=STRATEGY_LANES[kind],on=m.market_discovery_evolution!==false;
+    const lane=STRATEGY_LANES[kind],on=m.strategy_evolution!==false;
     return '<article class="plugin configuration-card strategy-lane" id="lane_'+kind+'">'
         +'<div class="section-heading"><h4>策略进化与导出</h4><span class="badge ready">内置策略持续进化</span></div>'
         +'<p class="muted">未安装插件时由内置策略工作。内置策略不作为可编辑配置提供，但它实际发给模型的全文可以随时导出查看。它按已完成决策的实测结果自动调整，并且在你使用自己的插件期间也继续测量，所以切回来时不会是旧的。</p>'
@@ -67,7 +81,7 @@ function renderManager(m) {
         if(kind==='decision_strategy'){
             const none=controlNode('article','',grid);none.className='plugin configuration-card strategy-none';
             const selected=!(m.plugins[kind]||[]).some(p=>p.enabled);
-            none.innerHTML='<div class="section-heading"><h4>不使用决策策略</h4><span class="badge '+(selected?'ready':'')+'">'+(selected?'当前选择':'可选择')+'</span></div><div class="selection-row"><label><input type="radio" name="strategy" data-kind="decision_strategy" data-name="none" value="" '+(selected?'checked':'')+'> 使用中性候选透传</label></div><p id="selectionStatus_decision_strategy_none" class="status selection-status" role="status"></p><p class="muted">不附加任何策略提示词；平台发现的候选项直接进入模型判断。决策策略是可选增强，不影响机器人启动。</p>';
+            none.innerHTML='<div class="section-heading"><h4>使用内置决策策略</h4><span class="badge '+(selected?'ready':'')+'">'+(selected?'当前选择':'可选择')+'</span></div><div class="selection-row"><label><input type="radio" name="strategy" data-kind="decision_strategy" data-name="none" value="" '+(selected?'checked':'')+'> 使用内置默认策略</label></div><p id="selectionStatus_decision_strategy_none" class="status selection-status" role="status"></p><p class="muted">不安装插件时由内置决策策略工作，它按已结算结果校准自己的概率估计。内置策略不作为可编辑配置提供，全文可在上方导出查看。</p>';
         }
         for(const p of [...(m.plugins[kind]||[])].sort((a,b)=>(a.priority??999)-(b.priority??999))){
             const card=controlNode('article','',grid);card.id='plugin_'+kind+'_'+p.name;card.className='plugin configuration-card'+(p.enabled?'':' off');

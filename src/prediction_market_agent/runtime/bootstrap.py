@@ -47,7 +47,7 @@ class EngineComponents:
     provider: Any
     research_contributions: list[Any]
     discovery_strategy: Any
-    discovery_evolution: bool
+    strategy_evolution: bool
 
 
 def bootstrap_engine(
@@ -168,7 +168,7 @@ def bootstrap_engine(
             provider=make_provider(config, catalog),
             research_contributions=_optional_research(config, catalog),
             discovery_strategy=_discovery_strategy(config, catalog),
-            discovery_evolution=bool(config.market_discovery_evolution),
+            strategy_evolution=bool(config.strategy_evolution),
         )
     except Exception:
         if owns_catalog:

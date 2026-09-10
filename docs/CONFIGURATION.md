@@ -94,6 +94,6 @@ Binance 和 Polymarket 还分别在自己的同一 JSON 中提供 `*_SCAN_INTERV
 `*_MAX_DECISIONS_PER_CYCLE` 和 `*_TOPIC_PAGE_SIZE`，均有默认值。它们不是第二套配置，也不进入应用
 Config；动态 UI 从 API 插件初始化返回的 schema 自动生成字段。
 
-`bot_management.json` 增加 `market_discovery_evolution`（默认 `true`）。它只决定**用户自己的**发现或
+`bot_management.json` 增加 `strategy_evolution`（默认 `true`）。它只决定**用户自己的**发现或
 决策策略插件是否附加运行时学到的叠加层；关闭后这些插件只使用用户写的原文，策略文件本身任何时候都
 不会被改写。内置策略不受该开关影响，始终测量并始终应用自己的叠加层。
