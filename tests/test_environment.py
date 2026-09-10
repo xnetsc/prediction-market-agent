@@ -78,10 +78,11 @@ class EnvironmentTests(unittest.TestCase):
             return {'status':'ok','ip':'8.8.8.8','family':'IPv4'}
         with patch('prediction_market_agent.runtime.environment.probe_service',side_effect=result):
             monitor.probe('direct');monitor.probe('inherited')
-        half=len(observed)//2
-        self.assertEqual([url for url,_ in observed[:half]],[url for url,_ in observed[half:]])
-        self.assertTrue(all(not proxy for _,proxy in observed[:half]))
-        self.assertTrue(all(proxy=='http://proxy.example:8080' for _,proxy in observed[half:]))
+        direct_urls=[url for url,proxy in observed if not proxy]
+        inherited_urls=[url for url,proxy in observed if proxy=='http://proxy.example:8080']
+        self.assertCountEqual(direct_urls,inherited_urls)
+        self.assertEqual(len(direct_urls),len(observed)//2)
+        self.assertEqual(len(inherited_urls),len(observed)//2)
 
     def test_configured_services_empty_list_and_validation(self):
         self.assertEqual(services_from('[]'),[])

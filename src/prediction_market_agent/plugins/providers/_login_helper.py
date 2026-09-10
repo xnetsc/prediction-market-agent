@@ -25,8 +25,14 @@ def exchange(config: dict, payload: dict) -> dict:
     request = urllib.request.Request(config["endpoint"], data=json.dumps({
         "nonce": base64.b64encode(nonce).decode(), "ciphertext": base64.b64encode(cipher).decode()}).encode(),
         headers={"Authorization": "Bearer " + config["secret"], "Content-Type": "application/json"})
-    # Use OS proxy settings for this computer; never inherit the server's container proxy address.
-    with urllib.request.build_opener(NoRedirect()).open(request, timeout=40) as response:
+    endpoint = urlsplit(config["endpoint"])
+    # This helper runs in the user's host terminal. A loopback *management endpoint*
+    # is therefore local to the helper (unlike a host proxy viewed from a container).
+    # Remote HTTPS management endpoints continue to use OS proxy settings.
+    handlers = [NoRedirect()]
+    if endpoint.hostname in {"localhost", "127.0.0.1"}:
+        handlers.insert(0, urllib.request.ProxyHandler({}))
+    with urllib.request.build_opener(*handlers).open(request, timeout=40) as response:
         envelope = json.loads(response.read(65536))
     return json.loads(AESGCM(key).decrypt(base64.b64decode(envelope["nonce"]),
         base64.b64decode(envelope["ciphertext"]), b"helper-response"))

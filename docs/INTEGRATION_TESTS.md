@@ -7,10 +7,13 @@ PYTHONPATH=src .venv/bin/python -m compileall -q src tests examples
 PYTHONPATH=src .venv/bin/python -m pytest -q
 ```
 
-当前依赖修复后的完整结果为 `159 passed, 2 failed, 101 subtests passed, 0 skipped`。两项失败都来自
+当前依赖修复后的完整结果为 `160 passed, 2 failed, 101 subtests passed, 0 skipped`。两项失败都来自
 Binance 公共时间接口的真实 `HTTP 451`；Polymarket 与其余本地/联网测试通过。另在 Python 3.12 干净
 环境从 PyPI 安装项目后执行 `pip check`，确认 `cryptography 50.0.1`、`webauthn 3.0.0` 与
 `polymarket-client 0.3.0` 无依赖冲突；Linux Python 3.13 slim 容器安装同一 wheel 也通过。
+终端助手另覆盖系统代理被故意设为不可达时，宿主机回环管理端点仍直接可达；远程 HTTPS 管理地址仍使用
+系统代理。该分支在本机 Bash 与 PowerShell 各 7 项通过，Windows PowerShell 5.1 由 Actions 实际运行。
+出口诊断的相同目标断言不依赖并发 worker 的完成顺序，并已连续运行 50 次通过。
 
 当前矩阵覆盖：
 
