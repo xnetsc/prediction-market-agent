@@ -13,6 +13,7 @@ from .broker import ExecutionError
 from .evaluation import MarketEvaluationMixin
 from .decision_strategy import DecisionEvolution
 from .market_discovery import DiscoveryEngine
+from .provider_quality import ProviderQuality
 from .memory import SessionMemory
 
 LOGGER = logging.getLogger(__name__)
@@ -54,6 +55,7 @@ class TradingEngine(MarketEvaluationMixin, ExecutionActionsMixin):
             strategy=components.decision_strategy,
             evolution_enabled=components.discovery_evolution,
         )
+        self.provider_quality = ProviderQuality(memory=self.memory, provider=self.provider)
         self._decisions_this_cycle = 0
         self._max_decisions_this_cycle = 0
 
@@ -122,6 +124,7 @@ class TradingEngine(MarketEvaluationMixin, ExecutionActionsMixin):
         for name, review in (
             ("discovery", self.discovery.review),
             ("decision", self.decision_evolution.review),
+            ("provider quality", self.provider_quality.review),
         ):
             try:
                 review()
@@ -208,6 +211,7 @@ class TradingEngine(MarketEvaluationMixin, ExecutionActionsMixin):
             },
             "available_decision_providers": list(self.provider.available_names),
             "unavailable_decision_providers": self.provider.unavailable,
+            "decision_provider_health": self.provider_quality.manifest(),
         }
         if include_memory:
             result.update(self.memory.stats())

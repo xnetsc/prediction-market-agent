@@ -182,6 +182,18 @@ class SessionMemory:
             );
             CREATE INDEX IF NOT EXISTS idx_discovery_lesson_active
                 ON discovery_lessons(strategy, retired_at, confirmed_at DESC);
+            CREATE TABLE IF NOT EXISTS provider_reviews (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                created_at INTEGER NOT NULL,
+                decision_id INTEGER NOT NULL,
+                subject_provider TEXT NOT NULL,
+                reviewer_provider TEXT NOT NULL,
+                scores_json TEXT NOT NULL DEFAULT '{}'
+            );
+            CREATE INDEX IF NOT EXISTS idx_provider_review
+                ON provider_reviews(subject_provider, created_at DESC);
+            CREATE INDEX IF NOT EXISTS idx_provider_review_decision
+                ON provider_reviews(decision_id);
             """
         )
         self.connection.commit()
@@ -690,7 +702,7 @@ class SessionMemory:
             """
             SELECT ledger.created_at, ledger.platform, ledger.token_id,
                    ledger.final_decision_json, ledger.proposed_decision_json,
-                   ledger.status, redeem.request_json
+                   ledger.status, redeem.request_json, ledger.provider
             FROM decision_ledger AS ledger
             JOIN execution_actions AS redeem
               ON redeem.platform = ledger.platform
@@ -703,7 +715,16 @@ class SessionMemory:
             (int(limit),),
         ).fetchall()
         results: list[dict[str, Any]] = []
-        for created_at, platform, token_id, final_json, proposed_json, status, request_json in rows:
+        for (
+            created_at,
+            platform,
+            token_id,
+            final_json,
+            proposed_json,
+            status,
+            request_json,
+            provider,
+        ) in rows:
             try:
                 decision = json.loads(final_json or proposed_json or "{}")
                 request = json.loads(request_json or "{}")
@@ -719,6 +740,7 @@ class SessionMemory:
                     "platform": str(platform),
                     "token_id": str(token_id),
                     "status": str(status),
+                    "provider": str(provider or ""),
                     "action": str(decision.get("action", "")).upper(),
                     "estimated_probability": float(decision["estimated_probability"]),
                     "confidence": float(decision.get("confidence") or 0.0),
@@ -727,6 +749,139 @@ class SessionMemory:
                 }
             )
         return results
+
+    def provider_delivery(self, *, limit: int = 5000) -> dict[str, dict[str, int]]:
+        """How reliably each provider returned a usable answer at all."""
+        rows = self.connection.execute(
+            """
+            SELECT provider, status, COUNT(*)
+            FROM (
+                SELECT provider, status FROM provider_turns
+                ORDER BY created_at DESC LIMIT ?
+            )
+            GROUP BY provider, status
+            """,
+            (int(limit),),
+        ).fetchall()
+        totals: dict[str, dict[str, int]] = {}
+        for provider, status, count in rows:
+            entry = totals.setdefault(str(provider), {"turns": 0, "ok": 0, "errors": 0})
+            entry["turns"] += int(count)
+            if str(status).upper() == "OK":
+                entry["ok"] += int(count)
+            else:
+                entry["errors"] += int(count)
+        return totals
+
+    def provider_tool_effort(self, *, limit: int = 5000) -> dict[str, dict[str, int]]:
+        """Tool steps each provider spent, as a proxy for how efficiently it reaches an answer."""
+        rows = self.connection.execute(
+            """
+            SELECT provider, COUNT(*), COUNT(DISTINCT decision_id)
+            FROM (
+                SELECT provider, decision_id FROM agent_steps
+                ORDER BY created_at DESC LIMIT ?
+            )
+            GROUP BY provider
+            """,
+            (int(limit),),
+        ).fetchall()
+        return {
+            str(provider): {"steps": int(steps), "decisions": int(decisions or 0)}
+            for provider, steps, decisions in rows
+        }
+
+    def recent_decisions_for_review(
+        self, *, limit: int = 20, exclude_reviewed: bool = True
+    ) -> list[dict[str, Any]]:
+        """Completed decisions a second provider can grade."""
+        query = """
+            SELECT ledger.id, ledger.provider, ledger.platform, ledger.token_id,
+                   ledger.final_decision_json, ledger.proposed_decision_json, ledger.context_json
+            FROM decision_ledger AS ledger
+            WHERE ledger.provider != '' AND ledger.status = 'OK'
+        """
+        if exclude_reviewed:
+            query += """
+              AND NOT EXISTS (
+                SELECT 1 FROM provider_reviews AS seen WHERE seen.decision_id = ledger.id
+              )
+            """
+        query += " ORDER BY ledger.created_at DESC LIMIT ?"
+        rows = self.connection.execute(query, (int(limit),)).fetchall()
+        results = []
+        for row in rows:
+            try:
+                decision = json.loads(row[4] or row[5] or "{}")
+                context = json.loads(row[6] or "{}")
+            except json.JSONDecodeError:
+                continue
+            results.append(
+                {
+                    "decision_id": int(row[0]),
+                    "provider": str(row[1]),
+                    "platform": str(row[2]),
+                    "token_id": str(row[3]),
+                    "decision": decision,
+                    "context": context,
+                }
+            )
+        return results
+
+    def record_provider_review(
+        self,
+        *,
+        decision_id: int,
+        subject_provider: str,
+        reviewer_provider: str,
+        scores: dict[str, Any],
+    ) -> None:
+        self.connection.execute(
+            """
+            INSERT INTO provider_reviews(
+                created_at, decision_id, subject_provider, reviewer_provider, scores_json
+            ) VALUES (?, ?, ?, ?, ?)
+            """,
+            (
+                int(time.time() * 1000),
+                int(decision_id),
+                subject_provider,
+                reviewer_provider,
+                self._json(scores),
+            ),
+        )
+        self.connection.commit()
+
+    def provider_review_scores(self, *, limit: int = 2000) -> dict[str, dict[str, float]]:
+        """Averaged peer scores per provider, excluding anything a provider graded itself."""
+        rows = self.connection.execute(
+            """
+            SELECT subject_provider, scores_json FROM provider_reviews
+            WHERE subject_provider != reviewer_provider
+            ORDER BY created_at DESC LIMIT ?
+            """,
+            (int(limit),),
+        ).fetchall()
+        totals: dict[str, dict[str, float]] = {}
+        for provider, scores_json in rows:
+            try:
+                scores = json.loads(scores_json or "{}")
+            except json.JSONDecodeError:
+                continue
+            overall = scores.get("overall")
+            if overall is None:
+                continue
+            entry = totals.setdefault(str(provider), {"reviews": 0.0, "total": 0.0})
+            entry["reviews"] += 1
+            entry["total"] += float(overall)
+        return {
+            provider: {
+                "reviews": int(entry["reviews"]),
+                "average": round(entry["total"] / entry["reviews"], 4),
+            }
+            for provider, entry in totals.items()
+            if entry["reviews"]
+        }
 
     def load_discovery_priors(self, strategy: str) -> list[dict[str, Any]]:
         rows = self.connection.execute(

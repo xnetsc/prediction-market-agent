@@ -26,7 +26,10 @@ Prediction 与 Polymarket API 插件，以及 Codex、Claude、OpenAI-compatible
 - 插件初始化函数可返回动态字段 schema、插件自有 JSON 读取/保存回调与卸载回调；每个字段必须有说明，
   可选必填、默认值、枚举或秘密类型。
 - Binance 和 Polymarket 通过同一个标准化 API 契约提供各自真实具备的行情、能力和写工作流。
-- Codex/Claude/兼容 API 按列表优先级自动故障转移；任何 Provider 都使用相同的多步工具 Agent。
+- Codex/Claude/兼容 API 自动故障转移，并且**按失败类型退避、恢复后自动回到轮换**：限流等一个配额窗口，
+  掉线只等几十秒，不会每次决策都为同一个故障再撞一次墙。可用的服务按实测质量排序——送达率、已结算
+  校准（Brier）、以及由**另一个**服务给出的评分；模型给自己打的分不计入。任何 Provider 都使用相同的
+  多步工具 Agent。
 - 研究工具由插件动态贡献，工具名会动态进入 Agent 控制 schema；内置网页、URL、跨市场、行情刷新、
   K 线和历史召回工具集。
 - SQLite 保存每轮完整输入输出、Agent 工具轨迹、风险判定、执行请求/结果以及专门的决策台账。

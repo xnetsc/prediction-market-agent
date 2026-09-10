@@ -295,6 +295,7 @@ class RobotRuntimeManager:
 
     def status(self) -> dict[str, Any]:
         with self._lock:
+            engine = self._engine
             result = {
                 **self._status,
                 "global_reasons": list(self._status.get("global_reasons", [])),
@@ -303,6 +304,11 @@ class RobotRuntimeManager:
                     for name, value in self._status.get("platforms", {}).items()
                 },
             }
+            if engine is not None:
+                try:
+                    result["decision_provider_health"] = engine.provider_quality.manifest()
+                except Exception:
+                    LOGGER.exception("provider health manifest failed")
             if self._catalog is not None:
                 for name, platform in result["platforms"].items():
                     try:
