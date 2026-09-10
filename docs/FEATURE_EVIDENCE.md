@@ -23,7 +23,7 @@
 | 按目标风控、资金/净结果、Agent 白名单、动态 Python | `core/risk.py`、`plugins/risk/` | [RISK_AND_HOOKS.md](RISK_AND_HOOKS.md) | [reject_operation.py](../examples/risk_plugins/reject_operation.py)、[cap_trade_size.py](../examples/risk_rules/cap_trade_size.py) | 净结果、敞口、动态规则、无插件不加政策及插件边界测试 |
 | Agent、quote/order/fill/cancel/redeem/transfer Hook | `core/hooks.py`、`plugins/hooks/` | [RISK_AND_HOOKS.md](RISK_AND_HOOKS.md) | [audit_hook.py](../examples/hooks/audit_hook.py) | Hook 顺序、注册/注销和插件生命周期测试 |
 | 专用决策账本与可解释性界面 | `runtime/memory.py`、`runtime/dashboard.py`、`runtime/reporting.py` | [HTTP_AUDIT.md](HTTP_AUDIT.md) | 已保存 ledger 记录即为可查询样例 | ledger 全链路字段、筛选 API、HTML UI 与后续盘口测试 |
-| 首次 admin Passkey、ECDH 加密信封、闲置/绝对会话、设备与踢出 | `runtime/auth.py`、`runtime/dashboard.py` | [AUTHENTICATION.md](AUTHENTICATION.md) | 首次访问向导与“管理员安全”界面 | [test_authentication.py](../tests/test_authentication.py) 的派生、注册、加密、重放、期限和会话测试 |
+| 首次 admin Passkey、ECDH 加密信封、可选签名计数、闲置/绝对会话、设备与踢出 | `runtime/auth.py`、`runtime/dashboard.py` | [AUTHENTICATION.md](AUTHENTICATION.md) | 首次访问向导与“管理员安全”界面 | [test_authentication.py](../tests/test_authentication.py) 的派生、注册、零/回退计数兼容、加密、重放、期限和会话测试 |
 | wheel 程序入口与本地/Railway/Vercel/AWS/阿里云部署 | `__main__.py`、`runtime/cloud.py`、根目录与 `deploy/` 部署文件 | [DEPLOYMENT.md](DEPLOYMENT.md) | `start-local.*`、`compose.yaml`、平台模板 | CLI、ASGI、配置解析、wheel 安装、容器与模板验证 |
 | 应用 JSON 自动加载、直连/系统/显式代理 | `core/config.py`、`plugin_system/config_io.py` 与各联网插件 | [CONFIGURATION.md](CONFIGURATION.md) | [application.json](../examples/application.json) 和各插件 JSON | 配置类型/默认/删除、配置清单和生产联网测试 |
 | 零跳过及架构边界持续检查 | `tests/test_architecture_contracts.py` | [INTEGRATION_TESTS.md](INTEGRATION_TESTS.md) | 本测试文件本身可作为新增契约模板 | 全套 pytest；检测 skip/xfail、执行模式、插件系统私有字段和账本 UI |

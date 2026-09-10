@@ -16,6 +16,11 @@ WebAuthn challenge 是随机熵、客户端公钥和服务端公钥规范表示�
 `clientDataJSON` 的签名同时确认本次密钥交换。WebAuthn 验证成功后，双方执行 ECDH，再使用相同 challenge
 作为 HKDF-SHA-256 salt 派生 256 位 AES-GCM 会话密钥。服务端不会接受未通过该 Passkey ceremony 的密钥。
 
+认证器签名计数器不是登录条件。部分硬件、平台认证器和同步 Passkey 不实现单调计数，可能持续返回 `0`、
+在设备之间切换后回退，或重复返回同一数值。服务端仍保存见过的最高值作为诊断信息，但不会因计数为零、
+不递增或回退而拒绝已通过 challenge、Origin、RP ID、用户验证和公钥签名校验的登录。计数异常只能作为
+克隆或设备故障的弱信号，不能单独证明凭据被克隆。
+
 浏览器把不可导出的 AES `CryptoKey` 按 `session_id` 保存在 IndexedDB；服务端只把随机会话 token 放在
 `HttpOnly`、`SameSite=Strict` Cookie 中。会话连续 72 小时未操作则失效，每次有效请求刷新闲置计时；
 从登录时刻起最长 7 天，无论是否持续操作都必须重新登录。两项分别由 `admin_session_hours`（默认 72）和

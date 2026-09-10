@@ -349,11 +349,16 @@ class AdminAuthStore:
         verification = verify_authentication_response(
             credential=credential, expected_challenge=challenge[0], expected_rp_id=challenge[1],
             expected_origin=challenge[2], credential_public_key=key[0],
-            credential_current_sign_count=key[1], require_user_verification=True,
+            # Counter values are optional authenticator telemetry. Supplying the
+            # stored high-water mark would make the dependency reject valid zero,
+            # reset, or non-increasing counters before application policy applies.
+            credential_current_sign_count=0, require_user_verification=True,
         )
+        observed_sign_count = max(0, int(verification.new_sign_count))
+        retained_sign_count = max(int(key[1]), observed_sign_count)
         connection.execute(
             "UPDATE admin_passkeys SET sign_count = ?,last_used_at = ? WHERE credential_id = ?",
-            (verification.new_sign_count, int(time.time()), credential_id),
+            (retained_sign_count, int(time.time()), credential_id),
         )
         connection.commit()
         connection.close()
