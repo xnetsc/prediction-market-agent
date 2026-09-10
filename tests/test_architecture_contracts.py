@@ -106,8 +106,35 @@ class ArchitectureContractTests(unittest.TestCase):
             "network_rules",
             "allowed_tools",
             "strategy_text",
+            "scan_interval_seconds",
+            "error_backoff_seconds",
+            "error_backoff_max_seconds",
+            "max_topics_per_cycle",
+            "max_decisions_per_cycle",
+            "topic_page_size",
         }
         self.assertEqual(fields & forbidden, set())
+
+    def test_generic_runtime_and_deployment_templates_do_not_schedule_platform_scans(self) -> None:
+        generic_sources = "\n".join(
+            path.read_text(encoding="utf-8")
+            for path in (PACKAGE / "runtime").glob("*.py")
+        )
+        for name in (
+            "scan_interval_seconds",
+            "error_backoff_seconds",
+            "error_backoff_max_seconds",
+            "max_topics_per_cycle",
+        ):
+            self.assertNotIn(name, generic_sources)
+        self.assertNotIn(
+            "Type: ScheduleV2",
+            (ROOT / "deploy" / "aws" / "template.yaml").read_text(encoding="utf-8"),
+        )
+        self.assertNotIn(
+            "triggerType: timer",
+            (ROOT / "deploy" / "aliyun" / "s.yaml").read_text(encoding="utf-8"),
+        )
 
     def test_generic_gateway_accepts_only_normalized_order_statuses(self) -> None:
         source = (PACKAGE / "runtime" / "broker.py").read_text(encoding="utf-8")

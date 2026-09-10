@@ -7,8 +7,12 @@ from prediction_market_agent.plugin_system.discovery import (
     PluginConfiguration,
     PluginInitializationContext,
     PluginSpec,
+    PluginReadiness,
+    PluginRuntime,
     close_plugin_instances,
 )
+from prediction_market_agent.plugins.api._binance.config import BinancePluginConfig
+from prediction_market_agent.plugins.api._binance.runtime import BinanceEventLoop
 
 
 def initialize_plugin(context: PluginInitializationContext) -> PluginSpec:
@@ -25,6 +29,12 @@ def initialize_plugin(context: PluginInitializationContext) -> PluginSpec:
             PluginConfigField("BINANCE_PREDICTION_SLIPPAGE_BPS", "最大滑点(bps)", "integer", "市价请求允许的滑点基点数，100 bps 等于 1%。", required=True),
             PluginConfigField("BINANCE_HTTP_PROXY", "HTTP 代理", "string", "Binance 插件独立使用的代理。填 DIRECT 直连、SYSTEM 读取本机系统代理，或填写 http(s) URL。", required=True),
             PluginConfigField("BINANCE_NETWORK_RULES_JSON", "网络规则 JSON", "string", "Binance 插件允许访问的 scheme、host、HTTP method 与各 method 路径模式；由插件构造网络规则引擎。", required=True),
+            PluginConfigField("BINANCE_SCAN_INTERVAL_SECONDS", "扫描间隔（秒）", "integer", "Binance 完成一个市场扫描与决策周期后等待到下一周期的秒数。", default=60),
+            PluginConfigField("BINANCE_ERROR_BACKOFF_SECONDS", "失败退避初值（秒）", "integer", "Binance 周期失败后的首次重试等待秒数；连续失败时指数增长。", default=30),
+            PluginConfigField("BINANCE_ERROR_BACKOFF_MAX_SECONDS", "失败退避上限（秒）", "integer", "Binance 连续失败重试等待的最大秒数。", default=900),
+            PluginConfigField("BINANCE_MAX_TOPICS_PER_CYCLE", "每轮主题上限", "integer", "Binance 每次事件循环最多进入策略筛选的候选主题数。", default=10),
+            PluginConfigField("BINANCE_MAX_DECISIONS_PER_CYCLE", "每轮决策上限", "integer", "Binance 每次事件循环最多交给 Agent 的 outcome 决策数。", default=6),
+            PluginConfigField("BINANCE_TOPIC_PAGE_SIZE", "主题分页大小", "integer", "Binance 每次主题列表网络请求加载的记录数。", default=100),
         ),
         load_callback=load,
         save_callback=save,
@@ -33,6 +43,50 @@ def initialize_plugin(context: PluginInitializationContext) -> PluginSpec:
     )
 
     instances = []
+
+    def settings() -> BinancePluginConfig:
+        return BinancePluginConfig.from_mapping(
+            {name: str(value) for name, value in configuration.load().items()}
+        )
+
+    def scan(maximum_topics: int, page_size: int):
+        if not instances:
+            raise RuntimeError("Binance API instance is not active")
+        plugin = instances[-1]
+        plugin.sync_time()
+        topics = []
+        offset = 0
+        while len(topics) < maximum_topics:
+            page = plugin.list_topics(
+                offset=offset,
+                limit=min(page_size, maximum_topics - len(topics)),
+            )
+            topics.extend(page.topics)
+            if not page.has_more or not page.topics:
+                break
+            offset = page.next_offset
+        return tuple(topics)
+
+    event_loop = BinanceEventLoop(settings, scan)
+
+    def readiness() -> PluginReadiness:
+        try:
+            values = configuration.load()
+            settings()
+        except (KeyError, TypeError, ValueError) as error:
+            return PluginReadiness(False, (str(error),))
+        required = (
+            "BINANCE_API_KEY",
+            "BINANCE_API_SECRET",
+            "BINANCE_PREDICTION_WALLET_ADDRESS",
+            "BINANCE_PREDICTION_WALLET_ID",
+        )
+        missing = tuple(name for name in required if not str(values.get(name, "")).strip())
+        return (
+            PluginReadiness(False, tuple(f"Missing runtime field: {name}" for name in missing))
+            if missing
+            else PluginReadiness(True)
+        )
 
     def factory(config):
         del config
@@ -50,4 +104,6 @@ def initialize_plugin(context: PluginInitializationContext) -> PluginSpec:
         factory=factory,
         configuration=configuration,
         teardown=lambda: close_plugin_instances(instances),
+        readiness_callback=readiness,
+        runtime=PluginRuntime(event_loop.start, event_loop.stop, event_loop.status),
     )

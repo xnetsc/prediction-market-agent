@@ -24,7 +24,7 @@
 持续优化策略插件。原始完整记录仍可单独查询，不会只保留页面摘要。
 
 浏览器中的逻辑操作仍使用 `/api/summary`、`/api/decisions`、`/api/records`、`/api/manifest`、
-`/api/plugins/manage` 和 `/api/settings` 等稳定名称，但不会直接发这些明文 URL 请求。登录后页面把逻辑 URL、
+`/api/plugins/manage`、`/api/runtime` 和 `/api/settings` 等稳定名称，但不会直接发这些明文 URL 请求。登录后页面把逻辑 URL、
 参数和正文一起放进 AES-GCM 信封，统一提交到 `POST /api/secure`，服务端解密分派后再加密响应。
 
 ## 插件管理
@@ -36,9 +36,15 @@
 - `/api/plugins/selection`
 - `/api/plugins/directories`、`/api/plugins/directories/reset`
 - `/api/plugins/config`、`/api/plugins/config/reset`、`/api/plugins/config/delete`
+- `/api/plugins/install`
 - `/api/plugins/refresh`
+- `/api/runtime`、`/api/runtime/control`
 - `/api/auth/manage`、`/api/auth/passkeys/*`、`/api/auth/sessions/kick`
 
 管理操作要求有效的 HttpOnly 会话 Cookie、会话请求 token 和 ECDH 派生密钥。保存配置时插件系统只调用
 插件的 `save_callback` 或 `delete_callback`。刷新会卸载旧注册表并按磁盘最新状态重建。完整认证和信封协议
 见 [AUTHENTICATION.md](AUTHENTICATION.md)。
+
+“机器人运行控制”显示全局 readiness、每个平台配置缺失原因、暂停和 runtime/事件队列状态。全局或逐平台
+暂停写入 `management_file` 并立即执行启停；恢复后只有配置就绪的平台会启动。安装新插件时，页面提交
+类别、目标目录、名称和源码；服务端校验后写入，不覆盖已有文件，新文件默认禁用。

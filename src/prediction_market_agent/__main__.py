@@ -3,17 +3,18 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import threading
 import time
 from pathlib import Path
 
 from .agent.decision import make_provider
-from .runtime.engine import TradingEngine
 from .core.config import ApplicationConfigStore, Config, DEFAULT_APPLICATION_CONFIG
 from .plugin_system.registry import load_api_plugins
 from .plugin_system.discovery import load_plugin_catalog
 from .plugin_system.contracts import platform_state_path
 from .runtime.reporting import build_report
 from .runtime.dashboard import serve
+from .runtime.controller import RobotRuntimeManager
 from .plugin_system.managed_config import PLUGIN_KINDS
 from .plugin_system.managed_config import ManagedRuntimeConfig, save_managed_config
 
@@ -181,16 +182,30 @@ def main() -> None:
             )
         )
         return
-    engine = TradingEngine(config)
+    runtime = RobotRuntimeManager(config.application_config_file)
+    if args.command == "once":
+        print(json.dumps(runtime.execute_once(), ensure_ascii=False, indent=2))
+        return
+    if args.command == "status":
+        try:
+            print(
+                json.dumps(
+                    runtime.reconcile(start_runtimes=False),
+                    ensure_ascii=False,
+                    indent=2,
+                )
+            )
+        finally:
+            runtime.stop()
+        return
     try:
-        if args.command == "once":
-            print(json.dumps(engine.run_once(), ensure_ascii=False, indent=2))
-        elif args.command == "status":
-            print(json.dumps(engine.status(), ensure_ascii=False, indent=2))
-        else:
-            engine.run_forever()
+        status = runtime.reconcile()
+        print(json.dumps(status, ensure_ascii=False, indent=2))
+        threading.Event().wait()
+    except KeyboardInterrupt:
+        pass
     finally:
-        engine.close()
+        runtime.stop()
 
 
 if __name__ == "__main__":

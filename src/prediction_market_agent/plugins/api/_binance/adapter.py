@@ -90,6 +90,15 @@ class BinancePredictionApiPlugin:
     def sync_time(self) -> None:
         self.client.sync_time()
 
+    def cycle_limits(self) -> tuple[int, int]:
+        return (
+            self.settings.max_topics_per_cycle,
+            self.settings.max_decisions_per_cycle,
+        )
+
+    def topic_page_size(self) -> int:
+        return self.settings.topic_page_size
+
     @staticmethod
     def _topic(item: dict[str, Any]) -> Topic:
         return Topic(

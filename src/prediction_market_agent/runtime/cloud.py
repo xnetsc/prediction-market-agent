@@ -8,7 +8,7 @@ from fastapi import HTTPException, Request
 
 from ..core.config import ApplicationConfigStore, Config
 from .dashboard import create_app
-from .engine import TradingEngine
+from .controller import RobotRuntimeManager
 
 
 def cloud_config() -> Config:
@@ -25,16 +25,12 @@ def cloud_config() -> Config:
     return Config.load(config_path)
 
 
-application = create_app(cloud_config())
+application = create_app(cloud_config(), start_robot=False)
 _http_handler = Mangum(application, lifespan="off")
 
 
 def run_once_event() -> dict[str, Any]:
-    engine = TradingEngine(cloud_config())
-    try:
-        return engine.run_once()
-    finally:
-        engine.close()
+    return RobotRuntimeManager(cloud_config().application_config_file).execute_once()
 
 
 @application.post("/invoke")
@@ -46,7 +42,7 @@ def aliyun_runtime_invoke(request: Request) -> dict[str, Any]:
 
 
 def lambda_handler(event: dict[str, Any], context: Any) -> Any:
-    """Serve API Gateway requests or execute one robot cycle for scheduled events."""
+    """Serve API Gateway requests or execute one explicitly invoked robot cycle."""
     if "requestContext" in event:
         return _http_handler(event, context)
     return {"ok": True, "result": run_once_event()}

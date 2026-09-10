@@ -36,6 +36,12 @@ class BinancePluginConfig:
     slippage_bps: int
     http_proxy: str
     network_rules: dict[str, Any]
+    scan_interval_seconds: int
+    error_backoff_seconds: int
+    error_backoff_max_seconds: int
+    max_topics_per_cycle: int
+    max_decisions_per_cycle: int
+    topic_page_size: int
 
     @classmethod
     def from_mapping(cls, values: Mapping[str, str]) -> "BinancePluginConfig":
@@ -54,6 +60,16 @@ class BinancePluginConfig:
             network_rules=_network_rules(
                 get("BINANCE_NETWORK_RULES_JSON", ""), "BINANCE_NETWORK_RULES_JSON"
             ),
+            scan_interval_seconds=int(get("BINANCE_SCAN_INTERVAL_SECONDS", "60")),
+            error_backoff_seconds=int(get("BINANCE_ERROR_BACKOFF_SECONDS", "30")),
+            error_backoff_max_seconds=int(
+                get("BINANCE_ERROR_BACKOFF_MAX_SECONDS", "900")
+            ),
+            max_topics_per_cycle=int(get("BINANCE_MAX_TOPICS_PER_CYCLE", "10")),
+            max_decisions_per_cycle=int(
+                get("BINANCE_MAX_DECISIONS_PER_CYCLE", "6")
+            ),
+            topic_page_size=int(get("BINANCE_TOPIC_PAGE_SIZE", "100")),
         )
         if not value.base_url.startswith("https://"):
             raise ValueError("BINANCE_API_BASE_URL must start with https://")
@@ -61,6 +77,20 @@ class BinancePluginConfig:
             raise ValueError("BINANCE_PREDICTION_ACCOUNT_TYPE must be SPOT or FUNDING")
         if not 1 <= value.slippage_bps <= 10_000:
             raise ValueError("BINANCE_PREDICTION_SLIPPAGE_BPS must be in [1, 10000]")
+        if min(
+            value.scan_interval_seconds,
+            value.error_backoff_seconds,
+            value.error_backoff_max_seconds,
+            value.max_topics_per_cycle,
+            value.max_decisions_per_cycle,
+            value.topic_page_size,
+        ) <= 0:
+            raise ValueError("Binance runtime interval, backoff, and cycle limits must be positive")
+        if value.error_backoff_max_seconds < value.error_backoff_seconds:
+            raise ValueError(
+                "BINANCE_ERROR_BACKOFF_MAX_SECONDS cannot be less than "
+                "BINANCE_ERROR_BACKOFF_SECONDS"
+            )
         return value
 
     def manifest(self) -> dict[str, Any]:
@@ -73,4 +103,12 @@ class BinancePluginConfig:
             "slippage_bps": self.slippage_bps,
             "http_proxy": self.http_proxy or "DIRECT",
             "network_rules": self.network_rules,
+            "runtime": {
+                "scan_interval_seconds": self.scan_interval_seconds,
+                "error_backoff_seconds": self.error_backoff_seconds,
+                "error_backoff_max_seconds": self.error_backoff_max_seconds,
+                "max_topics_per_cycle": self.max_topics_per_cycle,
+                "max_decisions_per_cycle": self.max_decisions_per_cycle,
+                "topic_page_size": self.topic_page_size,
+            },
         }

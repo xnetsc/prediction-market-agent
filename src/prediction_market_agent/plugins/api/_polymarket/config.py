@@ -47,6 +47,12 @@ class PolymarketPluginConfig:
     transfer_recipient: str
     http_proxy: str
     network_rules: dict[str, Any]
+    scan_interval_seconds: int
+    error_backoff_seconds: int
+    error_backoff_max_seconds: int
+    max_topics_per_cycle: int
+    max_decisions_per_cycle: int
+    topic_page_size: int
 
     @classmethod
     def from_mapping(cls, values: Mapping[str, str]) -> "PolymarketPluginConfig":
@@ -77,6 +83,16 @@ class PolymarketPluginConfig:
                 get("POLYMARKET_NETWORK_RULES_JSON", ""),
                 "POLYMARKET_NETWORK_RULES_JSON",
             ),
+            scan_interval_seconds=int(get("POLYMARKET_SCAN_INTERVAL_SECONDS", "60")),
+            error_backoff_seconds=int(get("POLYMARKET_ERROR_BACKOFF_SECONDS", "30")),
+            error_backoff_max_seconds=int(
+                get("POLYMARKET_ERROR_BACKOFF_MAX_SECONDS", "900")
+            ),
+            max_topics_per_cycle=int(get("POLYMARKET_MAX_TOPICS_PER_CYCLE", "10")),
+            max_decisions_per_cycle=int(
+                get("POLYMARKET_MAX_DECISIONS_PER_CYCLE", "6")
+            ),
+            topic_page_size=int(get("POLYMARKET_TOPIC_PAGE_SIZE", "100")),
         )
         for name, url in {
             "POLYMARKET_GAMMA_URL": value.gamma_url,
@@ -89,6 +105,22 @@ class PolymarketPluginConfig:
                 raise ValueError(f"{name} must start with https://")
         if value.chain_id <= 0:
             raise ValueError("POLYMARKET_CHAIN_ID must be positive")
+        if min(
+            value.scan_interval_seconds,
+            value.error_backoff_seconds,
+            value.error_backoff_max_seconds,
+            value.max_topics_per_cycle,
+            value.max_decisions_per_cycle,
+            value.topic_page_size,
+        ) <= 0:
+            raise ValueError(
+                "Polymarket runtime interval, backoff, and cycle limits must be positive"
+            )
+        if value.error_backoff_max_seconds < value.error_backoff_seconds:
+            raise ValueError(
+                "POLYMARKET_ERROR_BACKOFF_MAX_SECONDS cannot be less than "
+                "POLYMARKET_ERROR_BACKOFF_SECONDS"
+            )
         return value
 
     def manifest(self) -> dict[str, Any]:
@@ -116,4 +148,12 @@ class PolymarketPluginConfig:
             "transfer_recipient_present": bool(self.transfer_recipient),
             "http_proxy": self.http_proxy or "DIRECT",
             "network_rules": self.network_rules,
+            "runtime": {
+                "scan_interval_seconds": self.scan_interval_seconds,
+                "error_backoff_seconds": self.error_backoff_seconds,
+                "error_backoff_max_seconds": self.error_backoff_max_seconds,
+                "max_topics_per_cycle": self.max_topics_per_cycle,
+                "max_decisions_per_cycle": self.max_decisions_per_cycle,
+                "topic_page_size": self.topic_page_size,
+            },
         }

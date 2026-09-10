@@ -170,8 +170,10 @@ class PortfolioLimitsContribution:
         self._accounts: list[AccountLimitEngine] = []
 
     def initial_allocations(self, platforms: tuple[str, ...]) -> dict[str, float]:
-        if set(self.settings.allocations) != set(platforms):
-            raise ValueError("Portfolio allocations must name every enabled API plugin exactly once")
+        if not set(platforms).issubset(self.settings.allocations):
+            raise ValueError(
+                "Portfolio allocations must include every configured, runnable API plugin"
+            )
         if any(value <= 0 for value in self.settings.allocations.values()):
             raise ValueError("Portfolio allocations must be positive")
         if sum(self.settings.allocations.values()) > self.settings.total_capital + 1e-9:

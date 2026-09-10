@@ -195,7 +195,7 @@ class AuthenticationTests(unittest.TestCase):
                 market_api_plugins=("binance",),
                 decision_strategy_name="general_agent",
             )
-            app = create_app(config)
+            app = create_app(config, start_robot=False)
             self.assertTrue(decision_db.exists())
             self.assertTrue(auth_db.exists())
             with TestClient(app, base_url="http://localhost") as client:
@@ -219,7 +219,9 @@ class AuthenticationTests(unittest.TestCase):
                 decision_strategy_name="general_agent",
             )
             _, public_jwk = client_ecdh()
-            with TestClient(create_app(config), base_url="http://localhost") as client:
+            with TestClient(
+                create_app(config, start_robot=False), base_url="http://localhost"
+            ) as client:
                 response = client.post(
                     "/api/auth/register/options",
                     headers={"Origin": "https://attacker.invalid"},
@@ -242,7 +244,7 @@ class AuthenticationTests(unittest.TestCase):
                 market_api_plugins=("binance",),
                 decision_strategy_name="general_agent",
             )
-            app = create_app(config)
+            app = create_app(config, start_robot=False)
             store = AdminAuthStore(config.auth_db, 72, 168)
             connection = store._connect()
             connection.execute(

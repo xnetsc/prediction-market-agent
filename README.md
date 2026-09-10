@@ -14,6 +14,8 @@ Prediction 与 Polymarket API 插件，以及 Codex、Claude、OpenAI-compatible
 ## 核心能力
 
 - 自动扫描 `api`、`decision_provider`、`decision_strategy`、`research_tool`、`risk`、`hook` 六类插件。
+- API 平台插件各自拥有定时扫描、成功间隔和失败退避；扫描结果进入通用事件循环，再统一执行跨平台调研、
+  Agent 决策、风控和线上动作。通用框架也可在明确调用时主动访问任一 API 插件。
 - 插件系统保存有序启用名单；禁用插件不导入、不初始化，启用、禁用、删除后刷新均执行完整卸载生命周期。
 - 插件初始化函数可返回动态字段 schema、插件自有 JSON 读取/保存回调与卸载回调；每个字段必须有说明，
   可选必填、默认值、枚举或秘密类型。
@@ -25,7 +27,8 @@ Prediction 与 Polymarket API 插件，以及 Codex、Claude、OpenAI-compatible
 - Web 界面强制首次注册 admin Passkey；每次登录把 P-256 ECDH 参数绑定进 WebAuthn challenge，登录后的
   业务请求与响应使用 AES-GCM 会话密钥加密，并可管理 Passkey 与设备会话。
 - Web 界面可筛选查看“上下文 → 证据 → 模型提案 → 风控调整 → 最终动作 → 执行 → 后续盘口”，并查看、
-  修改、删除全部程序配置、插件目录、插件启用状态和动态私有配置。
+  修改、删除全部程序配置、插件目录、插件启用状态和动态私有配置；也可安装新插件、暂停全部机器人或
+  单独暂停某个平台。
 - quote、order、fill、cancel、redeem、transfer、Agent tool/decision 均有 before/after Hook。
 
 ## 安装
@@ -54,7 +57,9 @@ wheel 是机器人的完整安装包。安装后唯一的程序入口是 `predic
 ```
 
 管理界面默认位于 `http://127.0.0.1:8765`。首次访问必须注册 admin Passkey；线上部署必须使用 HTTPS。
-完成配置后，在另一个终端运行一次决策或启动持续机器人：
+`serve` 同时承载管理界面和运行主管：全局依赖与平台私有配置齐全后自动启动相应平台自己的事件循环；
+配置不全的平台保持停止并显示原因。配置保存、启用/禁用、刷新或暂停会立即重新评估，无需另开 Worker。
+也可显式执行一次或使用无 Web 的前台运行入口：
 
 ```bash
 .venv/bin/prediction-market-agent once
@@ -69,8 +74,8 @@ wheel 是机器人的完整安装包。安装后唯一的程序入口是 `predic
 .venv/bin/prediction-market-agent report --since-hours 12
 ```
 
-插件配置保存后，管理服务会刷新插件实例；独立运行的
-交易进程需重启才能采用新实例。
+`once` 是明确的人工/外部单次触发，不创建后台定时器；`run` 启动同一套插件自有循环并在前台等待。
+不要同时对同一工作目录启动 `serve` 和 `run`，否则会形成两个机器人实例。
 
 ## 文档与例子
 

@@ -7,5 +7,7 @@
     "risk": ["portfolio_limits", "agent_actions", "dynamic_python"],
     "hook": []
   },
-  "decision_strategy": "general_agent"
+  "decision_strategy": "general_agent",
+  "robot_paused": false,
+  "paused_platforms": []
 }

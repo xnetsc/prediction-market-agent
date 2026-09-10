@@ -79,22 +79,6 @@ APPLICATION_FIELDS = (
         "config/plugin_directories.json",
     ),
     ApplicationConfigField(
-        "max_topics_per_cycle", "每平台每轮候选主题上限", "integer",
-        "每个平台在一个决策周期内最多加载的候选主题数。", 10, 1, 1000,
-    ),
-    ApplicationConfigField(
-        "max_decisions_per_cycle", "每平台每轮决策上限", "integer",
-        "每个平台在一个决策周期内最多交给 Agent 的市场数。", 6, 1, 1000,
-    ),
-    ApplicationConfigField(
-        "interval_seconds", "连续运行间隔（秒）", "integer",
-        "run 命令完成一轮后等待到下一轮的时间。", 60, 10, 86400,
-    ),
-    ApplicationConfigField(
-        "run_until_epoch", "停止时间戳", "integer",
-        "Unix 秒级时间戳；0 表示持续运行，非零值到达后结束循环。", 0, 0,
-    ),
-    ApplicationConfigField(
         "state_file", "账户状态文件", "string",
         "已确认远端结果的本地账户镜像路径；多平台会自动加入平台后缀。", "agent_state.json",
     ),
@@ -260,10 +244,6 @@ class Config:
     auth_db: Path = Path("admin_auth.sqlite3")
     admin_session_hours: int = 72
     admin_absolute_session_hours: int = 168
-    max_topics_per_cycle: int = 10
-    max_decisions_per_cycle: int = 6
-    interval_seconds: int = 60
-    run_until_epoch: int = 0
     state_file: Path = Path("agent_state.json")
     application_config_file: Path = DEFAULT_APPLICATION_CONFIG
     market_api_plugins: tuple[str, ...] = ()
@@ -296,10 +276,6 @@ class Config:
             session_db=_runtime_path(str(values["session_db"]), working_directory),
             admin_session_hours=int(values["admin_session_hours"]),
             admin_absolute_session_hours=int(values["admin_absolute_session_hours"]),
-            max_topics_per_cycle=int(values["max_topics_per_cycle"]),
-            max_decisions_per_cycle=int(values["max_decisions_per_cycle"]),
-            interval_seconds=int(values["interval_seconds"]),
-            run_until_epoch=int(values["run_until_epoch"]),
             state_file=_runtime_path(str(values["state_file"]), working_directory),
             application_config_file=store.path,
             market_api_plugins=managed.selected("api", ()),
@@ -320,21 +296,15 @@ class Config:
         return cfg
 
     def validate(self) -> None:
-        if self.interval_seconds < 10:
-            raise ValueError("interval_seconds must be at least 10")
-        if not self.decision_providers:
-            raise ValueError("At least one decision provider plugin must be enabled")
-        if not self.market_api_plugins:
-            raise ValueError("At least one API plugin must be enabled")
-        if not self.decision_strategy_name:
-            raise ValueError("One decision strategy plugin must be selected")
         if self.dashboard_host not in {"127.0.0.1", "localhost", "::1", "0.0.0.0"}:
             raise ValueError("dashboard_host must be a supported listen address")
         if not 1 <= self.dashboard_port <= 65535:
             raise ValueError("dashboard_port must be in [1, 65535]")
         if not 1 <= self.dashboard_refresh_seconds <= 300:
             raise ValueError("dashboard_refresh_seconds must be in [1, 300]")
-        PluginDirectoryConfig.load(self.plugin_directories_file)
+        PluginDirectoryConfig.load(
+            self.plugin_directories_file, working_directory=self.working_directory
+        )
         if not 0 <= self.agent_max_tool_steps <= 12:
             raise ValueError("agent_max_tool_steps must be in [0, 12]")
         if self.agent_tool_result_chars < 1000:
@@ -349,7 +319,14 @@ class Config:
             raise ValueError(
                 "admin_absolute_session_hours must be between admin_session_hours and 720"
             )
-        if self.max_topics_per_cycle < 1:
-            raise ValueError("max_topics_per_cycle must be positive")
-        if self.max_decisions_per_cycle < 1:
-            raise ValueError("max_decisions_per_cycle must be positive")
+
+    def robot_readiness_errors(self) -> tuple[str, ...]:
+        """Structural robot requirements; plugin-specific requirements stay in plugins."""
+        errors: list[str] = []
+        if not self.decision_providers:
+            errors.append("At least one decision provider plugin must be enabled")
+        if not self.market_api_plugins:
+            errors.append("At least one API plugin must be enabled")
+        if not self.decision_strategy_name:
+            errors.append("One decision strategy plugin must be selected")
+        return tuple(errors)

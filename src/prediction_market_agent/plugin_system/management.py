@@ -1,8 +1,16 @@
 from __future__ import annotations
 
+import ast
+import re
+from pathlib import Path
 from typing import Any
 
-from .managed_config import ManagedRuntimeConfig, PLUGIN_KINDS, save_managed_config
+from .managed_config import (
+    ManagedRuntimeConfig,
+    PLUGIN_KINDS,
+    atomic_write_text,
+    save_managed_config,
+)
 from .discovery import PluginCatalog, load_plugin_catalog
 from .config import PluginDirectoryConfig
 
@@ -63,13 +71,16 @@ class PluginManagementService:
                 result[kind].append(item)
         return {
             "plugin_directories": PluginDirectoryConfig.load(
-                self.config.plugin_directories_file
+                self.config.plugin_directories_file,
+                working_directory=self.config.working_directory,
             ).manifest(),
             "management_storage": str(self.config.management_file.expanduser().resolve()),
             "management_source": str(managed.source_path or managed.path),
-            "restart_required_after_change": True,
+            "restart_required_after_change": False,
             "enabled": selected,
             "decision_strategy": strategy,
+            "robot_paused": managed.robot_paused,
+            "paused_platforms": list(managed.paused_platforms),
             "plugins": result,
         }
 
@@ -100,12 +111,15 @@ class PluginManagementService:
 
     def save_plugin_directories(self, categories: dict[str, object]) -> dict[str, Any]:
         return PluginDirectoryConfig.save(
-            self.config.plugin_directories_file, categories
+            self.config.plugin_directories_file,
+            categories,
+            working_directory=self.config.working_directory,
         ).manifest()
 
     def reset_plugin_directories(self) -> dict[str, Any]:
         return PluginDirectoryConfig.reset(
-            self.config.plugin_directories_file
+            self.config.plugin_directories_file,
+            working_directory=self.config.working_directory,
         ).manifest()
 
     def save_enabled(self, payload: dict[str, Any]) -> dict[str, Any]:
@@ -127,24 +141,127 @@ class PluginManagementService:
                         f"Unknown {kind} plugin {name!r}; discovered files: {available}"
                     )
             normalized[kind] = names
-        if not normalized["api"]:
-            raise ValueError("At least one API plugin must be enabled")
-        if not normalized["decision_provider"]:
-            raise ValueError("At least one decision provider must be enabled")
         strategy = str(payload.get("decision_strategy", "")).strip().lower()
-        if strategy not in self.catalog.discovered_names("decision_strategy"):
+        if strategy and strategy not in self.catalog.discovered_names("decision_strategy"):
             raise ValueError(f"Unknown decision strategy plugin: {strategy!r}")
-        normalized["decision_strategy"] = [strategy]
+        normalized["decision_strategy"] = [strategy] if strategy else []
         save_managed_config(
             self.config.management_file,
-            {"enabled": normalized, "decision_strategy": strategy},
+            {
+                "enabled": normalized,
+                "decision_strategy": strategy,
+                "robot_paused": self._managed().robot_paused,
+                "paused_platforms": list(self._managed().paused_platforms),
+            },
         )
         self.refresh()
         return self.manifest()
 
+    def save_runtime_control(
+        self, *, robot_paused: bool, paused_platforms: list[str]
+    ) -> dict[str, Any]:
+        if not isinstance(robot_paused, bool):
+            raise ValueError("robot_paused must be a boolean")
+        if not isinstance(paused_platforms, list) or not all(
+            isinstance(item, str) for item in paused_platforms
+        ):
+            raise ValueError("paused_platforms must be a list of platform names")
+        known = set(self.catalog.discovered_names("api"))
+        normalized = tuple(
+            dict.fromkeys(item.strip().lower() for item in paused_platforms if item.strip())
+        )
+        unknown = sorted(set(normalized) - known)
+        if unknown:
+            raise ValueError("Unknown API platforms: " + ", ".join(unknown))
+        managed = self._managed()
+        save_managed_config(
+            self.config.management_file,
+            {
+                "enabled": {
+                    kind: list(managed.selected(kind, self._fallback(kind)))
+                    for kind in PLUGIN_KINDS
+                },
+                "decision_strategy": (
+                    managed.decision_strategy or self.config.decision_strategy_name
+                ),
+                "robot_paused": robot_paused,
+                "paused_platforms": list(normalized),
+            },
+        )
+        return {
+            "robot_paused": robot_paused,
+            "paused_platforms": list(normalized),
+        }
+
+    def install_plugin(
+        self, kind: str, name: str, source: str, target_directory: str
+    ) -> dict[str, Any]:
+        if kind not in PLUGIN_KINDS:
+            raise ValueError(f"Unknown plugin category: {kind!r}")
+        normalized = name.strip().lower()
+        if not re.fullmatch(r"[a-z][a-z0-9_]*", normalized):
+            raise ValueError(
+                "Plugin name must start with a lowercase letter and contain only "
+                "lowercase letters, digits, and underscores"
+            )
+        if normalized in self.catalog.discovered_names(kind):
+            raise FileExistsError(f"A {kind} plugin named {normalized!r} is already discovered")
+        if not isinstance(source, str) or not source.strip():
+            raise ValueError("Plugin source cannot be empty")
+        try:
+            tree = ast.parse(source, filename=f"{normalized}.py")
+        except SyntaxError as error:
+            raise ValueError(f"Plugin source is invalid Python: {error}") from error
+        if not any(
+            isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+            and node.name == "initialize_plugin"
+            for node in tree.body
+        ):
+            raise ValueError("Plugin source must define initialize_plugin(context)")
+        directories = PluginDirectoryConfig.load(
+            self.config.plugin_directories_file,
+            working_directory=self.config.working_directory,
+        ).directories[kind]
+        target_root = Path(target_directory).expanduser().resolve()
+        if target_root not in directories:
+            raise ValueError("Plugin install target is not configured for this category")
+        destination = target_root / f"{normalized}.py"
+        if destination.exists():
+            raise FileExistsError(f"Plugin file already exists: {destination}")
+        target_root.mkdir(parents=True, exist_ok=True)
+        atomic_write_text(destination, source.rstrip() + "\n")
+        self.refresh()
+        return {"installed": str(destination), "management": self.manifest()}
+
     def refresh(self) -> dict[str, Any]:
         self.catalog.shutdown()
         self.catalog = load_plugin_catalog(self.config)
+        managed = self._managed()
+        enabled = {
+            kind: [
+                name
+                for name in managed.selected(kind, self._fallback(kind))
+                if name in self.catalog.discovered_names(kind)
+            ]
+            for kind in PLUGIN_KINDS
+        }
+        strategy = managed.decision_strategy or self.config.decision_strategy_name
+        if strategy not in self.catalog.discovered_names("decision_strategy"):
+            strategy = ""
+        enabled["decision_strategy"] = [strategy] if strategy else []
+        paused = [
+            name
+            for name in managed.paused_platforms
+            if name in self.catalog.discovered_names("api")
+        ]
+        normalized = {
+            "enabled": enabled,
+            "decision_strategy": strategy,
+            "robot_paused": managed.robot_paused,
+            "paused_platforms": paused,
+        }
+        if managed.to_dict() != {"version": 1, **normalized}:
+            save_managed_config(self.config.management_file, normalized)
         return self.manifest()
 
     def shutdown(self) -> None:
