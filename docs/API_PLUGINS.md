@@ -25,6 +25,8 @@ REDEEM、TRANSFER_IN、TRANSFER_OUT。私有 JSON 拥有 REST URL、Key/Secret�
 账户、滑点、代理和网络规则。插件不会用本地“参数不齐”预检代替服务器验证；配置会原样进入签名请求，
 服务器拒绝会记录为执行错误。
 
+代理字段默认 `INHERIT`，使用程序设置中的统一代理；改成 `DIRECT` 或完整 HTTP(S) URL 只覆盖 Binance。
+
 同一 Binance JSON 还拥有扫描间隔、错误退避初值/上限、每轮主题/决策上限和主题分页大小，默认分别为
 60 秒、30 秒、900 秒、10、6、100。正式机器人 readiness 要求 URL/规则等基础字段和 Key、Secret、
 wallet address/id 齐全；直接集成测试不走该 readiness 门，因此仍能验证真实网络拒绝。
@@ -41,6 +43,8 @@ wallet address/id 齐全；直接集成测试不走该 readiness 门，因此仍
 私有 JSON 拥有所有端点、链、钱包私钥、CLOB L2、funder、用户/Builder Relayer、Builder Code、转出
 地址、代理和网络规则。当前适配器不能可靠判定 winner，因此能力清单明确把 `settlement_status` 设为
 false；这不是占位成功值。
+
+代理字段默认 `INHERIT`，使用程序设置中的统一代理；改成 `DIRECT` 或完整 HTTP(S) URL 只覆盖 Polymarket。
 
 Polymarket 的同一私有 JSON 提供与 Binance 等价的六个 runtime 字段和相同默认值。正式 runtime 还要求
 private key、CLOB L2 三件套和 funder address；可选 Builder/Relayer 凭证与转出地址只影响相应工作流。

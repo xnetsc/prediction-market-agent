@@ -15,6 +15,12 @@ __pycache__
 .pytest_cache
 tests
 runtime-data
+.deployment
+credentials
+clients
+helper-dist
+prediction-login.json
+prediction-login-*.zip
 config/plugins/*.json
 config/application.json
 config/plugin_directories.json

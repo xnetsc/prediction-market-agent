@@ -7,7 +7,7 @@ from pathlib import Path
 from prediction_market_agent.agent.decision import DecisionProviderError
 
 
-def subprocess_environment(proxy: str) -> dict[str, str]:
+def subprocess_environment(proxy: str, no_proxy: str = "localhost,127.0.0.1,::1") -> dict[str, str]:
     """Pass runtime necessities without leaking unrelated plugin configuration."""
     exact = {
         "PATH", "HOME", "USER", "LOGNAME", "SHELL", "TMPDIR", "LANG", "TERM",
@@ -25,6 +25,7 @@ def subprocess_environment(proxy: str) -> dict[str, str]:
             env[name] = proxy
         else:
             env.pop(name, None)
+    env["NO_PROXY"] = env["no_proxy"] = no_proxy
     return env
 
 

@@ -9,19 +9,22 @@ from .domain import AccountState
 
 
 class StateStore:
-    def __init__(self, path: Path, starting_capital: float):
+    def __init__(self, path: Path, starting_capital: float | None):
         self.path = path
         self.starting_capital = starting_capital
 
     def load(self) -> AccountState:
         if not self.path.exists():
             return AccountState(
-                starting_capital=self.starting_capital,
-                cash=self.starting_capital,
+                starting_capital=self.starting_capital or 0.0,
+                cash=self.starting_capital or 0.0,
             )
         with self.path.open("r", encoding="utf-8") as handle:
             state = AccountState.from_dict(json.load(handle))
-        if abs(state.starting_capital - self.starting_capital) > 1e-9:
+        if (
+            self.starting_capital is not None
+            and abs(state.starting_capital - self.starting_capital) > 1e-9
+        ):
             raise ValueError(
                 "Existing state uses a different starting capital; choose a new "
                 "PREDICTION_AGENT_STATE_FILE"

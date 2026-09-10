@@ -15,6 +15,7 @@ done
 docker exec "$container_id" prediction-market-agent --help >/dev/null
 docker exec "$container_id" codex --version
 docker exec "$container_id" claude --version
+docker exec "$container_id" npm --version
 docker exec -i "$container_id" python - <<'PY'
 import json
 import subprocess

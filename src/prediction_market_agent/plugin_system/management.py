@@ -45,7 +45,9 @@ class PluginManagementService:
             ]
             for kind in PLUGIN_KINDS
         }
-        strategy = managed.decision_strategy or self.config.decision_strategy_name
+        # The built-in default selection file supplies the initial strategy.
+        # An explicit empty managed value means "no strategy" and must remain empty.
+        strategy = managed.decision_strategy
         if strategy not in self.catalog.discovered_names("decision_strategy"):
             strategy = ""
         result: dict[str, list[dict[str, Any]]] = {}
@@ -85,13 +87,48 @@ class PluginManagementService:
         }
 
     def save_plugin_configuration(
-        self, kind: str, name: str, values: dict[str, Any]
+        self, kind: str, name: str, values: dict[str, Any], *, clear_secrets: list[str] | None = None
     ) -> dict[str, Any]:
         spec = self.catalog.get(kind, name)
         if spec.configuration is None:
             raise ValueError(f"Plugin {kind}:{name} has no private configuration")
-        spec.configuration.save(values)
+        spec.configuration.save(values, clear_secrets=clear_secrets)
         return spec.configuration.manifest()
+
+    def control_status(self) -> dict[str, Any]:
+        items = []
+        for kind, entries in self.manifest()["plugins"].items():
+            for entry in entries:
+                if entry.get("enabled") and entry.get("has_controls"):
+                    spec = self.catalog.get(kind, entry["name"])
+                    items.append({"kind": kind, "name": spec.name,
+                                  "status": spec.controls.status_callback()})
+        return {"items": items}
+
+    def configuration_choices(self, kind: str, name: str, field: str, values: dict[str, Any] | None = None) -> dict[str, Any]:
+        configuration = self.catalog.get(kind, name).configuration
+        if configuration is None or field not in configuration.choice_fields:
+            raise ValueError("Plugin field does not provide dynamic choices")
+        if configuration.context_choices_callback:
+            schema=next(item for item in configuration.fields if item.name==field)
+            submitted={} if values is None else values
+            if not isinstance(submitted,dict):raise ValueError("Choice context must be an object")
+            context={}
+            for dependency in schema.choices_depend_on:
+                spec=next(item for item in configuration.fields if item.name==dependency)
+                if spec.secret:raise ValueError("Choices cannot depend on a secret field")
+                if dependency in submitted:context[dependency]=configuration._validate_value(spec,submitted[dependency])
+            return {"items": configuration.context_choices_callback(field,context)}
+        return {"items": configuration.choices_callback(field)}
+
+    def control_action(self, kind: str, name: str, action: str,
+                       values: dict[str, Any]) -> dict[str, Any]:
+        if not isinstance(values, dict):
+            raise ValueError("Control values must be an object")
+        spec = self.catalog.get(kind, name)
+        if spec.controls is None:
+            raise ValueError("Plugin does not expose management controls")
+        return spec.controls.action_callback(action, values)
 
     def delete_plugin_configuration(self, kind: str, name: str) -> dict[str, Any]:
         spec = self.catalog.get(kind, name)
@@ -181,9 +218,7 @@ class PluginManagementService:
                     kind: list(managed.selected(kind, self._fallback(kind)))
                     for kind in PLUGIN_KINDS
                 },
-                "decision_strategy": (
-                    managed.decision_strategy or self.config.decision_strategy_name
-                ),
+                "decision_strategy": managed.decision_strategy,
                 "robot_paused": robot_paused,
                 "paused_platforms": list(normalized),
             },
@@ -245,7 +280,7 @@ class PluginManagementService:
             ]
             for kind in PLUGIN_KINDS
         }
-        strategy = managed.decision_strategy or self.config.decision_strategy_name
+        strategy = managed.decision_strategy
         if strategy not in self.catalog.discovered_names("decision_strategy"):
             strategy = ""
         enabled["decision_strategy"] = [strategy] if strategy else []

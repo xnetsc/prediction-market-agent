@@ -4,6 +4,13 @@ config/application.json
 config/plugin_directories.json
 .venv/
 runtime-data/
+.deployment/
+credentials/
+clients/
+helper-dist/*
+!helper-dist/README.md
+prediction-login.json
+prediction-login-*.zip
 __pycache__/
 *.pyc
 .pytest_cache/

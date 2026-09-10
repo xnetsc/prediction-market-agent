@@ -1,18 +1,28 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import logging
 from typing import Any
 
 from ..agent.decision import make_provider
+from ..agent.strategy import PassThroughDecisionStrategy
 from ..core.config import Config
 from ..core.domain import AccountState
 from ..core.hooks import HookManager
-from ..core.risk import PortfolioRiskContribution, RiskCoordinator
+from ..core.risk import (
+    PortfolioRiskContribution,
+    RiskCoordinator,
+    UnrestrictedExecutionRiskControl,
+    UnrestrictedGlobalRiskControl,
+)
 from ..core.state import StateStore
 from ..plugin_system.contracts import PredictionMarketApiPlugin, platform_state_path
 from ..plugin_system.discovery import PluginCatalog, load_plugin_catalog
 from ..plugin_system.registry import ApiPluginRegistry, load_api_plugins
 from .broker import ExecutionGateway
+
+
+LOGGER = logging.getLogger(__name__)
 
 
 @dataclass
@@ -45,17 +55,27 @@ def bootstrap_engine(
     catalog = catalog or load_plugin_catalog(config)
     try:
         strategy_name = config.decision_strategy_name.strip().lower()
-        if not strategy_name:
-            raise ValueError("An enabled decision strategy plugin must be selected")
-        decision_strategy = catalog.get(
-            "decision_strategy", strategy_name
-        ).factory(config)
+        decision_strategy = PassThroughDecisionStrategy()
+        if strategy_name:
+            try:
+                decision_strategy = catalog.get(
+                    "decision_strategy", strategy_name
+                ).factory(config)
+            except Exception:
+                LOGGER.exception(
+                    "optional decision strategy %s could not start; using unfiltered candidates",
+                    strategy_name,
+                )
 
         hooks = HookManager()
-        hook_plugin_status = {
-            name: catalog.get("hook", name).factory(config, {"hooks": hooks})
-            for name in config.hook_plugins
-        }
+        hook_plugin_status = {}
+        for name in config.hook_plugins:
+            try:
+                hook_plugin_status[name] = catalog.get("hook", name).factory(
+                    config, {"hooks": hooks}
+                )
+            except Exception as error:
+                LOGGER.warning("optional hook %s could not start: %s", name, error)
         risk = RiskCoordinator()
         api_registry, plugins = load_api_plugins(config, catalog)
         risk_services: dict[str, Any] = {
@@ -65,19 +85,29 @@ def bootstrap_engine(
         risk_products: list[tuple[str, Any]] = []
         portfolio_contributions: list[Any] = []
         for name in config.risk_plugins:
-            created = catalog.get("risk", name).factory(config, risk_services)
+            try:
+                created = catalog.get("risk", name).factory(config, risk_services)
+            except Exception as error:
+                LOGGER.warning("optional risk plugin %s could not start: %s", name, error)
+                continue
             risk_products.append((name, created))
             if isinstance(created, PortfolioRiskContribution):
                 portfolio_contributions.append(created)
-        if len(portfolio_contributions) != 1:
+        if len(portfolio_contributions) > 1:
             raise ValueError(
-                "Exactly one enabled risk plugin must provide account allocation and "
+                "At most one enabled risk plugin may provide account allocation and "
                 "account/global execution risk controls"
             )
 
-        portfolio_contribution = portfolio_contributions[0]
-        allocations = portfolio_contribution.initial_allocations(
-            tuple(plugin.name for plugin in plugins)
+        portfolio_contribution = (
+            portfolio_contributions[0] if portfolio_contributions else None
+        )
+        allocations = (
+            portfolio_contribution.initial_allocations(
+                tuple(plugin.name for plugin in plugins)
+            )
+            if portfolio_contribution is not None
+            else {plugin.name: None for plugin in plugins}
         )
         multiple = len(plugins) > 1
         platforms: dict[str, PlatformRuntime] = {}
@@ -85,8 +115,10 @@ def bootstrap_engine(
             state_path = platform_state_path(config.state_file, plugin.name, multiple)
             store = StateStore(state_path, allocations[plugin.name])
             state = store.load()
-            account_risk = portfolio_contribution.create_account_engine(
-                plugin.name, state
+            account_risk = (
+                portfolio_contribution.create_account_engine(plugin.name, state)
+                if portfolio_contribution is not None
+                else UnrestrictedExecutionRiskControl(plugin.name, state)
             )
             gateway = plugin.create_write_gateway(state, account_risk)
             gateway.hooks = hooks
@@ -99,8 +131,12 @@ def bootstrap_engine(
             risk.register(plugin.network_rule_engine)
             risk.register(gateway.risk)
 
-        global_risk = portfolio_contribution.create_global_engine(
-            {name: item.state for name, item in platforms.items()}
+        global_risk = (
+            portfolio_contribution.create_global_engine(
+                {name: item.state for name, item in platforms.items()}
+            )
+            if portfolio_contribution is not None
+            else UnrestrictedGlobalRiskControl()
         )
         risk.register(global_risk)
         risk_services.update(
@@ -127,12 +163,19 @@ def bootstrap_engine(
             platforms=platforms,
             global_risk=global_risk,
             provider=make_provider(config, catalog),
-            research_contributions=[
-                catalog.get("research_tool", name).factory(config)
-                for name in config.research_tool_plugins
-            ],
+            research_contributions=_optional_research(config, catalog),
         )
     except Exception:
         if owns_catalog:
             catalog.shutdown()
         raise
+
+
+def _optional_research(config: Config, catalog: PluginCatalog) -> list[Any]:
+    contributions = []
+    for name in config.research_tool_plugins:
+        try:
+            contributions.append(catalog.get("research_tool", name).factory(config))
+        except Exception as error:
+            LOGGER.warning("optional research plugin %s could not start: %s", name, error)
+    return contributions

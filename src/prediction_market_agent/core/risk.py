@@ -128,3 +128,62 @@ class RiskCoordinator:
             values = adjustments + ([float(requested)] if requested is not None else [])
             return RuleDecision("ADJUST", "Most restrictive adjustment applied", min(values))
         return decisions[0]
+
+
+class UnrestrictedExecutionRiskControl:
+    """Neutral gateway adapter used when no account-risk plugin is enabled."""
+
+    def __init__(self, platform: str, state: Any):
+        self.target = f"account:{platform}"
+        self.state = state
+
+    def refresh_halt(self) -> None:
+        return None
+
+    def require_risk_increase_allowed(self) -> None:
+        return None
+
+    def allowed_buy_notional(
+        self,
+        requested: float,
+        current_position_value: float,
+        fee_bps: int,
+        token_id: str,
+    ) -> float:
+        del current_position_value, fee_bps, token_id
+        return requested
+
+    def validate_buy_fill(
+        self,
+        notional: float,
+        fee: float,
+        existing_position_value: float,
+        token_id: str,
+    ) -> None:
+        del notional, fee, existing_position_value, token_id
+
+    def validate_inbound_transfer(self, amount: float) -> None:
+        del amount
+
+    def evaluate(self, operation: str, context: dict[str, Any]) -> RuleDecision:
+        del operation, context
+        return RuleDecision("ALLOW", "No enabled account-risk plugin applies")
+
+    def manifest(self) -> dict[str, Any]:
+        return {"target": self.target, "policy": "NO_ENABLED_ACCOUNT_RISK_PLUGIN"}
+
+
+class UnrestrictedGlobalRiskControl:
+    """Neutral global adapter used when no portfolio-risk plugin is enabled."""
+
+    target = "portfolio:global"
+
+    def refresh_halt(self) -> None:
+        return None
+
+    def evaluate(self, operation: str, context: dict[str, Any]) -> RuleDecision:
+        del operation, context
+        return RuleDecision("ALLOW", "No enabled portfolio-risk plugin applies")
+
+    def manifest(self) -> dict[str, Any]:
+        return {"target": self.target, "policy": "NO_ENABLED_PORTFOLIO_RISK_PLUGIN"}

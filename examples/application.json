@@ -13,8 +13,13 @@
     "agent_tool_result_chars": 12000,
     "context_window_chars": 60000,
     "history_per_market": 12,
+    "shared_http_proxy": "HOST",
+    "shared_no_proxy": "localhost,127.0.0.1,::1",
+    "host_proxy_file": ".deployment/host-proxy.json",
     "dashboard_host": "127.0.0.1",
     "dashboard_port": 8765,
-    "dashboard_refresh_seconds": 5
+    "dashboard_refresh_seconds": 5,
+    "environment_probe_timeout": 8,
+    "environment_probe_services": "[{\"name\":\"ipify IPv4\",\"url\":\"https://api.ipify.org?format=json\",\"ip_field\":\"ip\"},{\"name\":\"ipify dual-stack\",\"url\":\"https://api64.ipify.org?format=json\",\"ip_field\":\"ip\"},{\"name\":\"ifconfig.me\",\"url\":\"https://ifconfig.me/all.json\",\"ip_field\":\"ip_addr\",\"port_field\":\"port\"}]"
   }
 }

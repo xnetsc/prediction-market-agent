@@ -1,4 +1,5 @@
 from ._support import *
+from dataclasses import replace
 
 class FakeBackend:
     def __init__(self, name: str, responses: list[dict] | None = None, error: str = ""):
@@ -29,6 +30,36 @@ def hold_decision() -> dict:
 
 
 class AgentLoopTests(unittest.TestCase):
+    def test_missing_cli_backends_fall_through_to_compatible_api(self) -> None:
+        from types import SimpleNamespace
+        from prediction_market_agent.agent.decision import make_provider
+        from prediction_market_agent.plugins.providers._shared import resolve_executable
+
+        cfg = replace(config(Path("unused-state.json")),
+                      decision_providers=("codex", "claude", "openai_compatible"))
+        backend = FakeBackend("openai_compatible", [
+            {"next_action": "DECIDE", "arguments_json": "{}", "reason": "ready"},
+            hold_decision(),
+        ])
+        attempted = []
+
+        class Catalog:
+            def get(self, kind, name):
+                def factory(config):
+                    attempted.append(name)
+                    if name != "openai_compatible":
+                        resolve_executable(f"/missing-client-installation/{name}")
+                    return backend
+                return SimpleNamespace(factory=factory)
+
+        provider = make_provider(cfg, Catalog())
+        self.assertEqual(attempted, ["codex", "claude", "openai_compatible"])
+        self.assertEqual(set(provider.unavailable), {"codex", "claude"})
+        self.assertEqual(provider.available_names, ("openai_compatible",))
+        result = provider.decide({"market": {}}, tool_executor=lambda *_: {})
+        self.assertEqual(result.provider, "openai_compatible")
+        self.assertEqual(result.decision.action, "HOLD")
+
     def test_agent_executes_tool_then_decides_and_records_every_step(self) -> None:
         backend = FakeBackend(
             "codex",

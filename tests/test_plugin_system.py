@@ -10,6 +10,7 @@ from prediction_market_agent.core.config import Config
 from prediction_market_agent.core.hooks import HookManager
 from prediction_market_agent.plugin_system.config_io import json_file_callbacks
 from prediction_market_agent.plugin_system.management import PluginManagementService
+from prediction_market_agent.plugin_system.managed_config import ManagedRuntimeConfig
 from prediction_market_agent.plugin_system.discovery import (
     PluginCatalog,
     PluginConfigField,
@@ -250,6 +251,20 @@ class PluginSystemTests(unittest.TestCase):
             payload["enabled"]["hook"] = []
             disabled_again = service.save_enabled(payload)
             self.assertFalse(disabled_again["plugins"]["hook"][0]["initialized"])
+            payload["enabled"]["decision_strategy"] = []
+            payload["decision_strategy"] = ""
+            without_strategy = service.save_enabled(payload)
+            self.assertEqual(without_strategy["decision_strategy"], "")
+            self.assertFalse(
+                any(
+                    item["enabled"]
+                    for item in without_strategy["plugins"]["decision_strategy"]
+                )
+            )
+            self.assertEqual(
+                ManagedRuntimeConfig.load(config.management_file).decision_strategy,
+                "",
+            )
 
     def test_manual_refresh_unloads_and_unregisters_removed_plugin_file(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

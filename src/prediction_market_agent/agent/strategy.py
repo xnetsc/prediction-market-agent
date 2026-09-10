@@ -7,6 +7,31 @@ from typing import Any
 
 
 @dataclass(frozen=True)
+class PassThroughDecisionStrategy:
+    """Neutral selection used when no optional decision-strategy plugin is active."""
+
+    path: Path = Path("")
+    sha256: str = ""
+    instructions: str = ""
+
+    def to_prompt_payload(self) -> dict[str, Any]:
+        return {
+            "configured": False,
+            "instructions": "",
+            "discovery": {"mode": "all platform candidates"},
+        }
+
+    def select_topics(self, topics: list[Any]) -> list[Any]:
+        return list(topics)
+
+    def select_markets(self, markets: tuple[Any, ...]) -> list[Any]:
+        return list(markets)
+
+    def select_outcomes(self, outcomes: tuple[Any, ...]) -> list[Any]:
+        return list(outcomes)
+
+
+@dataclass(frozen=True)
 class DecisionStrategyPlugin:
     path: Path
     sha256: str

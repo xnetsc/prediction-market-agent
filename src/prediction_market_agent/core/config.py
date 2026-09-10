@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any
 
 from ..plugin_system.config import PluginDirectoryConfig
+from ..plugin_system.config_io import validate_proxy_selector
 from ..plugin_system.managed_config import ManagedRuntimeConfig, atomic_write_text
 
 
@@ -115,6 +116,21 @@ APPLICATION_FIELDS = (
         "自动加入当前市场决策上下文的历史记录数量。", 12, 0, 10000,
     ),
     ApplicationConfigField(
+        "shared_http_proxy", "统一 HTTP 代理", "string",
+        "除兼容 API 外，支持联网的内置插件默认继承此设置。HOST 使用一键启动器检测到的宿主机代理；DIRECT 直连；ENVIRONMENT 读取服务器环境；也可填写完整 http(s) 地址。",
+        "HOST",
+    ),
+    ApplicationConfigField(
+        "shared_no_proxy", "统一代理排除地址", "string",
+        "这些主机不经过统一代理，使用逗号分隔；回环地址始终自动加入。插件选择独立代理时不继承本项。",
+        "localhost,127.0.0.1,::1",
+    ),
+    ApplicationConfigField(
+        "host_proxy_file", "宿主机代理检测文件", "string",
+        "一键启动器保存宿主机代理检测及必要转发地址的文件；相对路径以机器人工作目录为准。",
+        ".deployment/host-proxy.json",
+    ),
+    ApplicationConfigField(
         "dashboard_host", "管理界面监听地址", "enum",
         "管理与审计界面的监听地址；本地默认回环，容器部署使用 0.0.0.0。", "127.0.0.1",
         options=("127.0.0.1", "localhost", "::1", "0.0.0.0"),
@@ -126,6 +142,17 @@ APPLICATION_FIELDS = (
     ApplicationConfigField(
         "dashboard_refresh_seconds", "界面刷新间隔（秒）", "integer",
         "决策和运行状态在浏览器中的自动刷新间隔。", 5, 1, 300,
+    ),
+    ApplicationConfigField(
+        "environment_probe_services", "公网出口查询服务 JSON", "string",
+        "仅手动查询时使用。JSON 数组元素含 name、HTTPS url、ip_field、可选 port_field；不发送业务凭据。空数组禁用。保存后下次查询生效。",
+        '[{"name":"ipify IPv4","url":"https://api.ipify.org?format=json","ip_field":"ip"},'
+        '{"name":"ipify dual-stack","url":"https://api64.ipify.org?format=json","ip_field":"ip"},'
+        '{"name":"ifconfig.me","url":"https://ifconfig.me/all.json","ip_field":"ip_addr","port_field":"port"}]',
+    ),
+    ApplicationConfigField(
+        "environment_probe_timeout", "出口查询超时（秒）", "integer",
+        "每个公网查询请求的网络超时；失败记录错误，不改用其他插件代理。下次查询生效。", 8, 1, 30,
     ),
 )
 
@@ -251,6 +278,9 @@ class Config:
     dashboard_host: str = "127.0.0.1"
     dashboard_port: int = 8765
     dashboard_refresh_seconds: int = 5
+    shared_http_proxy: str = "HOST"
+    shared_no_proxy: str = "localhost,127.0.0.1,::1"
+    host_proxy_file: Path = Path(".deployment/host-proxy.json")
     management_file: Path = Path("bot_management.json")
     plugin_directories_file: Path = Path("config/plugin_directories.json")
     risk_plugins: tuple[str, ...] = ()
@@ -283,6 +313,11 @@ class Config:
             dashboard_host=str(values["dashboard_host"]),
             dashboard_port=int(values["dashboard_port"]),
             dashboard_refresh_seconds=int(values["dashboard_refresh_seconds"]),
+            shared_http_proxy=str(values["shared_http_proxy"]),
+            shared_no_proxy=str(values["shared_no_proxy"]),
+            host_proxy_file=_runtime_path(
+                str(values["host_proxy_file"]), working_directory
+            ),
             management_file=management_file,
             plugin_directories_file=_runtime_path(
                 str(values["plugin_directories_file"]), working_directory
@@ -302,6 +337,11 @@ class Config:
             raise ValueError("dashboard_port must be in [1, 65535]")
         if not 1 <= self.dashboard_refresh_seconds <= 300:
             raise ValueError("dashboard_refresh_seconds must be in [1, 300]")
+        validate_proxy_selector(
+            self.shared_http_proxy,
+            field_name="shared_http_proxy",
+            allow_inherit=False,
+        )
         PluginDirectoryConfig.load(
             self.plugin_directories_file, working_directory=self.working_directory
         )
@@ -327,6 +367,4 @@ class Config:
             errors.append("At least one decision provider plugin must be enabled")
         if not self.market_api_plugins:
             errors.append("At least one API plugin must be enabled")
-        if not self.decision_strategy_name:
-            errors.append("One decision strategy plugin must be selected")
         return tuple(errors)
