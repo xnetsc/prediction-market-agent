@@ -15,7 +15,7 @@ from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 from fastapi.testclient import TestClient
 
 from prediction_market_agent.core.config import Config
-from prediction_market_agent.runtime.auth import AdminAuthStore, SESSION_COOKIE, _unb64u
+from prediction_market_agent.runtime.auth import AdminAuthStore, SESSION_COOKIE, _b64u, _unb64u
 from prediction_market_agent.runtime.dashboard import create_app
 
 
@@ -118,6 +118,36 @@ class AuthenticationTests(unittest.TestCase):
             self.assertTrue(store.sessions(session.session_id)[0]["current"])
             self.assertEqual(store.kick_sessions([session.session_id]), 1)
             self.assertIsNone(store.session(session.token))
+
+    def test_non_increasing_signature_counter_does_not_block_login(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = AdminAuthStore(Path(directory) / "auth.sqlite3", 72, 168)
+            connection = store._connect()
+            connection.execute(
+                "INSERT INTO admin_passkeys VALUES (?,?,?,?,?,?,?,NULL)",
+                (b"one", "Synced Passkey", b"key", 9, "localhost", "http://localhost",
+                 int(time.time())),
+            )
+            connection.commit()
+            connection.close()
+            _, client_jwk = client_ecdh()
+            options = store.authentication_options("http://localhost", client_jwk)
+            with patch(
+                "prediction_market_agent.runtime.auth.verify_authentication_response",
+                return_value=SimpleNamespace(new_sign_count=0),
+            ) as verify:
+                session = store.verify_authentication(
+                    options["ceremony_id"], {"id": _b64u(b"one")},
+                    user_agent="Browser", source_address="127.0.0.1",
+                )
+            self.assertIsNotNone(session)
+            self.assertEqual(verify.call_args.kwargs["credential_current_sign_count"], 0)
+            connection = store._connect()
+            retained = connection.execute(
+                "SELECT sign_count FROM admin_passkeys WHERE credential_id = ?", (b"one",)
+            ).fetchone()[0]
+            connection.close()
+            self.assertEqual(retained, 9)
 
     def test_idle_timeout_slides_but_absolute_timeout_does_not(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
