@@ -18,7 +18,7 @@ from prediction_market_agent.core.risk import RuleDecision
 
 
 @dataclass
-class DynamicPythonRuleEngine:
+class BusinessRuleEngine:
     module_path: Path
     index: int
     _evaluate_function: Any = None
@@ -27,21 +27,26 @@ class DynamicPythonRuleEngine:
         path = self.module_path if self.module_path.is_absolute() else Path.cwd() / self.module_path
         path = path.resolve()
         if path.suffix.lower() != ".py" or not path.is_file():
-            raise ValueError(f"Dynamic risk rule must be an existing .py file: {path}")
+            raise ValueError(f"Custom business rule must be an existing .py file: {path}")
         spec = importlib.util.spec_from_file_location(f"prediction_business_rule_{self.index}", path)
         if spec is None or spec.loader is None:
-            raise ValueError(f"Unable to load dynamic risk rule: {path}")
+            raise ValueError(f"Unable to load custom business rule: {path}")
         module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(module)
         function = getattr(module, "evaluate", None)
         if not callable(function):
-            raise ValueError(f"Dynamic risk rule must export evaluate(operation, context): {path}")
+            raise ValueError(f"Custom business rule must export evaluate(operation, context): {path}")
         self.module_path = path
         self._evaluate_function = function
 
     @property
     def target(self) -> str:
-        return f"dynamic:{self.index}:{self.module_path.name}"
+        """Every market API action on every platform.
+
+        Business risk is defined by what is being done to a market, not by which platform or which
+        caller, so one rule file covers them all rather than needing an entry per platform.
+        """
+        return "market:*"
 
     def evaluate(self, operation: str, context: dict[str, Any]) -> RuleDecision:
         try:
@@ -52,14 +57,14 @@ class DynamicPythonRuleEngine:
                 adjusted = value.get("adjusted_value")
                 decision = RuleDecision(
                     str(value["outcome"]).upper(),
-                    str(value.get("reason", "dynamic Python risk rule")),
+                    str(value.get("reason", "custom business rule")),
                     None if adjusted is None else float(adjusted),
                 )
             else:
                 raise TypeError("evaluate() must return RuleDecision or dict")
             outcome = decision.outcome.upper()
         except Exception as error:
-            return RuleDecision("REJECT", f"Dynamic Python risk rule failed closed: {error}")
+            return RuleDecision("REJECT", f"Custom business rule failed closed: {error}")
         if outcome not in {"ALLOW", "ADJUST", "REJECT", "HALT"}:
             return RuleDecision("REJECT", f"Risk filter returned invalid outcome: {outcome}")
         return RuleDecision(outcome, decision.reason, decision.adjusted_value)
@@ -95,7 +100,7 @@ def initialize_plugin(context: PluginInitializationContext) -> PluginSpec:
 
     def factory(config, services):
         del config, services
-        return [DynamicPythonRuleEngine(Path(path), index) for index, path in enumerate(rule_paths())]
+        return [BusinessRuleEngine(Path(path), index) for index, path in enumerate(rule_paths())]
 
     def readiness() -> PluginReadiness:
         """Report what this plugin will actually enforce, not merely that it can load.

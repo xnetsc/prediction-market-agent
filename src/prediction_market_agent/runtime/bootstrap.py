@@ -9,7 +9,6 @@ from ..agent.market_discovery import BuiltInMarketDiscovery
 from ..agent.strategy import BuiltInDecisionStrategy
 from ..core.config import Config
 from ..core.domain import AccountState
-from ..core.hooks import HookManager
 from ..core.risk import (
     PortfolioRiskContribution,
     RiskCoordinator,
@@ -21,6 +20,7 @@ from ..plugin_system.contracts import PredictionMarketApiPlugin, platform_state_
 from ..plugin_system.discovery import PluginCatalog, load_plugin_catalog
 from ..plugin_system.registry import ApiPluginRegistry, load_api_plugins
 from .broker import ExecutionGateway
+from .market_guard import GuardedMarketApi
 
 
 LOGGER = logging.getLogger(__name__)
@@ -38,8 +38,6 @@ class PlatformRuntime:
 class EngineComponents:
     plugin_catalog: PluginCatalog
     decision_strategy: Any
-    hooks: HookManager
-    hook_plugin_status: dict[str, Any]
     risk: RiskCoordinator
     api_registry: ApiPluginRegistry
     platforms: dict[str, PlatformRuntime]
@@ -70,15 +68,6 @@ def bootstrap_engine(
                     strategy_name,
                 )
 
-        hooks = HookManager()
-        hook_plugin_status = {}
-        for name in config.hook_plugins:
-            try:
-                hook_plugin_status[name] = catalog.get("hook", name).factory(
-                    config, {"hooks": hooks}
-                )
-            except Exception as error:
-                LOGGER.warning("optional hook %s could not start: %s", name, error)
         risk = RiskCoordinator()
         api_registry, plugins = load_api_plugins(config, catalog)
         risk_services: dict[str, Any] = {
@@ -122,7 +111,10 @@ def bootstrap_engine(
         )
         multiple = len(plugins) > 1
         platforms: dict[str, PlatformRuntime] = {}
-        for plugin in plugins:
+        # Business risk applies to what the platform is asked to do, so the guard sits on the
+        # plugin itself rather than inside the Agent path: reads, writes, settlement sweeps and
+        # manually triggered cycles all go through the same door.
+        for plugin in [GuardedMarketApi(item, risk) for item in plugins]:
             state_path = platform_state_path(config.state_file, plugin.name, multiple)
             store = StateStore(state_path, allocations[plugin.name])
             state = store.load()
@@ -132,14 +124,12 @@ def bootstrap_engine(
                 else UnrestrictedExecutionRiskControl(plugin.name, state)
             )
             gateway = plugin.create_write_gateway(state, account_risk)
-            gateway.hooks = hooks
             platforms[plugin.name] = PlatformRuntime(
                 plugin=plugin,
                 store=store,
                 state=state,
                 gateway=gateway,
             )
-            risk.register(plugin.network_rule_engine)
             risk.register(gateway.risk)
 
         global_risk = (
@@ -167,8 +157,6 @@ def bootstrap_engine(
         return EngineComponents(
             plugin_catalog=catalog,
             decision_strategy=decision_strategy,
-            hooks=hooks,
-            hook_plugin_status=hook_plugin_status,
             risk=risk,
             api_registry=api_registry,
             platforms=platforms,

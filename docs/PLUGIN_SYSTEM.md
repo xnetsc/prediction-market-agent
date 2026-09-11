@@ -2,12 +2,12 @@
 
 ## 固定类别与自动扫描
 
-类别为 `api`、`decision_provider`、`decision_strategy`、`market_discovery`、`research_tool`、`risk`、
-`hook`。`market_discovery` 决定每轮把决策名额给哪些标的；不安装插件时由框架内置策略工作，内置策略
+类别为 `api`、`decision_provider`、`decision_strategy`、`market_discovery`、`research_tool`、
+`agent_policy`、`risk`。`market_discovery` 决定每轮把决策名额给哪些标的；不安装插件时由框架内置策略工作，内置策略
 没有配置面，但当前全文可在插件中心导出。
 
 应用配置的 `plugin_directories_file` 所指向 JSON，其 `categories` 必须包含 `api`、`decision_provider`、
-`decision_strategy`、`research_tool`、`risk`、`hook` 六个目录列表。`${PACKAGE_ROOT}` 可展开为安装包
+`decision_strategy`、`market_discovery`、`research_tool`、`agent_policy`、`risk` 七个目录列表。`${PACKAGE_ROOT}` 可展开为安装包
 目录。`${WORKING_DIRECTORY}` 展开为机器人工作目录。默认每类先扫描工作目录下可写的 `plugins/<类别>`，
 再扫描安装包内置目录。每个目录顶层非下划线 `.py` 文件都是候选插件，插件名等于文件名的小写 stem。
 
@@ -17,7 +17,7 @@
 ## 初始化契约
 
 初始化必须返回 `PluginSpec`：类别、名称、描述、工厂、可选 `PluginConfiguration`、可选 readiness、
-可选 runtime 和必填 `teardown()`。API/Provider/策略/研究工具工厂接收通用 config；风险与 Hook 还接收服务字典。每种插件
+可选 runtime 和必填 `teardown()`。API/Provider/策略/研究工具工厂接收通用 config；两类过滤插件还接收服务字典。每种插件
 的运行对象协议见内置实现和 `examples/` 对应目录。
 
 readiness 回调由插件自己判断当前实例能否投入机器人运行，并返回 `PluginReadiness` 和原因；插件系统不按
@@ -89,7 +89,8 @@ PluginConfigField("EFFORT", "推理强度", "string", "选择当前模型支持�
 然后注销。手动刷新先卸载所有已加载插件，再重新读取插件目录和管理名单。刷新后删除的文件、移除的
 目录或不再启用的插件均不会残留显示或实例。卸载失败会显式报错。
 
-插件中心按 `#plugins/类别` 提供 API、策略、研究、风控和 Hook 五个二级页面，每类有用途、三步流程和
+插件中心按 `#plugins/类别` 提供 API、标的发现、策略、研究、Agent 行为风控和业务风控六个二级页面，
+每类有用途、三步流程和
 用户操作提示。Decision Provider 在底层仍是同一种自动扫描插件，但启用、顺序、私有配置、客户端账号、
 兼容 API、模型和新扩展安装只在 `#models` 管理，不在插件中心重复出现。
 技术来源、错误原因和私有配置默认折叠；禁用插件仍只依据文件信息显示。页面操作例子见 [Web UI](WEB_UI.md)。
@@ -99,9 +100,10 @@ PluginConfigField("EFFORT", "推理强度", "string", "选择当前模型支持�
 目录且不覆盖现有文件；安装后保持禁用，所以不会立即导入不受信任代码。启用、私有配置保存、暂停和刷新
 都会停止旧 runtime、执行 teardown、重新扫描并按 readiness 自动决定是否启动。
 
-研究工具和 Hook 可以全部禁用；API、Provider 和当前策略也允许暂时保存为空，以便形成可编辑的“不完整”
-状态。此时 Web 管理服务继续运行，但机器人不会启动；填齐后自动启动。若某个风险目标没有启用任何适用
-规则，插件系统不替插件增加默认拒绝策略。
+研究工具和两类过滤插件可以全部禁用；API、Provider 和当前策略也允许暂时保存为空，以便形成可编辑的
+“不完整”状态。此时 Web 管理服务继续运行，但机器人不会启动；填齐后自动启动。若某个目标没有启用任何
+适用插件，插件系统不替插件增加默认拒绝策略。同一类过滤插件可以同时启用多个，按界面顺序串成一条链，
+任意一个拒绝或抛异常就整体失败。
 
 ## 完整例子
 
@@ -114,7 +116,7 @@ PluginConfigField("EFFORT", "推理强度", "string", "选择当前模型支持�
 - `examples/decision_strategy_plugins/example_strategy.py`：策略文本和私有候选筛选。
 - `examples/research_tool_plugins/static_evidence.py`：动态加入 Agent 控制 schema 的工具。
 - `examples/risk_plugins/reject_operation.py`：命名目标和标准规则结果。
-- `examples/hooks/audit_hook.py`：注册及逐项注销 Hook。
+- `examples/risk_rules/cap_trade_size.py`：`custom_rules` 加载的受信任 Python 规则脚本。
 - `examples/plugin_directories.json` 与 `examples/plugin_configs/`：目录和字段值样例。
 
-插件与动态 Python 风控在机器人进程内运行，属于受信任代码边界。
+插件与自定义 Python 规则在机器人进程内运行，属于受信任代码边界。

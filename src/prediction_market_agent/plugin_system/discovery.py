@@ -600,7 +600,6 @@ def load_plugin_catalog(config: Any) -> PluginCatalog:
             "agent_policy", getattr(config, "agent_policy_plugins", ())
         ),
         "risk": managed.selected("risk", config.risk_plugins),
-        "hook": managed.selected("hook", config.hook_plugins),
     }
     return discover_plugin_catalog(
         directory_config,

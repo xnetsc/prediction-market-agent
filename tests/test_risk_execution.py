@@ -114,7 +114,7 @@ class RiskAndExecutionTests(unittest.TestCase):
             "    return {'outcome': 'ADJUST', 'reason': 'cap', 'adjusted_value': 2.5}\n",
             encoding="utf-8",
         )
-        rule = DynamicPythonRuleEngine(module_path, 0)
+        rule = BusinessRuleEngine(module_path, 0)
         result = rule.evaluate("BUY", {"requested_value": 5})
         self.assertEqual(result.outcome, "ADJUST")
         self.assertEqual(result.adjusted_value, 2.5)

@@ -20,9 +20,6 @@
       "portfolio_limits",
       "custom_rules"
     ],
-    "hook": [
-      "jsonl_audit"
-    ],
     "agent_policy": [
       "agent_actions"
     ]

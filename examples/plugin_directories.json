@@ -1,11 +1,25 @@
 {
   "version": 1,
   "categories": {
-    "api": ["../plugins/api", "../src/prediction_market_agent/plugins/api"],
-    "decision_provider": ["../plugins/decision_provider", "../src/prediction_market_agent/plugins/providers"],
-    "decision_strategy": ["../plugins/decision_strategy", "../src/prediction_market_agent/plugins/strategies"],
-    "research_tool": ["../plugins/research_tool", "../src/prediction_market_agent/plugins/research"],
-    "risk": ["../plugins/risk", "../src/prediction_market_agent/plugins/risk"],
-    "hook": ["../plugins/hook", "../src/prediction_market_agent/plugins/hooks"]
+    "api": [
+      "../plugins/api",
+      "../src/prediction_market_agent/plugins/api"
+    ],
+    "decision_provider": [
+      "../plugins/decision_provider",
+      "../src/prediction_market_agent/plugins/providers"
+    ],
+    "decision_strategy": [
+      "../plugins/decision_strategy",
+      "../src/prediction_market_agent/plugins/strategies"
+    ],
+    "research_tool": [
+      "../plugins/research_tool",
+      "../src/prediction_market_agent/plugins/research"
+    ],
+    "risk": [
+      "../plugins/risk",
+      "../src/prediction_market_agent/plugins/risk"
+    ]
   }
 }

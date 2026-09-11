@@ -34,8 +34,6 @@ class TradingEngine(MarketEvaluationMixin, ExecutionActionsMixin):
             raise
         self.plugin_catalog = components.plugin_catalog
         self.decision_strategy = components.decision_strategy
-        self.hooks = components.hooks
-        self.hook_plugin_status = components.hook_plugin_status
         self.risk = components.risk
         self.api_registry = components.api_registry
         self.platforms = components.platforms

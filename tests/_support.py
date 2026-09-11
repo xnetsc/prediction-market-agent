@@ -20,7 +20,6 @@ from prediction_market_agent.runtime.memory import SessionMemory
 from prediction_market_agent.core.config import Config
 from prediction_market_agent.core.domain import AccountState
 from prediction_market_agent.core.state import StateStore
-from prediction_market_agent.core.hooks import HookManager
 from prediction_market_agent.plugins.api._binance.adapter import BinancePredictionApiPlugin
 from prediction_market_agent.plugins.api._binance.config import BinancePluginConfig
 from prediction_market_agent.plugins.api._binance.write import BinancePredictionWriteTransport
@@ -43,7 +42,7 @@ from prediction_market_agent.core.risk import (
     RiskCoordinator,
 )
 from prediction_market_agent.plugins.agent_policy.agent_actions import AgentActionRuleEngine
-from prediction_market_agent.plugins.risk.custom_rules import DynamicPythonRuleEngine
+from prediction_market_agent.plugins.risk.custom_rules import BusinessRuleEngine
 from prediction_market_agent.plugins.risk.portfolio_limits import (
     AccountLimitEngine,
     PortfolioLimitSettings,

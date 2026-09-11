@@ -16,7 +16,6 @@ PLUGIN_KINDS = (
     "research_tool",
     "agent_policy",
     "risk",
-    "hook",
 )
 
 DEFAULT_PLUGIN_SELECTION_CONFIG = (

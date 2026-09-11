@@ -2,9 +2,8 @@ from __future__ import annotations
 
 import time
 from dataclasses import asdict, dataclass
-from typing import Any, Protocol
+from typing import Callable, Any, Protocol
 
-from ..core.hooks import HookManager
 from ..core.domain import AccountState, ExecutionOrder, ExecutionQuote, Position
 from ..core.risk import RiskRejected
 
@@ -55,14 +54,24 @@ class ExecutionGateway:
     risk: ExecutionRiskControl
     platform: str
     write_transport: WriteTransport
-    hooks: HookManager | None = None
+    business_risk: Callable[[str, dict[str, Any]], Any] | None = None
+
+    def _business_check(self, operation: str, **context: Any) -> None:
+        """Put a write past business risk before it reaches the platform.
+
+        Every one of these ends in a market API call, so each is a business action in its own
+        right. Checking only the order would leave a cancel, a redeem and a withdrawal outside any
+        rule, and a withdrawal is the most consequential of them.
+        """
+        if self.business_risk is None:
+            return
+        try:
+            self.business_risk(operation, context)
+        except Exception as error:
+            raise ExecutionError(str(error)) from error
 
     def _now(self) -> int:
         return int(time.time() * 1000)
-
-    def _emit(self, event: str, payload: dict) -> None:
-        if self.hooks is not None:
-            self.hooks.emit(event, {"platform": self.platform, **payload})
 
     def _risk_check(self) -> None:
         try:
@@ -103,10 +112,6 @@ class ExecutionGateway:
         direction: str,
         order_type: str = "MARKET",
     ) -> ExecutionQuote:
-        self._emit(
-            "before_quote",
-            {"side": side, "order_type": order_type, "price": price, "quantity": quantity},
-        )
         if side not in {"BUY", "SELL"} or order_type not in {"MARKET", "LIMIT"}:
             raise ExecutionError("Unsupported side or order type")
         if quantity <= 0 or not 0 < price < 1:
@@ -142,11 +147,18 @@ class ExecutionGateway:
             symbol=symbol,
             direction=direction,
         )
-        self._emit("after_quote", {"quote": asdict(quote)})
         return quote
 
     def place_order(self, quote: ExecutionQuote, reason: str = "") -> ExecutionOrder:
-        self._emit("before_order", {"quote": asdict(quote), "reason": reason})
+        self._business_check(
+            "place_order",
+            side=quote.side,
+            order_type=quote.order_type,
+            token_id=quote.token_id,
+            market_id=quote.market_id,
+            notional=quote.notional,
+            price=quote.price,
+        )
         self._risk_check()
         if quote.expires_at < self._now():
             raise ExecutionError("Platform quote expired")
@@ -206,11 +218,9 @@ class ExecutionGateway:
         if order.status == "FILLED":
             self._fill(order, quote)
         self.state.orders.append(order)
-        self._emit("after_order", {"order": asdict(order)})
         return order
 
     def _fill(self, order: ExecutionOrder, quote: ExecutionQuote) -> None:
-        self._emit("before_fill", {"order": asdict(order), "quote": asdict(quote)})
         existing = self.state.positions.get(quote.token_id)
         if quote.side == "BUY":
             total_debit = order.notional + order.fee
@@ -252,23 +262,21 @@ class ExecutionGateway:
             if existing.quantity <= 1e-9:
                 del self.state.positions[quote.token_id]
         self._risk_check_after_fill()
-        self._emit("after_fill", {"order": asdict(order)})
 
     def _risk_check_after_fill(self) -> None:
         self.risk.refresh_halt()
 
     def cancel_orders(self, order_ids: list[str]) -> dict[str, Any]:
-        self._emit("before_cancel", {"order_ids": order_ids})
+        self._business_check("cancel_orders", order_ids=list(order_ids))
         result = self.write_transport.cancel_orders(order_ids)
         canceled = {str(value) for value in result.get("canceled", [])}
         for order in self.state.orders:
             if order.order_id in canceled and order.status == "OPEN":
                 order.status = "CANCELED"
-        self._emit("after_cancel", result)
         return result
 
     def redeem(self, token_id: str, winning: bool) -> dict[str, Any]:
-        self._emit("before_redeem", {"token_id": token_id, "winning": winning})
+        self._business_check("redeem", token_id=token_id, winning=winning)
         position = self.state.positions.get(token_id)
         if not position:
             raise ExecutionError("No position to redeem")
@@ -279,11 +287,10 @@ class ExecutionGateway:
         self.state.realized_pnl += payout - basis
         del self.state.positions[token_id]
         self._risk_check_after_fill()
-        self._emit("after_redeem", result)
         return result
 
     def transfer(self, direction: str, amount: float) -> dict[str, Any]:
-        self._emit("before_transfer", {"direction": direction, "amount": amount})
+        self._business_check("transfer", direction=direction, amount=amount)
         if amount <= 0:
             raise ExecutionError("Transfer amount must be positive")
         if direction == "INBOUND":
@@ -303,5 +310,4 @@ class ExecutionGateway:
             self.state.cash -= amount
             self.state.transferred_out += amount
         self._risk_check_after_fill()
-        self._emit("after_transfer", result)
         return result

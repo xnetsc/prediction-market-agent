@@ -242,10 +242,6 @@ class MarketEvaluationMixin:
             status="OK",
             decision_id=decision_id,
         )
-        self.hooks.emit(
-            "before_trade_decision",
-            {"platform": platform, "decision": result.decision.to_dict()},
-        )
         action_rule = self.risk.evaluate(
             "agent:actions",
             result.decision.action,
@@ -335,10 +331,6 @@ class MarketEvaluationMixin:
             execution=execution,
             status=str(execution.get("status", "COMPLETED")),
         )
-        self.hooks.emit(
-            "after_trade_decision",
-            {"platform": platform, "decision": decision.to_dict()},
-        )
 
     def _execute_agent_tool(
         self,
@@ -353,12 +345,5 @@ class MarketEvaluationMixin:
             raise RuntimeError(
                 f"Agent tool blocked by risk rules: {decision.reason}"
             )
-        self.hooks.emit(
-            "before_agent_tool", {"platform": platform, "tool": name, **context}
-        )
         result = toolbox.execute(name, arguments)
-        self.hooks.emit(
-            "after_agent_tool",
-            {"platform": platform, "tool": name, "result": result},
-        )
         return result

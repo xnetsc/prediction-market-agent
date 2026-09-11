@@ -25,7 +25,7 @@ Binance 公共时间接口的真实 `HTTP 451`；Polymarket 与其余本地/联�
 - 通用业务事件循环接收标准化扫描结果，再执行策略、研究、Agent、风控和平台写动作；
 - 全局与按平台暂停、配置不完整阻止对应平台启动、就绪平台独立启动；
 - Provider 多步工具 schema、优先级与运行时故障转移；
-- 策略文件、动态工具、风控合并、网络规则、Hook 和在线执行网关；
+- 策略文件、动态工具、过滤插件串链、网络允许清单和在线执行网关；
 - SQLite 会话、滑动召回、动作记录、决策台账与界面查询；
 - Binance、Polymarket 各自生产读取和双平台同进程读取/决策；
 - 真实生产写拒绝探测：Binance quote/order/cancel/redeem/双向 transfer，以及 Polymarket
