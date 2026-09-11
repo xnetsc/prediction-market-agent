@@ -10,7 +10,7 @@ from ..agent.decision import DecisionProviderError
 from ..agent.evolution import prompt_json_payload, render_overlay_block
 from ..agent.research import ResearchToolContext, ResearchToolbox
 from ..plugin_system.contracts import Market, OrderBook, Outcome, Topic, TopicDetail
-from .account_tool import AccountReadContribution
+from .market_tools import MarketToolset
 from .bootstrap import PlatformRuntime
 from .broker import ExecutionError
 
@@ -173,9 +173,10 @@ class MarketEvaluationMixin:
         )
 
         toolbox = ResearchToolbox(
-            # The account readout is always present: a model asked to apply a stop it was given in
-            # its strategy text cannot do so if it is unable to see its own book.
-            [*self.research_contributions, AccountReadContribution(runtime.state)],
+            # The market contract and the account book are always present. A model asked to
+            # apply a stop from its strategy text cannot apply it while blind to its own balance,
+            # and one that cannot reach a second platform cannot compare a price against it.
+            [*self.research_contributions, MarketToolset(self.platforms, platform)],
             ResearchToolContext(
                 client=runtime.plugin,
                 memory=self.memory,
