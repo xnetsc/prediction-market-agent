@@ -262,8 +262,10 @@ class RuntimeManagerTests(unittest.TestCase):
         class Platform:
             name = "platform"
 
-            def opening_balance(self):
-                return 0.0
+            def account_funds(self):
+                from prediction_market_agent.plugin_system.contracts import AccountFunds
+
+                return AccountFunds(available=0.0, currency="USDT", source="declared")
 
             def create_write_gateway(self, state):
                 self.received_state = state

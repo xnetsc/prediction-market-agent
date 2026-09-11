@@ -87,6 +87,23 @@ DESCRIPTIONS: dict[str, Any] = {
         ),
         "arguments": {"platform": "optional string", "include_positions": "optional boolean"},
     },
+    "ACCOUNT_FUNDS": {
+        "purpose": (
+            "Ask the platform what the trading account can actually spend right now. The reply "
+            "says where the number came from: source=platform means the platform confirmed it, "
+            "source=declared means it is a configured figure that may have drifted. Not the same "
+            "as READ_ACCOUNT, which is this bot's own ledger."
+        ),
+        "arguments": {"platform": "optional string"},
+    },
+    "ENSURE_FUNDS": {
+        "purpose": (
+            "Tell the platform you need a given amount available and let it do whatever that takes "
+            "- a transfer, or nothing, or telling you it cannot. Read `satisfied` and `detail`: a "
+            "platform that cannot add funds says so rather than failing."
+        ),
+        "arguments": {"amount": "required number", "currency": "optional string; defaults to whatever this platform settles in", "platform": "optional string"},
+    },
     "LIST_PLATFORMS": {
         "purpose": "List every connected market platform and what each one supports.",
         "arguments": {},
@@ -187,6 +204,17 @@ class MarketToolset:
         return handler(arguments)
 
     # Reading -------------------------------------------------------------------------------
+    def _account_funds(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        runtime = self._runtime(arguments)
+        return {"platform": runtime.plugin.name, **runtime.plugin.account_funds().to_dict()}
+
+    def _ensure_funds(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        runtime = self._runtime(arguments)
+        # The settlement currency is the plugin's to name, not the framework's to assume.
+        currency = str(arguments.get("currency") or runtime.plugin.account_funds().currency)
+        result = runtime.plugin.ensure_funds(float(arguments["amount"]), currency)
+        return {"platform": runtime.plugin.name, **result.to_dict()}
+
     def _list_platforms(self, arguments: dict[str, Any]) -> dict[str, Any]:
         del arguments
         return {
@@ -198,10 +226,7 @@ class MarketToolset:
                     "transfer_directions": list(
                         getattr(runtime.plugin.capabilities, "supported_transfer_directions", ())
                     ),
-                    "account_balance_source": (
-                        "local ledger only; this plugin exposes no wallet balance endpoint, so "
-                        "READ_ACCOUNT reflects what this bot has recorded, not the chain or exchange"
-                    ),
+                    "funds": runtime.plugin.account_funds().to_dict(),
                 }
                 for name, runtime in self._platforms.items()
             ]

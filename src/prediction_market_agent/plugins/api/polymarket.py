@@ -93,6 +93,57 @@ def initialize_plugin(context: PluginInitializationContext) -> PluginSpec:
         instances.append(instance)
         return instance
 
+
+    def _live_instance():
+        """Act on the running plugin, or make a throwaway one so the panel still answers."""
+        if instances:
+            return instances[-1]
+        return PolymarketApiPlugin(resolved_values())
+
+    def funding_status() -> dict:
+        try:
+            return _live_instance().funding_panel()
+        except Exception as error:  # configuration incomplete, credentials missing, network down
+            return {"error": str(error)[:300], "pending_request": None}
+
+    def funding_notices() -> list:
+        """Answer only when there is something outstanding, so a quiet plugin shows nothing."""
+        try:
+            panel = _live_instance().funding_panel()
+        except Exception as error:
+            return [{
+                "key": "funding",
+                "title": '资金到账确认',
+                "kind": "display",
+                "description": '机器人请求达到某个可用金额时，这里会显示需要转入的金额和收款地址。你转账后点确认，插件会重新读取余额核对，不满足会说明还差多少。',
+                "content": {"error": str(error)[:300]},
+            }]
+        if not panel.get("pending_request"):
+            return []
+        return [{
+            "key": "funding",
+            "title": '资金到账确认',
+            "kind": "confirm",
+            "description": '机器人请求达到某个可用金额时，这里会显示需要转入的金额和收款地址。你转账后点确认，插件会重新读取余额核对，不满足会说明还差多少。',
+            "content": panel,
+            "action_label": '我已转账，去核对',
+            "dismiss_label": '驳回',
+        }]
+
+    def funding_action(key: str, name: str, payload: dict) -> dict:
+        del key, payload
+        try:
+            instance = _live_instance()
+        except Exception as error:
+            return {"ok": False, "message": str(error)[:300]}
+        handler = {"confirm": instance.confirm_funding, "dismiss": instance.reject_funding}.get(name)
+        if handler is None:
+            return {"ok": False, "message": f"Unknown funding action: {name}"}
+        try:
+            return handler()
+        except Exception as error:
+            return {"ok": False, "message": str(error)[:300]}
+
     return PluginSpec(
         kind="api",
         name="polymarket",
@@ -109,6 +160,8 @@ def initialize_plugin(context: PluginInitializationContext) -> PluginSpec:
             ),
         ),
         teardown=lambda: close_plugin_instances(instances),
+        notices_callback=funding_notices,
+        notice_action_callback=funding_action,
         readiness_callback=readiness,
         runtime=PluginRuntime(event_loop.start, event_loop.stop, event_loop.status),
     )

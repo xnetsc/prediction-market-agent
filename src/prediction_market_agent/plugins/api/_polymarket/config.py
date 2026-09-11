@@ -28,6 +28,7 @@ class PolymarketPluginConfig:
     builder_api_passphrase: str
     transfer_recipient: str
     trading_capital: float
+    funding_request_file: str
     http_proxy: str
     scan_interval_seconds: int
     error_backoff_seconds: int
@@ -59,6 +60,10 @@ class PolymarketPluginConfig:
             builder_api_passphrase=get("POLYMARKET_BUILDER_API_PASSPHRASE", "").strip(),
             transfer_recipient=get("POLYMARKET_TRANSFER_RECIPIENT", "").strip(),
             trading_capital=float(get("POLYMARKET_TRADING_CAPITAL", "0") or 0),
+            funding_request_file=str(
+                get("POLYMARKET_FUNDING_REQUEST_FILE", "")
+                or f"config/plugins/polymarket_funding_request.json"
+            ),
             http_proxy=resolve_plugin_proxy(
                 get("POLYMARKET_HTTP_PROXY", ""), field_name="POLYMARKET_HTTP_PROXY"
             ),

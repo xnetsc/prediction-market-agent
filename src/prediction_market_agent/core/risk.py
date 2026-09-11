@@ -32,7 +32,7 @@ class RiskCoordinator:
     having to know the other exists.
 
     An engine's ``target`` names what it applies to, and may be a glob: ``market:*`` covers every
-    platform, ``market:binance`` covers one. Engines whose target matches nothing that is ever
+    platform, ``market:<platform>`` covers one. Engines whose target matches nothing that is ever
     dispatched still register, so they appear in the manifest the dashboard renders.
     """
 

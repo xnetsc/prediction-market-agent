@@ -217,6 +217,27 @@ class PolymarketWriteTransport:
             "status": status,
         }
 
+    def deposit_target(self) -> dict[str, Any]:
+        """Where collateral has to arrive, and whether this client could send it there itself.
+
+        Under a proxy wallet the trading balance lives at an address the signer does not hold, so
+        funding is an ERC-20 transfer the operator makes from their own EOA. Naming the address
+        turns "fund it yourself" into something actionable.
+        """
+        client = self._require_client()
+        return {
+            "wallet_address": str(client.wallet),
+            "signer_address": str(client.signer),
+            "wallet_type": str(client.wallet_type),
+            "collateral_token": str(client.environment.collateral_token),
+            "self_funding_possible": str(client.wallet).lower() == str(client.signer).lower(),
+        }
+
+    def collateral_balance(self) -> float:
+        """Spendable pUSD as the platform reports it, in whole units rather than base units."""
+        answer = self._require_client().get_balance_allowance(asset_type="COLLATERAL")
+        return float(answer.balance) / 10**6
+
     def cancel_orders(self, order_ids: list[str]) -> dict[str, Any]:
         response = self._require_client().cancel_orders(order_ids=order_ids)
         raw = _jsonable(response)

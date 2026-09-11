@@ -4,6 +4,9 @@ import re
 from collections.abc import Mapping
 from typing import Any
 
+from pathlib import Path
+
+from prediction_market_agent.plugins.api._funding import FundingRequests
 from prediction_market_agent.runtime.broker import ExecutionGateway
 from prediction_market_agent.core.domain import AccountState
 from prediction_market_agent.plugin_system.contracts import (
@@ -17,6 +20,8 @@ from prediction_market_agent.plugin_system.contracts import (
     Topic,
     TopicDetail,
     TopicPage,
+    AccountFunds,
+    FundingResult,
 )
 from .write import BinancePredictionWriteTransport
 from .config import BinancePluginConfig
@@ -64,6 +69,11 @@ class BinancePredictionApiPlugin:
             raise ValueError("Binance plugin configuration mapping is required")
         self.settings = BinancePluginConfig.from_mapping(environment)
         self._write_transport = BinancePredictionWriteTransport(self.settings)
+        self.funding_requests = FundingRequests(
+            Path(self.settings.funding_request_file)
+            if self.settings.funding_request_file
+            else Path('config/plugins/binance_funding_request.json')
+        )
         self.client = BinancePredictionReadClient(
             self.settings.api_key,
             self.settings.api_secret,
@@ -81,9 +91,103 @@ class BinancePredictionApiPlugin:
             self.settings.max_decisions_per_cycle,
         )
 
-    def opening_balance(self) -> float:
-        """What this account started with. A fact the operator states, not a cap anyone enforces."""
-        return float(self.settings.trading_capital)
+    def account_funds(self) -> AccountFunds:
+        """What the prediction wallet can spend - which is not the spot balance.
+
+        Predictions trade out of a separate Web3 prediction wallet; spot or funding money only
+        becomes spendable after an INBOUND transfer. This plugin implements no endpoint that reads
+        the prediction wallet itself, so `available` is the configured figure and says so. The spot
+        balance is reported alongside as what a top-up could draw on, never as what is spendable:
+        presenting the source of funds as the funds themselves would tell the model it can trade
+        money that is sitting somewhere else.
+        """
+        detail: dict[str, Any] = {
+            "why_declared": "no endpoint here reads the Web3 prediction wallet; available is "
+            "BINANCE_TRADING_CAPITAL as configured",
+            "transfer_source_account": self.settings.account_type,
+        }
+        if self.settings.account_type.upper() == "SPOT":
+            try:
+                usdt = self.client.spot_balances().get("USDT", {"free": 0.0, "locked": 0.0})
+                detail["fundable_from_spot"] = usdt["free"]
+                detail["spot_locked"] = usdt["locked"]
+            except Exception as error:
+                detail["fundable_from_spot_error"] = str(error)[:300]
+        else:
+            detail["fundable_from"] = (
+                f"{self.settings.account_type} account, which this plugin cannot read"
+            )
+        return AccountFunds(
+            available=float(self.settings.trading_capital),
+            currency="USDT",
+            source="declared",
+            detail=detail,
+        )
+
+    def ensure_funds(self, amount: float, currency: str) -> FundingResult:
+        """Record what is needed and wait for approval; do not move money on the ask alone.
+
+        The wallet can be drawn on automatically, which is exactly why it is not: an ask arrives
+        mid-decision, from reasoning nobody has read yet, and money leaving on it would be a
+        transfer at a moment nobody chose. The operator sees the request and approves it.
+        """
+        if currency.upper() != "USDT":
+            return FundingResult(
+                requested=amount, currency=currency, available=0.0, satisfied=False,
+                action="none", detail=f"This account settles in USDT, not {currency}",
+            )
+        funds = self.account_funds()
+        if funds.available >= amount:
+            return FundingResult(
+                requested=amount, currency="USDT", available=funds.available, satisfied=True,
+                action="none", detail="Already available",
+            )
+        self.funding_requests.record(
+            amount=amount, currency="USDT", available=funds.available,
+            reason="requested by the trading loop",
+        )
+        return FundingResult(
+            requested=amount, currency="USDT", available=funds.available, satisfied=False,
+            action="awaiting_operator_approval",
+            detail=(
+                f"A transfer of {amount - funds.available:.6f} USDT into the prediction wallet is "
+                "waiting for approval in this plugin's panel. Nothing moves until it is approved."
+            ),
+        )
+
+    def approve_funding(self) -> dict[str, Any]:
+        """Carry out the standing request, drawing on the configured source account."""
+        request = self.funding_requests.pending()
+        if request is None:
+            return {"ok": False, "message": "There is no funding request to approve"}
+        shortfall = float(request["shortfall"]) or float(request["amount"])
+        try:
+            self._write_transport.transfer("INBOUND", str(shortfall))
+        except Exception as error:
+            return {"ok": False, "message": f"The transfer failed: {str(error)[:300]}"}
+        self.funding_requests.clear()
+        return {
+            "ok": True,
+            "message": (
+                f"Moved {shortfall:.6f} USDT from the {self.settings.account_type} account into "
+                "the prediction wallet"
+            ),
+        }
+
+    def reject_funding(self) -> dict[str, Any]:
+        self.funding_requests.clear()
+        return {"ok": True, "message": "The funding request was dismissed; nothing moved"}
+
+    def funding_panel(self) -> dict[str, Any]:
+        funds = self.account_funds()
+        return {
+            "pending_request": self.funding_requests.pending(),
+            "available": funds.available,
+            "currency": funds.currency,
+            "source": funds.source,
+            "detail": funds.detail,
+            "funding_mode": "automatic_on_approval",
+        }
 
     def topic_page_size(self) -> int:
         return self.settings.topic_page_size
