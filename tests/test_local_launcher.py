@@ -64,6 +64,13 @@ class LocalLauncherTests(unittest.TestCase):
                 (root / "deploy").mkdir()
                 for name in ("start-local.sh", "compose.yaml", "deploy/ensure-docker.sh"):
                     shutil.copyfile(ROOT / name, root / name)
+                # The launcher's contract is that it obtains the image through the pull driver and
+                # stops when that fails. The driver decides for itself how to reach the registry
+                # and is covered separately; standing in for it here keeps this test off the network.
+                (root / "deploy/registry-pull.py").write_text(
+                    "import subprocess, sys\n"
+                    "raise SystemExit(subprocess.run(['docker', 'pull', sys.argv[1]]).returncode)\n"
+                )
                 (root / "deploy/local-callbacks.sh").write_text('echo ready > "$3"\n')
                 (root / "deploy/prepare-host-proxy.sh").write_text('printf "proxy-prepare %s\\n" "$*" >> "$LAUNCH_LOG"\n')
                 bin_dir = root / "bin"
@@ -74,7 +81,7 @@ class LocalLauncherTests(unittest.TestCase):
                 docker = bin_dir / "docker"
                 docker.write_text(
                     '#!/bin/sh\nprintf "%s\\n" "$*" >> "$LAUNCH_LOG"\n'
-                    'case "$*" in *" pull") [ "$PULL_FAILS" != true ] ;; *" ps -q robot") echo abc123 ;; *) exit 0 ;; esac\n',
+                    'case "$*" in pull*|*" pull") [ "$PULL_FAILS" != true ] ;; *" ps -q robot") echo abc123 ;; *) exit 0 ;; esac\n',
                     encoding="utf-8",
                 )
                 docker.chmod(0o755)
@@ -84,7 +91,7 @@ class LocalLauncherTests(unittest.TestCase):
                          "LAUNCH_LOG": str(log), "PULL_FAILS": str(pull_fails).lower()},
                     capture_output=True, text=True, timeout=10)
                 calls = log.read_text(encoding="utf-8")
-                self.assertIn(" pull", calls)
+                self.assertIn("pull", calls, "the launcher must obtain the image before starting")
                 self.assertEqual(result.returncode == 0, not pull_fails, result.stderr)
                 self.assertEqual("up -d --no-build --wait" in calls, not pull_fails)
                 if not pull_fails:

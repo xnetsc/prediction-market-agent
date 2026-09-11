@@ -76,6 +76,34 @@ Codex 使用设备码，Claude 使用官方验证码页面和客户端输入，�
 远程云部署无需宿主机代理采集脚本：HOST 在没有快照时读取服务器自身环境，显式 ENVIRONMENT 始终忽略
 宿主机快照，不改写回环地址或启动转发。云平台注入 HTTP(S)_PROXY/NO_PROXY 即可；详情见 [代理说明](HOST_PROXY.md)。
 
+### 镜像仓库不可达时
+
+拉镜像的是 Docker 守护进程，它既不读 shell 的 `HTTPS_PROXY`，也没有任何"只对这一次生效"的代理开关——
+官方文档里给守护进程配代理的每一种方式（`daemon.json` 的 `proxies`、`dockerd --http-proxy`、systemd
+drop-in、Desktop 设置）都要改配置并重启一个你可能与别的工作共用的服务。启动脚本不做这种改动。
+
+所以 `start-local.sh` / `start-local.ps1` 的拉取走 `deploy/registry-pull.py`：
+
+1. 先正常 `docker pull`。能拉通就到此为止，后面的逻辑一次都不会执行。
+2. 失败才预检。代理沿用项目已有的 `host-proxy.sh` / `host-proxy.ps1` 检测（env、macOS scutil、Windows
+   注册表、Linux GNOME/KDE，含 PAC/WPAD 的识别），再分别探测直连和走代理能否到达 registry。
+3. 代理能到而守护进程没用代理时，在 **127.0.0.1** 上把上游 registry 转发出来。Docker 本来就把回环地址
+   当作 insecure registry，不需要任何配置；拉完立刻把规范名移到新镜像上，转发器随即关闭。
+4. 直连和代理都不通时，询问是直连重试还是退出。非交互环境不会卡住，直接失败并给出诊断。
+
+几点边界：
+
+- **转发地址不会写进任何文件。** 本地镜像始终带规范名 `ghcr.io/...`，所以下次更新重新走一遍上述判断，
+  不依赖一个早已消失的端口。`compose.yaml` 用 `pull_policy: missing`，单独 `docker compose up` 仍会从
+  原始地址取镜像。
+- **失败绝不冒充成功。** 规范标签只有在拉取成功、且校验它确实指向刚拉下来的那个镜像之后才移动；否则
+  报错退出，而不是留着旧镜像让你以为已经更新。
+- **Docker Desktop 上这条回退路走不通。** 它的守护进程在虚拟机里，虚拟机的 127.0.0.1 不是宿主机的
+  （实测为 `connection refused`）；改用 `host.docker.internal` 能连上，但那不是回环名，Docker 会要求
+  HTTPS 并校验证书，装证书又回到改守护进程配置。此时脚本会说明原因，由你决定是否在 Desktop 设置里
+  自行开启代理。Desktop 默认跟随系统代理，多数情况下本来就不会走到这一步。
+- 宿主机没有 Python 时跳过预检，退回原来的 `docker compose pull`。
+
 ## GitHub Actions 镜像发布
 
 `.github/workflows/container.yml` 在每次 push（所有分支和标签）或手动触发时执行：构建最终安装态镜像，

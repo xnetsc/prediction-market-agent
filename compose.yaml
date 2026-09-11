@@ -1,7 +1,10 @@
 services:
   robot:
     image: ${PREDICTION_AGENT_IMAGE:-ghcr.io/xnetsc/prediction-market-agent:latest}
-    pull_policy: always
+    # Updates come from the startup scripts, which pull from this same address every run and
+    # only fall back to a proxy when it cannot be reached. Compose still fetches the image
+    # itself when it is missing, so `docker compose up` on its own keeps working.
+    pull_policy: missing
     extra_hosts:
       - "host.proxy.internal:host-gateway"
     ports:

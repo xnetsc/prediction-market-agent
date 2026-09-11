@@ -2,8 +2,17 @@ $ErrorActionPreference = "Stop"
 Set-Location $PSScriptRoot
 . "$PSScriptRoot/deploy/ensure-docker.ps1"
 Ensure-Docker
-Invoke-Docker compose -f "$PSScriptRoot/compose.yaml" pull
 $image = if ($env:PREDICTION_AGENT_IMAGE) { $env:PREDICTION_AGENT_IMAGE } else { 'ghcr.io/xnetsc/prediction-market-agent:latest' }
+# Pull through the registry preflight when a host interpreter is available, so a machine that can
+# only reach the registry through a proxy still works without touching Docker's own configuration.
+$python = @('python', 'python3', 'py') | Where-Object { Get-Command $_ -ErrorAction SilentlyContinue } | Select-Object -First 1
+if ($python) {
+    & $python "$PSScriptRoot/deploy/registry-pull.py" $image
+    if ($LASTEXITCODE -ne 0) { throw "Could not obtain $image" }
+} else {
+    Write-Warning 'No Python on PATH; pulling directly without the registry preflight.'
+    Invoke-Docker compose -f "$PSScriptRoot/compose.yaml" pull
+}
 & "$PSScriptRoot/deploy/prepare-host-proxy.ps1" -Image $image
 Invoke-Docker compose -f "$PSScriptRoot/compose.yaml" up -d --no-build --wait --wait-timeout 180
 $robot = (Invoke-Docker compose -f "$PSScriptRoot/compose.yaml" ps -q robot).Trim()
