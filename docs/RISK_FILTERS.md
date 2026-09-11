@@ -73,7 +73,8 @@
 | 平台与市场 | `LIST_PLATFORMS`、`LIST_TOPICS`、`GET_TOPIC`、`GET_ORDER_BOOK`、`SYNC_TIME` |
 | 行情与比较 | `GET_KLINES`、`REFRESH_MARKET`、`SEARCH_MARKETS`、`COMPARE_OUTCOMES` |
 | 外部信息 | `SEARCH_WEB`、`FETCH_URL` |
-| 账务与历史 | `READ_ACCOUNT`、`RECALL_HISTORY` |
+| 账务与历史 | `READ_ACCOUNT`（本机账本）、`RECALL_HISTORY` |
+| 平台资金 | `ACCOUNT_FUNDS`（平台此刻能花多少）、`ENSURE_FUNDS`（我要有这么多）、`FUNDING_STATUS`（那次请求后来怎样） |
 | 结算判定 | `OUTCOME_WON` |
 | 交易与资金 | `GET_QUOTE`、`PLACE_ORDER`、`CANCEL_ORDERS`、`REDEEM`、`TRANSFER` |
 
@@ -91,8 +92,9 @@ Polymarket 直接用钱包里的抵押品交易、**只支持转出**。所以�
 `TRANSFER` 是运行中的资金通路：`INBOUND` 给交易账户入金；`OUTBOUND` 把卖出和赎回赚到的收回钱包。
 各平台支持哪个方向见 `LIST_PLATFORMS`——Polymarket 只有 `OUTBOUND`。
 
-注意 `READ_ACCOUNT` 读的是**本机账本**——两个内置插件都没有实现平台侧余额查询端点，所以它反映的是
-本程序记录的数字，不是链上或交易所的真实余额。
+`READ_ACCOUNT` 读的是**本机账本**；要问平台此刻真正能花多少，用 `ACCOUNT_FUNDS`，它的 `source` 会
+说这个数字是平台确认的还是配置里填的。资金请求的完整协议（状态、`request_id`、超时、双向理由）见
+[API 插件](API_PLUGINS.md)。
 
 这些工具**不绕过任何过滤**：读经受保护的插件、写经网关，每一次都过业务风控；工具调用本身进来时先过
 Agent 行为风控。`agent_actions` 的交易动作白名单管的正是这些调用。
