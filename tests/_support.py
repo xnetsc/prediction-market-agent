@@ -43,11 +43,6 @@ from prediction_market_agent.core.risk import (
 from prediction_market_agent.runtime.market_guard import GuardedMarketApi, MarketActionRejected
 from prediction_market_agent.plugins.agent_policy.agent_actions import AgentActionRuleEngine
 from prediction_market_agent.plugins.risk.custom_rules import BusinessRuleEngine
-from prediction_market_agent.plugins.risk.portfolio_limits import (
-    AccountLimitEngine,
-    PortfolioLimitSettings,
-    PortfolioLimitsContribution,
-)
 from prediction_market_agent.agent.strategy import DecisionStrategyPlugin
 
 
@@ -83,16 +78,3 @@ POLYMARKET_ENV = {
 }
 
 
-def account_risk(state: AccountState, platform: str = "test") -> AccountLimitEngine:
-    return AccountLimitEngine(
-        platform,
-        state,
-        PortfolioLimitSettings(
-            total_capital=80,
-            loss_limit=7,
-            max_position=5.25,
-            max_exposure=20,
-            min_order_notional=1.25,
-            allocations={platform: state.starting_capital},
-        ),
-    )

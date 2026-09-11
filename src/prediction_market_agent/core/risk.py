@@ -19,15 +19,6 @@ class TargetRuleEngine(Protocol):
     def manifest(self) -> dict[str, Any]: ...
 
 
-@runtime_checkable
-class PortfolioRiskContribution(Protocol):
-    """Standard risk-plugin contribution needed to construct trading accounts."""
-
-    def initial_allocations(self, platforms: tuple[str, ...]) -> dict[str, float]: ...
-    def create_account_engine(self, platform: str, state: Any) -> TargetRuleEngine: ...
-    def create_global_engine(self, states: dict[str, Any]) -> TargetRuleEngine: ...
-
-
 _OUTCOMES = frozenset({"ALLOW", "ADJUST", "REJECT", "HALT"})
 
 
@@ -125,45 +116,3 @@ class RiskCoordinator:
         )
 
 
-class UnrestrictedExecutionRiskControl:
-    """Neutral gateway adapter used when no account-risk plugin is enabled."""
-
-    def __init__(self, platform: str, state: Any):
-        self.target = f"market:{platform}"
-        self.state = state
-
-    def refresh_halt(self) -> None:
-        return None
-
-    def allowed_buy_notional(
-        self,
-        requested: float,
-        current_position_value: float,
-        fee_bps: int,
-        token_id: str,
-    ) -> float:
-        del current_position_value, fee_bps, token_id
-        return requested
-
-    def evaluate(self, operation: str, context: dict[str, Any]) -> RuleDecision:
-        del operation, context
-        return RuleDecision("ALLOW", "No enabled account-risk plugin applies")
-
-    def manifest(self) -> dict[str, Any]:
-        return {"target": self.target, "policy": "NO_ENABLED_ACCOUNT_RISK_PLUGIN"}
-
-
-class UnrestrictedGlobalRiskControl:
-    """Neutral global adapter used when no portfolio-risk plugin is enabled."""
-
-    target = "market:*"
-
-    def refresh_halt(self) -> None:
-        return None
-
-    def evaluate(self, operation: str, context: dict[str, Any]) -> RuleDecision:
-        del operation, context
-        return RuleDecision("ALLOW", "No enabled portfolio-risk plugin applies")
-
-    def manifest(self) -> dict[str, Any]:
-        return {"target": self.target, "policy": "NO_ENABLED_PORTFOLIO_RISK_PLUGIN"}

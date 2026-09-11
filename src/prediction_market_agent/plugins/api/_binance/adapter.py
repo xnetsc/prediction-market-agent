@@ -184,10 +184,9 @@ class BinancePredictionApiPlugin:
             for row in rows
         ]
 
-    def create_write_gateway(self, state: AccountState, risk) -> ExecutionGateway:
+    def create_write_gateway(self, state: AccountState) -> ExecutionGateway:
         return ExecutionGateway(
             state,
-            risk,
             platform=self.name,
             write_transport=self._write_transport,
         )

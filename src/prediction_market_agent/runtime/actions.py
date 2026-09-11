@@ -81,20 +81,7 @@ class ExecutionActionsMixin:
         position = runtime.state.positions.get(token_id)
         fee_bps = detail.fee_bps
         if decision.action == "BUY":
-            current_value = position.market_value if position else 0.0
-            notional = runtime.gateway.allowed_buy_notional(
-                decision.notional_usdt, current_value, fee_bps, token_id
-            )
-            if notional <= 0:
-                return self._record_no_action(
-                    platform,
-                    market_topic_id,
-                    token_id,
-                    "BUY_REJECTED",
-                    request,
-                    {"status": "RISK_REJECTED", "allowed_notional": notional},
-                    decision_id,
-                )
+            notional = decision.notional_usdt
             price = decision.limit_price if decision.order_type == "LIMIT" else ask
             assert price is not None
             quote = runtime.gateway.get_quote(

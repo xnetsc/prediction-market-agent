@@ -20,7 +20,6 @@ from prediction_market_agent.plugins.api._polymarket.runtime import PolymarketEv
 from prediction_market_agent.runtime.controller import RobotRuntimeManager
 from prediction_market_agent.runtime.bootstrap import bootstrap_engine
 from prediction_market_agent.agent.strategy import BuiltInDecisionStrategy
-from prediction_market_agent.core.risk import UnrestrictedExecutionRiskControl
 
 
 class PlatformOwnedLoopTests(unittest.TestCase):
@@ -263,9 +262,9 @@ class RuntimeManagerTests(unittest.TestCase):
         class Platform:
             name = "platform"
 
-            def create_write_gateway(self, state, risk):
-                self.received_risk = risk
-                return SimpleNamespace(risk=risk)
+            def create_write_gateway(self, state):
+                self.received_state = state
+                return SimpleNamespace()
 
         platform = Platform()
         api = PluginSpec(
@@ -295,7 +294,7 @@ class RuntimeManagerTests(unittest.TestCase):
             components = bootstrap_engine(config, catalog=Catalog())
         self.assertIsInstance(components.decision_strategy, BuiltInDecisionStrategy)
         self.assertIn("HOLD IS THE DEFAULT", components.decision_strategy.instructions)
-        self.assertIsInstance(platform.received_risk, UnrestrictedExecutionRiskControl)
+        self.assertIs(platform.received_state, components.platforms["platform"].state)
         self.assertEqual(components.platforms["platform"].state.starting_capital, 0.0)
         self.assertEqual(components.provider.available_names, ("provider",))
 

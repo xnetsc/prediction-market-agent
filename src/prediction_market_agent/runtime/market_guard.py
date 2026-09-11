@@ -111,8 +111,8 @@ class GuardedMarketApi:
         self._check("search_market_candidates", {"query": query, "limit": limit})
         return self._plugin.search_market_candidates(query, limit)
 
-    def create_write_gateway(self, state: Any, risk: Any) -> Any:
+    def create_write_gateway(self, state: Any) -> Any:
         """Hand the gateway the same guard, so writes are checked on the same target."""
-        gateway = self._plugin.create_write_gateway(state, risk)
+        gateway = self._plugin.create_write_gateway(state)
         gateway.business_risk = self._check
         return gateway

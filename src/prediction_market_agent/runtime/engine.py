@@ -37,7 +37,6 @@ class TradingEngine(MarketEvaluationMixin, ExecutionActionsMixin):
         self.risk = components.risk
         self.api_registry = components.api_registry
         self.platforms = components.platforms
-        self.global_risk = components.global_risk
         self.provider = components.provider
         self.research_contributions = components.research_contributions
         self.discovery_strategy = components.discovery_strategy
@@ -110,14 +109,6 @@ class TradingEngine(MarketEvaluationMixin, ExecutionActionsMixin):
     def _collect_platform_topics(
         self, runtime: PlatformRuntime, maximum_topics: int
     ) -> list[Topic]:
-        self.global_risk.refresh_halt()
-        if runtime.state.halted:
-            LOGGER.warning(
-                "%s account halted: %s",
-                runtime.plugin.name,
-                runtime.state.halt_reason,
-            )
-            return []
         runtime.plugin.sync_time()
         for name, review in (
             ("discovery", self.discovery.review),
@@ -141,14 +132,6 @@ class TradingEngine(MarketEvaluationMixin, ExecutionActionsMixin):
     def _process_platform_topics(
         self, runtime: PlatformRuntime, topics: list[Topic], maximum_decisions: int
     ) -> None:
-        self.global_risk.refresh_halt()
-        if runtime.state.halted:
-            LOGGER.warning(
-                "%s account halted before scan processing: %s",
-                runtime.plugin.name,
-                runtime.state.halt_reason,
-            )
-            return
         self._decisions_this_cycle = 0
         self._max_decisions_this_cycle = maximum_decisions
         eligible = self.decision_strategy.select_topics(topics)
@@ -175,19 +158,24 @@ class TradingEngine(MarketEvaluationMixin, ExecutionActionsMixin):
 
     @staticmethod
     def _platform_status(runtime: PlatformRuntime) -> dict[str, Any]:
+        state = runtime.state
         return {
             "platform": runtime.plugin.name,
-            "cash": round(runtime.state.cash, 6),
-            "exposure": round(runtime.state.exposure, 6),
-            "equity": round(runtime.state.equity, 6),
-            "risk_metrics": {
-                key: round(value, 6)
-                for key, value in sorted(runtime.state.risk_metrics.items())
-            },
-            "positions": len(runtime.state.positions),
-            "orders": len(runtime.state.orders),
-            "halted": runtime.state.halted,
-            "halt_reason": runtime.state.halt_reason,
+            "cash": round(state.cash, 6),
+            "exposure": round(state.exposure, 6),
+            "equity": round(state.equity, 6),
+            # The profit-and-loss picture, so whoever is deciding can apply its own stop: there is
+            # no built-in stop loss or take profit anywhere, by design. A decision strategy states
+            # its thresholds in its own text and reads these numbers, or a business-risk plugin
+            # enforces them on the chain. Nothing here judges them.
+            "starting_capital": round(state.starting_capital, 6),
+            "realized_pnl": round(state.realized_pnl, 6),
+            "transferred_out": round(state.transferred_out, 6),
+            "net_result": round(
+                state.equity + state.transferred_out - state.starting_capital, 6
+            ),
+            "positions": len(state.positions),
+            "orders": len(state.orders),
             "capabilities": runtime.plugin.capabilities.to_dict(),
         }
 
@@ -201,7 +189,6 @@ class TradingEngine(MarketEvaluationMixin, ExecutionActionsMixin):
             "aggregate_equity": round(
                 sum(runtime.state.equity for runtime in self.platforms.values()), 6
             ),
-            "aggregate_risk_metrics": self._aggregate_risk_metrics(),
             "decision_provider": self.provider.name,
             "decision_strategy": {
                 "path": str(self.decision_strategy.path),
@@ -214,15 +201,6 @@ class TradingEngine(MarketEvaluationMixin, ExecutionActionsMixin):
         if include_memory:
             result.update(self.memory.stats())
         return result
-
-    def _aggregate_risk_metrics(self) -> dict[str, float]:
-        totals: dict[str, float] = {}
-        for runtime in self.platforms.values():
-            for key, value in runtime.state.risk_metrics.items():
-                totals[key] = totals.get(key, 0.0) + float(value)
-        return {
-            key: round(value, 6) for key, value in sorted(totals.items())
-        }
 
     def close(self) -> None:
         """Release session and plugin-owned resources for this engine instance."""

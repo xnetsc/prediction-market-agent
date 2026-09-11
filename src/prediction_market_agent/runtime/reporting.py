@@ -156,13 +156,8 @@ def build_report(
             "exposure": round(state.exposure, 6),
             "equity": round(state.equity, 6),
             "realized_pnl": round(state.realized_pnl, 6),
-            "risk_metrics": {
-                key: round(value, 6) for key, value in sorted(state.risk_metrics.items())
-            },
             "positions": len(state.positions),
             "orders": len(state.orders),
-            "halted": state.halted,
-            "halt_reason": state.halt_reason,
         }
 
     providers = Counter(item["provider"] for item in decisions)
@@ -195,22 +190,6 @@ def build_report(
         "accounts": accounts,
         "aggregate_account": {
             "equity": round(sum(item["equity"] for item in accounts.values()), 6),
-            "risk_metrics": {
-                key: round(
-                    sum(
-                        float(item["risk_metrics"].get(key, 0.0))
-                        for item in accounts.values()
-                    ),
-                    6,
-                )
-                for key in sorted(
-                    {
-                        name
-                        for item in accounts.values()
-                        for name in item["risk_metrics"]
-                    }
-                )
-            },
         },
         "decisions_detail": decisions,
     }

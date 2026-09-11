@@ -240,7 +240,7 @@ class PluginSystemTests(unittest.TestCase):
                     "decision_provider": ["codex", "claude", "openai_compatible"],
                     "decision_strategy": ["general_agent"],
                     "research_tool": ["standard_research"],
-                    "risk": ["portfolio_limits", "custom_rules"],
+                    "risk": ["custom_rules"],
                     "agent_policy": ["agent_actions"],
                 },
                 "decision_strategy": "general_agent",
