@@ -5,6 +5,7 @@
     "decision_provider": ["codex", "claude", "openai_compatible"],
     "market_discovery": [],
     "research_tool": ["standard_research"],
+    "agent_policy": [],
     "risk": [],
     "hook": []
   },

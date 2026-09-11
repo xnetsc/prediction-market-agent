@@ -42,8 +42,8 @@ from prediction_market_agent.core.risk import (
     NetworkWriteGate,
     RiskCoordinator,
 )
-from prediction_market_agent.plugins.risk.agent_actions import AgentActionRuleEngine
-from prediction_market_agent.plugins.risk.dynamic_python import DynamicPythonRuleEngine
+from prediction_market_agent.plugins.agent_policy.agent_actions import AgentActionRuleEngine
+from prediction_market_agent.plugins.risk.custom_rules import DynamicPythonRuleEngine
 from prediction_market_agent.plugins.risk.portfolio_limits import (
     AccountLimitEngine,
     PortfolioLimitSettings,

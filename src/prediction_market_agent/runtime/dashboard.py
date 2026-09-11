@@ -62,9 +62,9 @@ HTML = r"""<!doctype html><html lang="zh-CN"><head><meta charset="utf-8">
 <script src="/assets/login-probe.js"></script>
 <script src="/assets/dashboard-views.js"></script>
 <script>
-const TOKEN='CSRF_TOKEN',SESSION_ID='SESSION_ID',KINDS=['api','decision_provider','decision_strategy','market_discovery','research_tool','risk','hook'];
+const TOKEN='CSRF_TOKEN',SESSION_ID='SESSION_ID',KINDS=['api','decision_provider','decision_strategy','market_discovery','research_tool','agent_policy','risk','hook'];
 const LOCAL_ACCESS=LOCAL_ACCESS_VALUE;
-const LABELS={api:'交易平台',decision_provider:'AI 模型服务',decision_strategy:'决策策略',market_discovery:'标的发现策略',research_tool:'信息与研究',risk:'风险检查',hook:'流程扩展'};
+const LABELS={api:'交易平台',decision_provider:'AI 模型服务',decision_strategy:'决策策略',market_discovery:'标的发现策略',research_tool:'信息与研究',agent_policy:'Agent 行为',risk:'业务风控',hook:'流程扩展'};
 let LAST_MANAGER=null;
 const esc=s=>String(s??'').replace(/[&<>\"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','\"':'&quot;'}[c]));
 const detail=o=>'<details><summary>查看完整 JSON</summary><pre>'+esc(JSON.stringify(o,null,2))+'</pre></details>';

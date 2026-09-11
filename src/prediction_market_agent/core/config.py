@@ -286,6 +286,7 @@ class Config:
     management_file: Path = Path("bot_management.json")
     plugin_directories_file: Path = Path("config/plugin_directories.json")
     risk_plugins: tuple[str, ...] = ()
+    agent_policy_plugins: tuple[str, ...] = ()
     hook_plugins: tuple[str, ...] = ()
     decision_strategy_name: str = ""
 
@@ -327,6 +328,7 @@ class Config:
                 str(values["plugin_directories_file"]), working_directory
             ),
             risk_plugins=managed.selected("risk", ()),
+            agent_policy_plugins=managed.selected("agent_policy", ()),
             hook_plugins=managed.selected("hook", ()),
             decision_strategy_name=managed.decision_strategy,
             auth_db=_runtime_path(str(values["auth_db"]), working_directory),

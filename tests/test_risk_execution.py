@@ -107,7 +107,7 @@ class RiskAndExecutionTests(unittest.TestCase):
         self.assertAlmostEqual(loaded.equity, self.state.equity)
         self.assertIn("token-up", loaded.positions)
 
-    def test_dynamic_python_rule_can_only_reduce(self) -> None:
+    def test_a_custom_rule_can_only_reduce(self) -> None:
         module_path = Path(self.temp.name) / "risk_rule.py"
         module_path.write_text(
             "def evaluate(operation, context):\n"
@@ -301,12 +301,12 @@ class DynamicRiskReadinessTests(unittest.TestCase):
 
     def _spec(self, root: Path):
         from prediction_market_agent.plugin_system.discovery import PluginInitializationContext
-        from prediction_market_agent.plugins.risk import dynamic_python
+        from prediction_market_agent.plugins.risk import custom_rules
 
-        return dynamic_python.initialize_plugin(
+        return custom_rules.initialize_plugin(
             PluginInitializationContext(
                 kind="risk",
-                module_path=Path(dynamic_python.__file__),
+                module_path=Path(custom_rules.__file__),
                 working_directory=root,
             )
         )

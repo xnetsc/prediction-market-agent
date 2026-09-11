@@ -25,7 +25,7 @@ def setup_guide(runtime, manifest, *, automatic_start):
     add("platforms","启动至少一个交易平台","平台插件自行判断能否启动；通用框架只读取其状态，不检查私有字段。",any_platform_ready,
         [plugin_action("api",p) for p,_actual,ready in platform_states if not ready],
         [p["name"]+": "+reason for p,actual,ready in platform_states if not ready for reason in actual.get("startup_reasons",p.get("readiness",{}).get("reasons",[]))])
-    for kind,title in [("decision_strategy","决策策略"),("market_discovery","标的发现策略"),("research_tool","信息与研究"),("risk","风险检查"),("hook","流程扩展")]:
+    for kind,title in [("decision_strategy","决策策略"),("market_discovery","标的发现策略"),("research_tool","信息与研究"),("agent_policy","Agent 行为"),("risk","业务风控"),("hook","流程扩展")]:
         selected=[p for p in plugins.get(kind,[]) if p["enabled"]]
         for p in selected:
             state=runtime.get("global_plugins",{}).get(kind+":"+p["name"],p.get("readiness",{}))

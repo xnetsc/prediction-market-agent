@@ -28,7 +28,7 @@ class DynamicPythonRuleEngine:
         path = path.resolve()
         if path.suffix.lower() != ".py" or not path.is_file():
             raise ValueError(f"Dynamic risk rule must be an existing .py file: {path}")
-        spec = importlib.util.spec_from_file_location(f"prediction_risk_rule_{self.index}", path)
+        spec = importlib.util.spec_from_file_location(f"prediction_business_rule_{self.index}", path)
         if spec is None or spec.loader is None:
             raise ValueError(f"Unable to load dynamic risk rule: {path}")
         module = importlib.util.module_from_spec(spec)
@@ -77,7 +77,7 @@ class DynamicPythonRuleEngine:
 
 def initialize_plugin(context: PluginInitializationContext) -> PluginSpec:
     load, save, delete, storage = json_file_callbacks(
-        context.working_directory / "config" / "plugins" / "risk_dynamic_python.json"
+        context.working_directory / "config" / "plugins" / "risk_custom_rules.json"
     )
     configuration = PluginConfiguration(
         fields=(
@@ -121,8 +121,8 @@ def initialize_plugin(context: PluginInitializationContext) -> PluginSpec:
 
     return PluginSpec(
         "risk",
-        "dynamic_python",
-        "加载受信任的 Python 风控规则，可针对任意受保护目标拒绝、停止或缩减动作。",
+        "custom_rules",
+        "用你自己的 Python 规则约束业务风险，可针对任意受保护目标拒绝、停止或缩减动作。",
         str(context.module_path),
         factory,
         configuration,

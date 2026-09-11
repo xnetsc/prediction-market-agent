@@ -33,6 +33,7 @@ class PluginManagementService:
             "market_discovery": self.config.market_discovery_plugins,
             "research_tool": self.config.research_tool_plugins,
             "risk": self.config.risk_plugins,
+            "agent_policy": self.config.agent_policy_plugins,
             "hook": self.config.hook_plugins,
         }[kind]
 

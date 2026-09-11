@@ -590,8 +590,14 @@ def load_plugin_catalog(config: Any) -> PluginCatalog:
         "decision_strategy": (
             (managed.decision_strategy,) if managed.decision_strategy else ()
         ),
+        "market_discovery": managed.selected(
+            "market_discovery", getattr(config, "market_discovery_plugins", ())
+        ),
         "research_tool": managed.selected(
             "research_tool", config.research_tool_plugins
+        ),
+        "agent_policy": managed.selected(
+            "agent_policy", getattr(config, "agent_policy_plugins", ())
         ),
         "risk": managed.selected("risk", config.risk_plugins),
         "hook": managed.selected("hook", config.hook_plugins),

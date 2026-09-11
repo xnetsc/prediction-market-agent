@@ -87,15 +87,23 @@ def bootstrap_engine(
         }
         risk_products: list[tuple[str, Any]] = []
         portfolio_contributions: list[Any] = []
-        for name in config.risk_plugins:
-            try:
-                created = catalog.get("risk", name).factory(config, risk_services)
-            except Exception as error:
-                LOGGER.warning("optional risk plugin %s could not start: %s", name, error)
-                continue
-            risk_products.append((name, created))
-            if isinstance(created, PortfolioRiskContribution):
-                portfolio_contributions.append(created)
+        # Business risk and agent policy are separate categories because they answer different
+        # questions about the same action: whether the money is within limits, and whether the
+        # Agent was allowed to ask for it at all. Both register with the one coordinator, so a
+        # trade the model proposes is checked by each in turn.
+        for kind, names in (
+            ("risk", config.risk_plugins),
+            ("agent_policy", config.agent_policy_plugins),
+        ):
+            for name in names:
+                try:
+                    created = catalog.get(kind, name).factory(config, risk_services)
+                except Exception as error:
+                    LOGGER.warning("optional %s plugin %s could not start: %s", kind, name, error)
+                    continue
+                risk_products.append((name, created))
+                if isinstance(created, PortfolioRiskContribution):
+                    portfolio_contributions.append(created)
         if len(portfolio_contributions) > 1:
             raise ValueError(
                 "At most one enabled risk plugin may provide account allocation and "

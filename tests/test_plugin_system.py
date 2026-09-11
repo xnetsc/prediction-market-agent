@@ -240,7 +240,8 @@ class PluginSystemTests(unittest.TestCase):
                     "decision_provider": ["codex", "claude", "openai_compatible"],
                     "decision_strategy": ["general_agent"],
                     "research_tool": ["standard_research"],
-                    "risk": ["portfolio_limits", "agent_actions", "dynamic_python"],
+                    "risk": ["portfolio_limits", "custom_rules"],
+                    "agent_policy": ["agent_actions"],
                     "hook": ["jsonl_audit"],
                 },
                 "decision_strategy": "general_agent",
@@ -408,3 +409,26 @@ class PluginSystemTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class CatalogCoverageTests(unittest.TestCase):
+    def test_every_declared_kind_can_be_enabled(self) -> None:
+        """A kind absent from the loader is discovered but never initialised."""
+        import re
+        from pathlib import Path
+
+        from prediction_market_agent.plugin_system.managed_config import PLUGIN_KINDS
+
+        source = (
+            Path(__file__).resolve().parents[1]
+            / "src/prediction_market_agent/plugin_system/discovery.py"
+        ).read_text(encoding="utf-8")
+        block = source[source.index("    enabled = {") : source.index("    return discover_plugin_catalog(")]
+        missing = [kind for kind in PLUGIN_KINDS if f'"{kind}"' not in block]
+        self.assertEqual(missing, [], "load_plugin_catalog must map every plugin kind")
+
+    def test_business_risk_and_agent_policy_are_separate_kinds(self) -> None:
+        from prediction_market_agent.plugin_system.managed_config import PLUGIN_KINDS
+
+        self.assertIn("risk", PLUGIN_KINDS)
+        self.assertIn("agent_policy", PLUGIN_KINDS)

@@ -219,7 +219,7 @@ class ArchitectureContractTests(unittest.TestCase):
         filenames = {
             "standard_research": "research_standard.json",
             "agent_actions": "risk_agent_actions.json",
-            "dynamic_python": "risk_dynamic_python.json",
+            "custom_rules": "risk_custom_rules.json",
             "portfolio_limits": "risk_portfolio_limits.json",
             "jsonl_audit": "hook_jsonl_audit.json",
             "general_agent": "strategy_general_agent.json",
