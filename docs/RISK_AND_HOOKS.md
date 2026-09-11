@@ -1,5 +1,16 @@
 # 风控与 Hook
 
+## 默认启用不等于已有防护
+
+出厂的 `plugin_selection.default.json` 在 `enabled.risk` 里列出了三个风控插件，`init` 会把这份清单固化
+到工作目录的 `bot_management.json`，所以首次打开界面时它们看起来像是被选过的，其实没有人选。
+
+三个都需要自己的配置才会真正起作用：`portfolio_limits` 要 `TOTAL_CAPITAL`，`agent_actions` 要
+`ALLOWED_TOOLS`，`dynamic_python` 要指向至少一个受信任的 `.py` 规则文件。**没有配置就没有任何限制。**
+
+`dynamic_python` 在未配置时会明确报告未就绪，理由写着“不施加任何限制”，而不是显示绿色的已就绪——一个
+启用了却什么都不检查的风控，显示成已就绪是最容易误导人的状态。要么给它规则文件，要么在插件中心停用它。
+
 ## 通用协调器
 
 内核只认识命名目标及四种结果：`ALLOW`、`ADJUST`、`REJECT`、`HALT`。它负责按目标分派并合并动态
