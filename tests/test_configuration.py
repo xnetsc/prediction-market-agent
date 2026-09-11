@@ -142,3 +142,20 @@ class ConfigurationTests(unittest.TestCase):
             decision_strategy_name="strategy",
         )
         common.validate()
+
+
+class ShippedDefaultSelectionTests(unittest.TestCase):
+    def test_no_risk_plugin_is_enabled_out_of_the_box(self) -> None:
+        """A risk list nobody chose looks like protection while enforcing nothing."""
+        import json
+        from pathlib import Path
+
+        shipped = Path(__file__).resolve().parents[1] / (
+            "src/prediction_market_agent/config/plugin_selection.default.json"
+        )
+        enabled = json.loads(shipped.read_text(encoding="utf-8"))["enabled"]
+        self.assertEqual(enabled["risk"], [])
+        self.assertEqual(enabled["hook"], [])
+        self.assertEqual(
+            enabled["api"], ["binance", "polymarket"], "platforms stay discoverable"
+        )
