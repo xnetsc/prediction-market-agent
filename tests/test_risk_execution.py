@@ -37,9 +37,22 @@ class RiskAndExecutionTests(unittest.TestCase):
                 return {"status": "COMPLETED", "direction": direction}
 
         self.transport = RecordingTransport()
+        # Wire the gateway the way bootstrap does: limits are enforced by the business-risk chain,
+        # so a gateway built without it is unguarded by design and would prove nothing here.
+        self.coordinator = RiskCoordinator()
+        self.coordinator.register(risk)
         self.gateway = ExecutionGateway(
             self.state, risk, platform="fake", write_transport=self.transport
         )
+        self.gateway.business_risk = GuardedMarketApi(
+            SimpleNamespace(
+                name="test",  # must match the engine's market:<platform> target
+                capabilities=None,
+                network_rule_engine=None,
+                create_write_gateway=lambda state, engine: self.gateway,
+            ),
+            self.coordinator,
+        )._check
 
     def tearDown(self) -> None:
         self.temp.cleanup()

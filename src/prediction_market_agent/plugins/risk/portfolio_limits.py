@@ -12,7 +12,7 @@ from prediction_market_agent.plugin_system.discovery import (
     PluginInitializationContext,
     PluginSpec,
 )
-from prediction_market_agent.core.risk import RiskRejected, RuleDecision
+from prediction_market_agent.core.risk import RuleDecision
 
 
 def _net_result(state: AccountState) -> float:
@@ -31,7 +31,7 @@ class PortfolioLimitSettings:
 
 class AccountLimitEngine:
     def __init__(self, platform: str, state: AccountState, settings: PortfolioLimitSettings):
-        self.target = f"account:{platform}"
+        self.target = f"market:{platform}"
         self.state = state
         self.settings = settings
         self.global_refresh: Callable[[], None] | None = None
@@ -41,33 +41,47 @@ class AccountLimitEngine:
         self.state.risk_metrics["net_result"] = _net_result(self.state)
 
     def evaluate(self, operation: str, context: dict[str, Any]) -> RuleDecision:
-        if operation == "BUY":
-            allowed = self.allowed_buy_notional(
-                float(context.get("requested", 0)),
-                float(context.get("current_position_value", 0)),
-                int(context.get("fee_bps", 0)),
-                str(context.get("token_id", "")),
-            )
-            if allowed <= 0:
-                return RuleDecision("REJECT", self.state.halt_reason or "No account budget", 0)
-            requested = float(context.get("requested", 0))
-            return RuleDecision(
-                "ALLOW" if allowed >= requested else "ADJUST",
-                "Configured account limits applied",
-                allowed,
-            )
+        """Answer as a business-risk engine, in market API terms.
+
+        This runs on `market:<platform>`, so `operation` is the API call being made and the verdict
+        can only be ALLOW, REJECT or HALT: by the time a call reaches the platform its size is fixed,
+        and sizing is answered earlier through `allowed_buy_notional`.
+        """
         self.refresh_halt()
-        return RuleDecision("HALT" if self.state.halted else "ALLOW", self.state.halt_reason)
+        increases_risk = (
+            operation == "place_order" and str(context.get("side", "")).upper() == "BUY"
+        ) or (
+            operation == "transfer" and str(context.get("direction", "")).upper() == "INBOUND"
+        )
+        if self.state.halted and increases_risk:
+            # A halt stops taking on more risk. It must not stop reads, cancels, redeems or sells:
+            # blocking those would break the scan loop and trap the position it is meant to protect.
+            return RuleDecision("HALT", self.state.halt_reason or "Trading halted")
+        if operation == "place_order" and str(context.get("side", "")).upper() == "BUY":
+            notional = float(context.get("notional", 0) or 0)
+            fee = notional * int(context.get("fee_bps", 0) or 0) / 10_000.0
+            token_id = str(context.get("token_id", ""))
+            position = self.state.positions.get(token_id)
+            violation = self._buy_violation(
+                notional, fee, position.market_value if position else 0.0, token_id
+            )
+            if violation:
+                return RuleDecision("REJECT", violation)
+        if operation == "transfer" and str(context.get("direction", "")).upper() == "INBOUND":
+            amount = float(context.get("amount", 0) or 0)
+            if (
+                self.state.equity + self.state.transferred_out + amount
+                > self.state.starting_capital
+            ):
+                return RuleDecision(
+                    "REJECT", "Inbound transfer exceeds this account's configured allocation"
+                )
+        return RuleDecision("ALLOW", "Configured account limits applied")
 
     def refresh_halt(self) -> None:
         self.refresh_metrics()
         if self.global_refresh is not None:
             self.global_refresh()
-
-    def require_risk_increase_allowed(self) -> None:
-        self.refresh_halt()
-        if self.state.halted:
-            raise RiskRejected(f"Trading halted: {self.state.halt_reason}")
 
     def _pending_buys(self, token_id: str) -> tuple[float, float, float]:
         orders = [
@@ -85,7 +99,12 @@ class AccountLimitEngine:
     def allowed_buy_notional(
         self, requested: float, current_value: float, fee_bps: int, token_id: str
     ) -> float:
-        self.require_risk_increase_allowed()
+        self.refresh_halt()
+        if self.state.halted:
+            # A sizing question answers with a number, never an exception: the action layer reads
+            # zero as "no budget" and records BUY_REJECTED. Raising here would surface a halt as a
+            # crash in the middle of a cycle instead.
+            return 0.0
         pending_notional, pending_debit, pending_same = self._pending_buys(token_id)
         allowed = max(
             0.0,
@@ -98,23 +117,20 @@ class AccountLimitEngine:
         )
         return allowed if allowed >= self.settings.min_order_notional else 0.0
 
-    def validate_buy_fill(
+    def _buy_violation(
         self, notional: float, fee: float, existing_value: float, token_id: str
-    ) -> None:
-        self.require_risk_increase_allowed()
+    ) -> str:
+        """The configured limit this buy would break, or an empty string if it breaks none."""
         pending_notional, pending_debit, pending_same = self._pending_buys(token_id)
         if notional < self.settings.min_order_notional:
-            raise RiskRejected("Order is below the configured minimum notional")
+            return "Order is below the configured minimum notional"
         if existing_value + pending_same + notional > self.settings.max_position + 1e-9:
-            raise RiskRejected("Configured per-position limit exceeded")
+            return "Configured per-position limit exceeded"
         if self.state.exposure + pending_notional + notional > self.settings.max_exposure + 1e-9:
-            raise RiskRejected("Configured total-exposure limit exceeded")
+            return "Configured total-exposure limit exceeded"
         if pending_debit + notional + fee > self.state.cash + 1e-9:
-            raise RiskRejected("Insufficient account cash")
-
-    def validate_inbound_transfer(self, amount: float) -> None:
-        if self.state.equity + self.state.transferred_out + amount > self.state.starting_capital:
-            raise RiskRejected("Inbound transfer exceeds this account's configured allocation")
+            return "Insufficient account cash"
+        return ""
 
     def manifest(self) -> dict[str, Any]:
         return {
@@ -128,7 +144,7 @@ class AccountLimitEngine:
 
 
 class GlobalLimitEngine:
-    target = "portfolio:global"
+    target = "market:*"
 
     def __init__(self, states: dict[str, AccountState], settings: PortfolioLimitSettings):
         self.states = states

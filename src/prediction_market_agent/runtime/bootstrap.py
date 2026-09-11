@@ -130,7 +130,10 @@ def bootstrap_engine(
                 state=state,
                 gateway=gateway,
             )
-            risk.register(gateway.risk)
+            if portfolio_contribution is not None:
+                # Only real filters join the chain. The neutral adapter refuses nothing, so adding
+                # it would put a no-op engine in the manifest next to checks that do something.
+                risk.register(gateway.risk)
 
         global_risk = (
             portfolio_contribution.create_global_engine(
@@ -139,7 +142,8 @@ def bootstrap_engine(
             if portfolio_contribution is not None
             else UnrestrictedGlobalRiskControl()
         )
-        risk.register(global_risk)
+        if portfolio_contribution is not None:
+            risk.register(global_risk)
         risk_services.update(
             {
                 "phase": "running",

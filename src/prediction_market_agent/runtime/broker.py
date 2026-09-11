@@ -5,7 +5,6 @@ from dataclasses import asdict, dataclass
 from typing import Callable, Any, Protocol
 
 from ..core.domain import AccountState, ExecutionOrder, ExecutionQuote, Position
-from ..core.risk import RiskRejected
 
 
 class ExecutionError(RuntimeError):
@@ -23,12 +22,17 @@ class WriteTransport(Protocol):
 
 
 class ExecutionRiskControl(Protocol):
-    """Account-scoped checks supplied by an enabled risk plugin."""
+    """Account state a risk plugin maintains, plus the sizing question asked before quoting.
+
+    Neither of these refuses anything. Refusal belongs to the business-risk chain, which the same
+    plugin joins as a `market:<platform>` engine, so it stacks with every other enabled plugin and
+    fails closed on error. What is left here is the part a chain verdict cannot express: keeping the
+    halt flag current, and answering how large a buy may be before a quote is requested.
+    """
 
     target: str
 
     def refresh_halt(self) -> None: ...
-    def require_risk_increase_allowed(self) -> None: ...
     def allowed_buy_notional(
         self,
         requested: float,
@@ -36,14 +40,6 @@ class ExecutionRiskControl(Protocol):
         fee_bps: int,
         token_id: str,
     ) -> float: ...
-    def validate_buy_fill(
-        self,
-        notional: float,
-        fee: float,
-        existing_position_value: float,
-        token_id: str,
-    ) -> None: ...
-    def validate_inbound_transfer(self, amount: float) -> None: ...
 
 
 @dataclass
@@ -72,12 +68,6 @@ class ExecutionGateway:
 
     def _now(self) -> int:
         return int(time.time() * 1000)
-
-    def _risk_check(self) -> None:
-        try:
-            self.risk.require_risk_increase_allowed()
-        except RiskRejected as error:
-            raise ExecutionError(str(error)) from error
 
     def mark(self, token_id: str, price: float) -> None:
         if not 0 <= price <= 1:
@@ -158,23 +148,13 @@ class ExecutionGateway:
             market_id=quote.market_id,
             notional=quote.notional,
             price=quote.price,
+            fee_bps=quote.fee_bps,
         )
-        self._risk_check()
         if quote.expires_at < self._now():
             raise ExecutionError("Platform quote expired")
         fee = quote.notional * quote.fee_bps / 10_000.0
         existing = self.state.positions.get(quote.token_id)
-        if quote.side == "BUY":
-            try:
-                self.risk.validate_buy_fill(
-                    quote.notional,
-                    fee,
-                    existing.market_value if existing else 0.0,
-                    quote.token_id,
-                )
-            except RiskRejected as error:
-                raise ExecutionError(str(error)) from error
-        else:
+        if quote.side != "BUY":
             pending_quantity = sum(
                 order.quantity
                 for order in self.state.orders
@@ -224,13 +204,6 @@ class ExecutionGateway:
         existing = self.state.positions.get(quote.token_id)
         if quote.side == "BUY":
             total_debit = order.notional + order.fee
-            existing_value = existing.market_value if existing else 0.0
-            try:
-                self.risk.validate_buy_fill(
-                    order.notional, order.fee, existing_value, quote.token_id
-                )
-            except RiskRejected as error:
-                raise ExecutionError(str(error)) from error
             self.state.cash -= total_debit
             if existing:
                 combined_cost = existing.cost_basis + order.notional
@@ -261,9 +234,10 @@ class ExecutionGateway:
             existing.mark_price = order.price
             if existing.quantity <= 1e-9:
                 del self.state.positions[quote.token_id]
-        self._risk_check_after_fill()
+        self._refresh_halt_state()
 
-    def _risk_check_after_fill(self) -> None:
+    def _refresh_halt_state(self) -> None:
+        """Recompute the halt flag after balances moved. This maintains state; it refuses nothing."""
         self.risk.refresh_halt()
 
     def cancel_orders(self, order_ids: list[str]) -> dict[str, Any]:
@@ -286,22 +260,16 @@ class ExecutionGateway:
         self.state.cash += payout
         self.state.realized_pnl += payout - basis
         del self.state.positions[token_id]
-        self._risk_check_after_fill()
+        self._refresh_halt_state()
         return result
 
     def transfer(self, direction: str, amount: float) -> dict[str, Any]:
         self._business_check("transfer", direction=direction, amount=amount)
         if amount <= 0:
             raise ExecutionError("Transfer amount must be positive")
-        if direction == "INBOUND":
-            try:
-                self.risk.validate_inbound_transfer(amount)
-            except RiskRejected as error:
-                raise ExecutionError(str(error)) from error
-        elif direction == "OUTBOUND":
-            if amount > self.state.cash:
-                raise ExecutionError("Insufficient cash")
-        else:
+        if direction == "OUTBOUND" and amount > self.state.cash:
+            raise ExecutionError("Insufficient cash")
+        if direction not in {"INBOUND", "OUTBOUND"}:
             raise ExecutionError("Direction must be INBOUND or OUTBOUND")
         result = self.write_transport.transfer(direction, str(amount))
         if direction == "INBOUND":
@@ -309,5 +277,5 @@ class ExecutionGateway:
         elif direction == "OUTBOUND":
             self.state.cash -= amount
             self.state.transferred_out += amount
-        self._risk_check_after_fill()
+        self._refresh_halt_state()
         return result
