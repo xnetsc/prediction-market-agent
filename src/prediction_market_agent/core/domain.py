@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import time
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, fields
 from typing import Any
 
 
@@ -72,9 +72,6 @@ class AccountState:
     orders: list[ExecutionOrder] = field(default_factory=list)
     realized_pnl: float = 0.0
     transferred_out: float = 0.0
-    halted: bool = False
-    halt_reason: str = ""
-    risk_metrics: dict[str, float] = field(default_factory=dict)
     created_at: int = field(default_factory=lambda: int(time.time() * 1000))
     updated_at: int = field(default_factory=lambda: int(time.time() * 1000))
 
@@ -96,7 +93,11 @@ class AccountState:
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "AccountState":
-        payload = dict(data)
+        # A state file on disk was written by whatever version was running then. Fields this
+        # class no longer carries are dropped rather than raising: refusing to load would strand
+        # the account - its cash, positions and orders - on an upgrade.
+        known = {field.name for field in fields(cls)}
+        payload = {key: value for key, value in data.items() if key in known}
         payload["positions"] = {
             key: Position(**value)
             for key, value in payload.get("positions", {}).items()

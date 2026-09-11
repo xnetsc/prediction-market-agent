@@ -10,6 +10,7 @@ from ..agent.decision import DecisionProviderError
 from ..agent.evolution import prompt_json_payload, render_overlay_block
 from ..agent.research import ResearchToolContext, ResearchToolbox
 from ..plugin_system.contracts import Market, OrderBook, Outcome, Topic, TopicDetail
+from .account_tool import AccountReadContribution
 from .bootstrap import PlatformRuntime
 from .broker import ExecutionError
 
@@ -151,7 +152,6 @@ class MarketEvaluationMixin:
             },
             "active_api_plugin": runtime.plugin.configuration_manifest(),
             "decision_strategy_plugin": prompt_json_payload(strategy_payload),
-            "execution_risk_manifest": runtime.gateway.risk.manifest(),
             "risk_rule_engines": self.risk.manifests(),
         }
         current_chars = len(json.dumps(current, ensure_ascii=False))
@@ -173,7 +173,9 @@ class MarketEvaluationMixin:
         )
 
         toolbox = ResearchToolbox(
-            self.research_contributions,
+            # The account readout is always present: a model asked to apply a stop it was given in
+            # its strategy text cannot do so if it is unable to see its own book.
+            [*self.research_contributions, AccountReadContribution(runtime.state)],
             ResearchToolContext(
                 client=runtime.plugin,
                 memory=self.memory,

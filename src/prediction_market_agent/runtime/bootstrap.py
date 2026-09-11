@@ -10,10 +10,7 @@ from ..agent.strategy import BuiltInDecisionStrategy
 from ..core.config import Config
 from ..core.domain import AccountState
 from ..core.risk import (
-    PortfolioRiskContribution,
     RiskCoordinator,
-    UnrestrictedExecutionRiskControl,
-    UnrestrictedGlobalRiskControl,
 )
 from ..core.state import StateStore
 from ..plugin_system.contracts import PredictionMarketApiPlugin, platform_state_path
@@ -41,7 +38,6 @@ class EngineComponents:
     risk: RiskCoordinator
     api_registry: ApiPluginRegistry
     platforms: dict[str, PlatformRuntime]
-    global_risk: Any
     provider: Any
     research_contributions: list[Any]
     discovery_strategy: Any
@@ -75,7 +71,6 @@ def bootstrap_engine(
             "api_names": tuple(plugin.name for plugin in plugins),
         }
         risk_products: list[tuple[str, Any]] = []
-        portfolio_contributions: list[Any] = []
         # Business risk and agent policy are separate categories because they answer different
         # questions about the same action: whether the money is within limits, and whether the
         # Agent was allowed to ask for it at all. Both register with the one coordinator, so a
@@ -91,24 +86,7 @@ def bootstrap_engine(
                     LOGGER.warning("optional %s plugin %s could not start: %s", kind, name, error)
                     continue
                 risk_products.append((name, created))
-                if isinstance(created, PortfolioRiskContribution):
-                    portfolio_contributions.append(created)
-        if len(portfolio_contributions) > 1:
-            raise ValueError(
-                "At most one enabled risk plugin may provide account allocation and "
-                "account/global execution risk controls"
-            )
 
-        portfolio_contribution = (
-            portfolio_contributions[0] if portfolio_contributions else None
-        )
-        allocations = (
-            portfolio_contribution.initial_allocations(
-                tuple(plugin.name for plugin in plugins)
-            )
-            if portfolio_contribution is not None
-            else {plugin.name: None for plugin in plugins}
-        )
         multiple = len(plugins) > 1
         platforms: dict[str, PlatformRuntime] = {}
         # Business risk applies to what the platform is asked to do, so the guard sits on the
@@ -116,34 +94,16 @@ def bootstrap_engine(
         # manually triggered cycles all go through the same door.
         for plugin in [GuardedMarketApi(item, risk) for item in plugins]:
             state_path = platform_state_path(config.state_file, plugin.name, multiple)
-            store = StateStore(state_path, allocations[plugin.name])
+            store = StateStore(state_path, None)
             state = store.load()
-            account_risk = (
-                portfolio_contribution.create_account_engine(plugin.name, state)
-                if portfolio_contribution is not None
-                else UnrestrictedExecutionRiskControl(plugin.name, state)
-            )
-            gateway = plugin.create_write_gateway(state, account_risk)
+            gateway = plugin.create_write_gateway(state)
             platforms[plugin.name] = PlatformRuntime(
                 plugin=plugin,
                 store=store,
                 state=state,
                 gateway=gateway,
             )
-            if portfolio_contribution is not None:
-                # Only real filters join the chain. The neutral adapter refuses nothing, so adding
-                # it would put a no-op engine in the manifest next to checks that do something.
-                risk.register(gateway.risk)
 
-        global_risk = (
-            portfolio_contribution.create_global_engine(
-                {name: item.state for name, item in platforms.items()}
-            )
-            if portfolio_contribution is not None
-            else UnrestrictedGlobalRiskControl()
-        )
-        if portfolio_contribution is not None:
-            risk.register(global_risk)
         risk_services.update(
             {
                 "phase": "running",
@@ -152,8 +112,6 @@ def bootstrap_engine(
             }
         )
         for _name, created in risk_products:
-            if created is portfolio_contribution:
-                continue
             engines = created if isinstance(created, (list, tuple)) else (created,)
             for engine in engines:
                 risk.register(engine)
@@ -164,7 +122,6 @@ def bootstrap_engine(
             risk=risk,
             api_registry=api_registry,
             platforms=platforms,
-            global_risk=global_risk,
             provider=make_provider(config, catalog),
             research_contributions=_optional_research(config, catalog),
             discovery_strategy=_discovery_strategy(config, catalog),

@@ -4,7 +4,7 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Protocol
 
-from ..runtime.broker import ExecutionGateway, ExecutionRiskControl
+from ..runtime.broker import ExecutionGateway
 from ..core.domain import AccountState
 
 
@@ -129,9 +129,7 @@ class PredictionMarketApiPlugin(Protocol):
         self, reference_symbol: str, interval: str = "1m", limit: int = 120
     ) -> list[Candle]: ...
 
-    def create_write_gateway(
-        self, state: AccountState, risk: ExecutionRiskControl
-    ) -> ExecutionGateway: ...
+    def create_write_gateway(self, state: AccountState) -> ExecutionGateway: ...
 
     def search_market_candidates(self, query: str, limit: int) -> list[MarketCandidate]: ...
 

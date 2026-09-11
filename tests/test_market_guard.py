@@ -35,7 +35,7 @@ class FakePlugin:
     def get_candles(self, reference_symbol, interval="1m", limit=120):
         return self._record("get_candles", [])
     def search_market_candidates(self, query, limit): return self._record("search", [])
-    def create_write_gateway(self, state, risk): return self.gateway
+    def create_write_gateway(self, state): return self.gateway
     def plugin_specific_extra(self, value): return self._record("extra", value)
 
 
@@ -98,7 +98,7 @@ class MarketGuardTests(unittest.TestCase):
         """
         guard = GuardedMarketApi(self.plugin, self._coordinator("ADJUST", value=10.0))
         with self.assertRaises(MarketActionRejected) as caught:
-            guard.create_write_gateway(object(), object()).business_risk(
+            guard.create_write_gateway(object()).business_risk(
                 "place_order", {"notional": 100}
             )
         self.assertIn("agent_policy", str(caught.exception), "say where reducing does work")
@@ -132,14 +132,14 @@ class MarketGuardTests(unittest.TestCase):
         self.assertEqual(self.rule.seen, [])
 
     def test_the_write_gateway_is_handed_the_same_check(self) -> None:
-        gateway = self.guard.create_write_gateway(object(), object())
+        gateway = self.guard.create_write_gateway(object())
         self.assertIs(gateway, self.plugin.gateway)
         gateway.business_risk("place_order", {"notional": 10})
         self.assertEqual([name for name, _ in self.rule.seen], ["place_order"])
 
     def test_a_write_refused_through_the_gateway_raises(self) -> None:
         guard = GuardedMarketApi(self.plugin, self._coordinator("REJECT"))
-        gateway = guard.create_write_gateway(object(), object())
+        gateway = guard.create_write_gateway(object())
         with self.assertRaises(MarketActionRejected):
             gateway.business_risk("transfer", {"amount": 5})
 

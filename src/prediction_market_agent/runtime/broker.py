@@ -21,33 +21,11 @@ class WriteTransport(Protocol):
     def transfer(self, direction: str, amount: str) -> dict[str, Any]: ...
 
 
-class ExecutionRiskControl(Protocol):
-    """Account state a risk plugin maintains, plus the sizing question asked before quoting.
-
-    Neither of these refuses anything. Refusal belongs to the business-risk chain, which the same
-    plugin joins as a `market:<platform>` engine, so it stacks with every other enabled plugin and
-    fails closed on error. What is left here is the part a chain verdict cannot express: keeping the
-    halt flag current, and answering how large a buy may be before a quote is requested.
-    """
-
-    target: str
-
-    def refresh_halt(self) -> None: ...
-    def allowed_buy_notional(
-        self,
-        requested: float,
-        current_position_value: float,
-        fee_bps: int,
-        token_id: str,
-    ) -> float: ...
-
-
 @dataclass
 class ExecutionGateway:
     """Common online order workflow backed by a plugin-owned transport."""
 
     state: AccountState
-    risk: ExecutionRiskControl
     platform: str
     write_transport: WriteTransport
     business_risk: Callable[[str, dict[str, Any]], Any] | None = None
@@ -75,18 +53,6 @@ class ExecutionGateway:
         position = self.state.positions.get(token_id)
         if position:
             position.mark_price = price
-        self.risk.refresh_halt()
-
-    def allowed_buy_notional(
-        self,
-        requested: float,
-        current_position_value: float,
-        fee_bps: int,
-        token_id: str,
-    ) -> float:
-        return self.risk.allowed_buy_notional(
-            requested, current_position_value, fee_bps, token_id
-        )
 
     def get_quote(
         self,
@@ -153,17 +119,6 @@ class ExecutionGateway:
         if quote.expires_at < self._now():
             raise ExecutionError("Platform quote expired")
         fee = quote.notional * quote.fee_bps / 10_000.0
-        existing = self.state.positions.get(quote.token_id)
-        if quote.side != "BUY":
-            pending_quantity = sum(
-                order.quantity
-                for order in self.state.orders
-                if order.status == "OPEN"
-                and order.side == "SELL"
-                and order.token_id == quote.token_id
-            )
-            if not existing or quote.quantity > existing.quantity - pending_quantity + 1e-9:
-                raise ExecutionError("Insufficient unreserved shares")
         response = self.write_transport.place_order(
             quote_id=quote.quote_id,
             order_type=quote.order_type,
@@ -224,21 +179,20 @@ class ExecutionGateway:
                 )
             self.state.realized_pnl -= order.fee
         else:
-            if not existing or order.quantity > existing.quantity + 1e-9:
-                raise ExecutionError("Insufficient shares")
             proceeds = order.notional - order.fee
-            basis = existing.average_price * order.quantity
             self.state.cash += proceeds
-            self.state.realized_pnl += proceeds - basis
-            existing.quantity -= order.quantity
-            existing.mark_price = order.price
-            if existing.quantity <= 1e-9:
-                del self.state.positions[quote.token_id]
-        self._refresh_halt_state()
-
-    def _refresh_halt_state(self) -> None:
-        """Recompute the halt flag after balances moved. This maintains state; it refuses nothing."""
-        self.risk.refresh_halt()
+            # Whether a sale was allowed without an open position is the platform's call, and this
+            # only runs once the platform accepted it. With nothing recorded to reduce there is no
+            # basis to realise, so book the proceeds and leave the position map untouched.
+            if existing is not None:
+                basis = existing.average_price * order.quantity
+                self.state.realized_pnl += proceeds - basis
+                existing.quantity -= order.quantity
+                existing.mark_price = order.price
+                if existing.quantity <= 1e-9:
+                    del self.state.positions[quote.token_id]
+            else:
+                self.state.realized_pnl += proceeds
 
     def cancel_orders(self, order_ids: list[str]) -> dict[str, Any]:
         self._business_check("cancel_orders", order_ids=list(order_ids))
@@ -252,23 +206,19 @@ class ExecutionGateway:
     def redeem(self, token_id: str, winning: bool) -> dict[str, Any]:
         self._business_check("redeem", token_id=token_id, winning=winning)
         position = self.state.positions.get(token_id)
-        if not position:
-            raise ExecutionError("No position to redeem")
         result = self.write_transport.redeem([token_id])
+        if position is None:
+            return result
         payout = position.quantity if winning else 0.0
-        basis = position.cost_basis
         self.state.cash += payout
-        self.state.realized_pnl += payout - basis
+        self.state.realized_pnl += payout - position.cost_basis
         del self.state.positions[token_id]
-        self._refresh_halt_state()
         return result
 
     def transfer(self, direction: str, amount: float) -> dict[str, Any]:
         self._business_check("transfer", direction=direction, amount=amount)
         if amount <= 0:
             raise ExecutionError("Transfer amount must be positive")
-        if direction == "OUTBOUND" and amount > self.state.cash:
-            raise ExecutionError("Insufficient cash")
         if direction not in {"INBOUND", "OUTBOUND"}:
             raise ExecutionError("Direction must be INBOUND or OUTBOUND")
         result = self.write_transport.transfer(direction, str(amount))
@@ -277,5 +227,4 @@ class ExecutionGateway:
         elif direction == "OUTBOUND":
             self.state.cash -= amount
             self.state.transferred_out += amount
-        self._refresh_halt_state()
         return result

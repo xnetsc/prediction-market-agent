@@ -191,6 +191,7 @@ class OnlyTwoLanesTests(unittest.TestCase):
             text = path.read_text(encoding="utf-8")
             declared.update(re.findall(r'target(?:_name)?\s*[:=]\s*(?:str\s*=\s*)?"([a-z]+):', text))
             declared.update(re.findall(r'target\s*=\s*f"([a-z]+):', text))
+            declared.update(re.findall(r'TARGET\s*=\s*"([a-z]+):', text))
         declared.discard("network")  # the plugin's own access surface, not a chain engine
         self.assertEqual(
             declared,
@@ -198,42 +199,27 @@ class OnlyTwoLanesTests(unittest.TestCase):
             "only agent:actions and market:<platform> are ever dispatched",
         )
 
-    def test_the_gateway_protocol_exposes_no_refusing_method(self) -> None:
-        """Refusal belongs to the chain; the account protocol may only maintain state and size."""
-        from prediction_market_agent.runtime.broker import ExecutionRiskControl
 
-        methods = {name for name in dir(ExecutionRiskControl) if not name.startswith("_")}
-        self.assertEqual(methods, {"refresh_halt", "allowed_buy_notional"})
+    def test_the_gateway_exposes_no_risk_hook_at_all(self) -> None:
+        """Execution books what happened; it holds no account-risk protocol to consult."""
+        import inspect
 
-    def test_a_halt_stops_taking_on_risk_without_stopping_anything_else(self) -> None:
-        from prediction_market_agent.core.domain import AccountState
-        from prediction_market_agent.plugins.risk.portfolio_limits import (
-            AccountLimitEngine,
-            PortfolioLimitSettings,
-        )
+        from prediction_market_agent.runtime import broker
 
-        state = AccountState(starting_capital=100.0, cash=100.0)
-        settings = PortfolioLimitSettings(100.0, 20.0, 30.0, 60.0, 1.0, {"binance": 100.0})
-        coordinator = RiskCoordinator()
-        coordinator.register(AccountLimitEngine("binance", state, settings))
-        state.halted, state.halt_reason = True, "loss limit reached"
+        self.assertFalse(hasattr(broker, "ExecutionRiskControl"))
+        fields = set(inspect.signature(broker.ExecutionGateway).parameters)
+        self.assertNotIn("risk", fields)
 
-        stopped = ("place_order", {"side": "BUY", "notional": 5, "fee_bps": 0, "token_id": "t"})
-        allowed = [
-            ("get_order_book", {}),
-            ("list_topics", {}),
-            ("cancel_orders", {}),
-            ("redeem", {}),
-            ("place_order", {"side": "SELL", "notional": 5, "token_id": "t"}),
-            ("transfer", {"direction": "OUTBOUND", "amount": 5}),
-        ]
-        self.assertEqual(
-            coordinator.evaluate("market:binance", *stopped).outcome, "HALT"
-        )
-        for operation, context in allowed:
-            with self.subTest(operation=operation, context=context):
-                self.assertEqual(
-                    coordinator.evaluate("market:binance", operation, context).outcome,
-                    "ALLOW",
-                    "a halt must not trap the position it protects",
-                )
+    def test_no_built_in_stop_loss_or_allocation_exists(self) -> None:
+        """Limits belong to a business-risk plugin or to the decision strategy, nowhere else."""
+        import pathlib
+
+        root = pathlib.Path(__file__).resolve().parents[1] / "src/prediction_market_agent"
+        self.assertFalse((root / "plugins" / "risk" / "portfolio_limits.py").exists())
+        banned = ("loss_limit", "max_position", "max_exposure", "initial_allocations",
+                  "allowed_buy_notional", "min_order_notional")
+        offenders = []
+        for path in root.rglob("*.py"):
+            text = path.read_text(encoding="utf-8")
+            offenders += [f"{path.name}:{name}" for name in banned if name in text]
+        self.assertEqual(offenders, [])

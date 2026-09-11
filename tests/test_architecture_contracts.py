@@ -224,7 +224,6 @@ class ArchitectureContractTests(unittest.TestCase):
             "custom_rules": "risk_custom_rules.json",
             "refuse_tool": "refuse_tool.json",
             "reject_operation": "reject_operation.json",
-            "portfolio_limits": "risk_portfolio_limits.json",
             "general_agent": "strategy_general_agent.json",
             "timezone_latency": "strategy_timezone_latency.json",
         }

@@ -163,7 +163,6 @@ def main() -> None:
                 "portfolio": {
                     "cash": None,
                     "equity": None,
-                    "risk_metrics": {},
                     "position": None,
                 },
                 "risk_manifests": {},

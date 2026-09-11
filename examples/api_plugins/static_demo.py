@@ -114,8 +114,8 @@ class StaticDemoPlugin:
         del reference_symbol, interval, limit
         return []
 
-    def create_write_gateway(self, state, risk):
-        return ExecutionGateway(state, risk, platform=self.name, write_transport=self._write_transport)
+    def create_write_gateway(self, state):
+        return ExecutionGateway(state, platform=self.name, write_transport=self._write_transport)
 
     def search_market_candidates(self, query, limit):
         if not query.strip() or limit <= 0:

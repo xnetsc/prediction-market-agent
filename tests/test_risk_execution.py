@@ -6,10 +6,6 @@ class RiskAndExecutionTests(unittest.TestCase):
         self.path = Path(self.temp.name) / "state.json"
         self.cfg = config(self.path)
         self.state = AccountState(starting_capital=80, cash=80)
-        settings = PortfolioLimitSettings(80, 7, 5.25, 20, 1.25, {"test": 80})
-        contribution = PortfolioLimitsContribution(settings)
-        risk = contribution.create_account_engine("test", self.state)
-        contribution.create_global_engine({"test": self.state})
         class RecordingTransport:
             def __init__(self):
                 self.calls = []
@@ -37,21 +33,36 @@ class RiskAndExecutionTests(unittest.TestCase):
                 return {"status": "COMPLETED", "direction": direction}
 
         self.transport = RecordingTransport()
-        # Wire the gateway the way bootstrap does: limits are enforced by the business-risk chain,
-        # so a gateway built without it is unguarded by design and would prove nothing here.
+        # Wire the gateway the way bootstrap does. The framework imposes no limits of its own, so
+        # anything that refuses here has to come from a business-risk plugin on the chain.
         self.coordinator = RiskCoordinator()
-        self.coordinator.register(risk)
         self.gateway = ExecutionGateway(
-            self.state, risk, platform="fake", write_transport=self.transport
+            self.state, platform="fake", write_transport=self.transport
         )
         self.gateway.business_risk = GuardedMarketApi(
             SimpleNamespace(
-                name="test",  # must match the engine's market:<platform> target
+                name="test",
                 capabilities=None,
-                create_write_gateway=lambda state, engine: self.gateway,
+                create_write_gateway=lambda state: self.gateway,
             ),
             self.coordinator,
         )._check
+
+    def refuse(self, outcome: str = "REJECT", **when) -> None:
+        """Put one business-risk rule on the chain, the only way anything can be refused now."""
+
+        class Rule:
+            target = "market:*"
+
+            def evaluate(inner, operation, context):
+                if all(str(context.get(k, "")).upper() == v for k, v in when.items()):
+                    return RuleDecision(outcome, "test rule refuses it")
+                return RuleDecision("ALLOW", "test rule allows it")
+
+            def manifest(inner):
+                return {}
+
+        self.coordinator.register(Rule())
 
     def tearDown(self) -> None:
         self.temp.cleanup()
@@ -70,22 +81,30 @@ class RiskAndExecutionTests(unittest.TestCase):
             order_type=order_type,
         )
 
-    def test_market_buy_calls_transport_and_respects_position_limit(self) -> None:
+    def test_market_buy_calls_transport_and_books_the_fill(self) -> None:
         order = self.gateway.place_order(self.quote("BUY", 0.5, 10), reason="test")
         self.assertEqual(order.status, "FILLED")
         self.assertAlmostEqual(self.state.cash, 74.9)
         self.assertEqual([item[0] for item in self.transport.calls[:2]], ["quote", "order"])
-        with self.assertRaises(ExecutionError):
-            self.gateway.place_order(self.quote("BUY", 0.5, 1))
 
-    def test_risk_plugin_net_result_stop_uses_profit_loss_difference(self) -> None:
+    def test_nothing_limits_a_buy_unless_a_business_risk_plugin_does(self) -> None:
+        """There is no built-in position cap; an unguarded run keeps buying until cash runs out."""
+        for _ in range(3):
+            self.gateway.place_order(self.quote("BUY", 0.5, 10))
+        self.assertEqual(len(self.transport.calls), 6)
+
+    def test_a_business_risk_plugin_is_what_stops_a_buy(self) -> None:
+        self.refuse(side="BUY")
+        with self.assertRaises(ExecutionError):
+            self.gateway.place_order(self.quote("BUY", 0.5, 10))
+        self.assertEqual([item[0] for item in self.transport.calls], ["quote"])
+
+    def test_a_loss_is_visible_in_the_books_without_anything_acting_on_it(self) -> None:
+        """No stop loss exists anywhere; the numbers are reported and someone else decides."""
         self.gateway.place_order(self.quote("BUY", 0.5, 10))
         self.gateway.mark("token-up", 0.0)
-        self.assertFalse(self.state.halted)
-        self.state.cash = 65.0
-        self.gateway.mark("token-up", 0.0)
-        self.assertTrue(self.state.halted)
-        self.assertLessEqual(self.state.risk_metrics["net_result"], -7)
+        net_result = self.state.equity + self.state.transferred_out - self.state.starting_capital
+        self.assertLess(net_result, 0)
 
     def test_limit_order_and_cancel_call_transport(self) -> None:
         order = self.gateway.place_order(self.quote("BUY", 0.4, 5, "LIMIT"))
@@ -94,22 +113,24 @@ class RiskAndExecutionTests(unittest.TestCase):
         self.assertEqual(result["canceled"], [order.order_id])
         self.assertEqual(order.status, "CANCELED")
 
-    def test_open_limit_orders_reserve_plugin_budget(self) -> None:
+    def test_open_limit_orders_are_recorded_without_reserving_any_budget(self) -> None:
         first = self.gateway.place_order(self.quote("BUY", 0.5, 10, "LIMIT"))
         self.assertEqual(first.status, "OPEN")
-        with self.assertRaises(ExecutionError):
-            self.gateway.place_order(self.quote("BUY", 0.5, 1, "LIMIT"))
+        second = self.gateway.place_order(self.quote("BUY", 0.5, 1, "LIMIT"))
+        self.assertEqual(second.status, "OPEN")
 
     def test_market_fill_preserves_metadata(self) -> None:
         self.gateway.place_order(self.quote("BUY", 0.55, 5, "MARKET"))
         self.assertEqual(self.state.positions["token-up"].market_topic_id, 1)
         self.assertEqual(self.state.positions["token-up"].symbol, "BTCUSDT")
 
-    def test_outbound_transfer_preserves_plugin_net_result(self) -> None:
-        before = self.state.risk_metrics["net_result"]
+    def test_outbound_transfer_leaves_the_net_result_unchanged(self) -> None:
+        """Moving money out is not a loss: it leaves cash and lands in transferred_out."""
+        net = lambda: self.state.equity + self.state.transferred_out - self.state.starting_capital
+        before = net()
         result = self.gateway.transfer("OUTBOUND", 8)
         self.assertEqual(result["status"], "COMPLETED")
-        self.assertAlmostEqual(self.state.risk_metrics["net_result"], before)
+        self.assertAlmostEqual(net(), before)
 
     def test_state_round_trip(self) -> None:
         self.gateway.place_order(self.quote("BUY", 0.5, 10))
@@ -173,9 +194,9 @@ class RiskAndExecutionTests(unittest.TestCase):
                 del reference_symbol, interval, limit
                 return []
 
-            def create_write_gateway(self, state, risk):
+            def create_write_gateway(self, state):
                 return ExecutionGateway(
-                    state, risk, platform=self.name, write_transport=FailingTransport()
+                    state, platform=self.name, write_transport=FailingTransport()
                 )
 
             def search_market_candidates(self, query, limit):
@@ -220,12 +241,9 @@ class RiskAndExecutionTests(unittest.TestCase):
                 state_file=root / "state.json",
                 session_db=root / "session.sqlite3",
                 market_api_plugins=("fake",),
-                risk_plugins=("test_portfolio", "test_action"),
+                agent_policy_plugins=("test_action",),
                 research_tool_plugins=(),
                 decision_strategy_name="general_agent",
-            )
-            contribution = PortfolioLimitsContribution(
-                PortfolioLimitSettings(80, 7, 5.25, 20, 1.25, {"fake": 80})
             )
             strategy_path = (
                 Path(__file__).parents[1]
@@ -244,13 +262,9 @@ class RiskAndExecutionTests(unittest.TestCase):
                         "Spec",
                         (),
                         {
-                            "factory": lambda self, config, services: (
-                                contribution
-                                if name == "test_portfolio"
-                                else AgentActionRuleEngine(
-                                    ("SEARCH_WEB",),
-                                    ("BUY", "SELL", "HOLD", "CANCEL"),
-                                )
+                            "factory": lambda self, config, services: AgentActionRuleEngine(
+                                ("SEARCH_WEB",),
+                                ("BUY", "SELL", "HOLD", "CANCEL"),
                             )
                         },
                     )()
