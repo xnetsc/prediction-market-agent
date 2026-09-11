@@ -9,7 +9,10 @@ from prediction_market_agent.agent.decision import (
     DecisionProviderError,
     FallbackDecisionProvider,
 )
+import time
+
 from prediction_market_agent.agent.provider_health import (
+    COOLDOWN_CEILING,
     COOLDOWN_SECONDS,
     ProviderHealthRegistry,
     classify_error,
@@ -113,7 +116,8 @@ class FailoverTests(unittest.TestCase):
         )
         self.assertEqual(healthy.calls, 2)
 
-    def test_a_recovered_provider_returns_to_service(self) -> None:
+    def test_a_provider_that_has_not_proved_itself_does_not_get_the_decision(self) -> None:
+        """A lapsed cooldown says the window may have reopened, not that the provider works."""
         recovering = StubProvider("recovering", "HTTP 429 rate limit")
         healthy = StubProvider("healthy")
         provider = self._provider(recovering, healthy)
@@ -123,8 +127,60 @@ class FailoverTests(unittest.TestCase):
         provider.health.state("recovering").cooldown_until = 0.0
         result = provider.run({}, schema={}, schema_name="s", mission="m")
         self.assertEqual(
-            result.provider, "recovering", "recovery must put it back at the front"
+            result.provider, "healthy", "an unproved provider must not be tried on a decision"
         )
+        self.assertTrue(provider.health.state("recovering").probation)
+
+    def test_an_out_of_band_probe_is_what_brings_it_back(self) -> None:
+        recovering = StubProvider("recovering", "HTTP 429 rate limit")
+        healthy = StubProvider("healthy")
+        provider = self._provider(recovering, healthy)
+        provider.run({}, schema={}, schema_name="s", mission="m")
+
+        with tempfile.TemporaryDirectory() as directory:
+            memory = SessionMemory(Path(directory) / "session.sqlite3")
+            self.addCleanup(memory.close)
+            quality = ProviderQuality(memory=memory, provider=provider)
+
+            self.assertEqual(quality.probe_recovering(), {}, "still cooling: no probe yet")
+            provider.health.state("recovering").cooldown_until = 0.0
+            recovering.error = None
+            self.assertEqual(quality.probe_recovering(), {"recovering": "recovered"})
+            self.assertFalse(provider.health.state("recovering").probation)
+
+        result = provider.run({}, schema={}, schema_name="s", mission="m")
+        self.assertEqual(result.provider, "recovering", "a proved provider returns to the front")
+
+    def test_a_probe_that_fails_again_extends_the_cooldown(self) -> None:
+        stuck = StubProvider("stuck", "HTTP 429 rate limit")
+        provider = self._provider(stuck, StubProvider("healthy"))
+        provider.run({}, schema={}, schema_name="s", mission="m")
+        provider.health.state("stuck").cooldown_until = 0.0
+        with tempfile.TemporaryDirectory() as directory:
+            memory = SessionMemory(Path(directory) / "session.sqlite3")
+            self.addCleanup(memory.close)
+            result = ProviderQuality(memory=memory, provider=provider).probe_recovering()
+        self.assertEqual(result, {"stuck": "rate_limit"})
+        self.assertFalse(provider.health.state("stuck").available_at(time.time()))
+
+    def test_no_provider_is_sidelined_for_longer_than_the_ceiling(self) -> None:
+        """A stated reset date is a guess about entitlement, which the operator can change."""
+        registry = ProviderHealthRegistry(("a",))
+        for _ in range(12):
+            registry.record_failure("a", "You've hit your usage limit; try again Sep 15th")
+        remaining = registry.state("a").cooldown_until - time.time()
+        self.assertLessEqual(remaining, COOLDOWN_CEILING + 1)
+        self.assertEqual(registry.state("a").last_error_kind, "rate_limit")
+
+    def test_the_operator_can_put_a_provider_back_in_line_at_once(self) -> None:
+        registry = ProviderHealthRegistry(("a", "b"))
+        registry.record_failure("a", "429 rate limit")
+        registry.record_failure("b", "429 rate limit")
+        self.assertEqual(registry.recheck("a"), ["a"])
+        self.assertTrue(registry.state("a").available_at(time.time()))
+        self.assertFalse(registry.state("b").available_at(time.time()))
+        self.assertEqual(sorted(registry.recheck()), ["a", "b"])
+        self.assertTrue(registry.state("b").available_at(time.time()))
 
     def test_health_manifest_reports_why_a_provider_is_out(self) -> None:
         provider = self._provider(

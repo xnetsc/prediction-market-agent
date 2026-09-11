@@ -272,6 +272,20 @@ class RobotRuntimeManager:
                     platform["running"] = False
                 return self.status()
 
+    def recheck_providers(self, name: str = "") -> dict[str, Any]:
+        """Put cooled-down decision providers back in line immediately.
+
+        Quota and entitlement change without telling the runtime. The operator is the one who knows
+        a plan changed or credits were bought, so this exists for them to say so.
+        """
+        with self._lock:
+            engine = self._engine
+        if engine is None:
+            raise ValueError("机器人未运行，没有可重新检测的模型服务")
+        cleared = engine.provider.health.recheck(name.strip())
+        probed = engine.provider_quality.probe_recovering()
+        return {"cleared": cleared, "probed": probed, "health": engine.provider_quality.manifest()}
+
     def export_strategies(self, lane: str = "") -> dict[str, Any]:
         """Report what the discovery and decision strategies currently send to the model."""
         from .strategy_export import export_strategies

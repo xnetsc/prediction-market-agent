@@ -45,6 +45,17 @@ REVIEW_MISSION = (
     "on numbers that are not in the inputs scores low on grounded regardless of how it reads."
 )
 
+LIVENESS_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "additionalProperties": False,
+    "properties": {"ok": {"type": "boolean"}},
+    "required": ["ok"],
+}
+
+LIVENESS_MISSION = (
+    "Answer with ok set to true. This is a liveness check for the runtime, not a task."
+)
+
 MINIMUM_SAMPLE = 10
 """Observations a component needs before it moves a provider's score off neutral."""
 
@@ -193,8 +204,64 @@ class ProviderQuality:
             graded += 1
         return graded
 
+    def probe_recovering(self) -> dict[str, str]:
+        """Check providers that have not proved themselves since their last failure.
+
+        This runs away from the decision path on purpose. A refusal can be slow - a client may
+        spend half a minute retrying its own transport before reporting it - and a decision should
+        never wait on a provider that is only being tested. Entitlement also changes out of band:
+        a plan changes, credits are bought, an account is swapped, and none of that announces
+        itself, so a provider is retried on a bounded schedule rather than on what it said its
+        limit was.
+        """
+        health = getattr(self.provider, "health", None)
+        backends = {item.name: item for item in getattr(self.provider, "providers", []) or []}
+        if health is None or not backends:
+            return {}
+        results: dict[str, str] = {}
+        for name in health.due_for_probe(tuple(backends)):
+            health.record_probe(name)
+            # Both questions this probe asks - is the session still valid, is there quota left -
+            # are ones the client can answer for free. Spending a request to discover whether
+            # requests are still possible is the expensive way to learn it, and tells you nothing
+            # at all once the account is already exhausted.
+            entitlement = getattr(backends[name], "entitlement", None)
+            answer = entitlement() if callable(entitlement) else None
+            if answer is False:
+                results[name] = health.record_failure(
+                    name, "client reports no usable quota or session"
+                )
+                continue
+            if answer is True:
+                health.record_success(name)
+                results[name] = "recovered"
+                LOGGER.info("decision provider %s reports it can serve requests again", name)
+                continue
+            started = time.monotonic()
+            try:
+                backends[name].run(
+                    {},
+                    schema=LIVENESS_SCHEMA,
+                    schema_name="liveness",
+                    mission=LIVENESS_MISSION,
+                    final_step_name="LIVENESS",
+                )
+            except DecisionProviderError as error:
+                results[name] = health.record_failure(name, str(error))
+            except Exception as error:  # a client that cannot even start is still a failure
+                results[name] = health.record_failure(name, str(error))
+            else:
+                health.record_success(name, latency_seconds=time.monotonic() - started)
+                results[name] = "recovered"
+                LOGGER.info("decision provider %s is answering again", name)
+        return results
+
     def review(self, *, cross_evaluate: bool = False, sample: int = 2) -> dict[str, Any]:
         """Refresh measured quality and publish it as the provider ranking weights."""
+        try:
+            self.probe_recovering()
+        except Exception:
+            LOGGER.exception("provider liveness probe failed; keeping the current health view")
         if cross_evaluate:
             try:
                 self.cross_evaluate(sample=sample)
