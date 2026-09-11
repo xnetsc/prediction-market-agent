@@ -9,17 +9,15 @@ import urllib.parse
 import urllib.request
 from typing import Any
 
-from prediction_market_agent.core.risk import NetworkWriteGate
 
 
 class BinancePredictionReadClient:
     """Binance-specific signed and public read transport."""
 
-    def __init__(self, api_key: str, api_secret: str, base_url: str, gate: NetworkWriteGate, http_proxy: str = ""):
+    def __init__(self, api_key: str, api_secret: str, base_url: str, http_proxy: str = ""):
         self.api_key = api_key
         self._api_secret = api_secret.encode("utf-8")
         self.base_url = base_url.rstrip("/")
-        self.gate = gate
         self._time_offset_ms = 0
         handler = urllib.request.ProxyHandler({"http": http_proxy, "https": http_proxy}) if http_proxy else urllib.request.ProxyHandler({})
         self._opener = urllib.request.build_opener(handler)
@@ -38,7 +36,6 @@ class BinancePredictionReadClient:
         url = f"{self.base_url}{path}"
         if query:
             url = f"{url}?{query}"
-        self.gate.check("GET", url)
         request = urllib.request.Request(url=url, headers=headers, method="GET")
         try:
             with self._opener.open(request, timeout=15) as response:

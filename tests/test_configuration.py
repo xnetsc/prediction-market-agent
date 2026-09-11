@@ -2,53 +2,6 @@ import json
 
 from ._support import *
 
-class NetworkGateTests(unittest.TestCase):
-    def test_get_allowlist(self) -> None:
-        gate = configured_read_gate()
-        gate.check("GET", "https://api.binance.com/api/v3/time")
-
-    def test_blocks_every_network_write(self) -> None:
-        gate = configured_read_gate()
-        with self.assertRaises(NetworkGateError):
-            gate.check("POST", "https://api.binance.com/api/v3/time")
-
-    def test_blocks_unlisted_path_even_with_get(self) -> None:
-        gate = configured_read_gate()
-        with self.assertRaises(NetworkGateError):
-            gate.check(
-                "GET",
-                "https://api.binance.com/sapi/v1/w3w/wallet/prediction/trade/place-order-bundle",
-            )
-
-    def test_network_policy_is_data_driven(self) -> None:
-        gate = NetworkWriteGate(
-            allowed_hosts=frozenset({"example.test"}),
-            allowed_schemes=frozenset({"https"}),
-            allowed_methods=frozenset({"POST"}),
-            allowed_read_paths=frozenset({"/configured"}),
-            target_name="network:test",
-        )
-        gate.check("POST", "https://example.test/configured")
-        with self.assertRaises(NetworkGateError):
-            gate.check("GET", "https://example.test/configured")
-
-    def test_method_specific_glob_paths(self) -> None:
-        gate = NetworkWriteGate(
-            allowed_hosts=frozenset({"example.test"}),
-            allowed_schemes=frozenset({"https"}),
-            allowed_methods=frozenset({"GET", "POST"}),
-            allowed_read_paths=frozenset(),
-            allowed_paths_by_method={
-                "GET": frozenset({"/events/*"}),
-                "POST": frozenset({"/order"}),
-            },
-        )
-        gate.check("GET", "https://example.test/events/123")
-        gate.check("POST", "https://example.test/order")
-        with self.assertRaises(NetworkGateError):
-            gate.check("POST", "https://example.test/events/123")
-
-
 class ConfigurationTests(unittest.TestCase):
     def test_platform_credentials_are_plugin_private_and_manifests_are_redacted(self) -> None:
         common = Config()

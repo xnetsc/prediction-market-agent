@@ -1,17 +1,8 @@
 from __future__ import annotations
 
 import fnmatch
-import urllib.parse
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any, Protocol, runtime_checkable
-
-class NetworkGateError(RuntimeError):
-    """A request did not match the endpoints an API plugin declared it talks to.
-
-    Deliberately not a risk-rule error: the two filter categories answer with a RuleDecision on the
-    chain, while this is one plugin's own HTTP client refusing a URL it never declared.
-    """
-
 
 @dataclass(frozen=True)
 class RuleDecision:
@@ -35,56 +26,6 @@ class PortfolioRiskContribution(Protocol):
     def initial_allocations(self, platforms: tuple[str, ...]) -> dict[str, float]: ...
     def create_account_engine(self, platform: str, state: Any) -> TargetRuleEngine: ...
     def create_global_engine(self, states: dict[str, Any]) -> TargetRuleEngine: ...
-
-
-@dataclass(frozen=True)
-class NetworkWriteGate:
-    allowed_hosts: frozenset[str]
-    allowed_schemes: frozenset[str]
-    allowed_methods: frozenset[str]
-    allowed_read_paths: frozenset[str]
-    allowed_paths_by_method: dict[str, frozenset[str]] = field(default_factory=dict)
-    target_name: str = ""
-
-    """The endpoints one API plugin declares it talks to, enforced inside that plugin's HTTP client.
-
-    This is not a filter category and does not join the risk chain: an operator cannot enable,
-    order or stack it, and it judges URLs rather than actions. It is the plugin stating its own
-    access surface, which also catches a mistyped base URL before a request leaves the process.
-    """
-
-    @property
-    def name(self) -> str:
-        return self.target_name or "network:" + ",".join(sorted(self.allowed_hosts))
-
-    def manifest(self) -> dict[str, Any]:
-        return {
-            "declared_by": self.name,
-            "allowed_methods": sorted(self.allowed_methods),
-            "allowed_schemes": sorted(self.allowed_schemes),
-            "allowed_hosts": sorted(self.allowed_hosts),
-            "allowed_read_paths": sorted(self.allowed_read_paths),
-            "allowed_paths_by_method": {
-                method: sorted(paths)
-                for method, paths in sorted(self.allowed_paths_by_method.items())
-            },
-            "policy": "CONFIGURED_ALLOWLIST",
-        }
-
-    def check(self, method: str, url: str) -> None:
-        parsed = urllib.parse.urlparse(url)
-        normalized_method = method.upper()
-        if normalized_method not in self.allowed_methods:
-            raise NetworkGateError(f"Method is not allowed by network rules: {normalized_method}")
-        if parsed.scheme not in self.allowed_schemes or parsed.hostname not in self.allowed_hosts:
-            raise NetworkGateError(f"Host is not allowed: {parsed.scheme}://{parsed.hostname}")
-        patterns = self.allowed_paths_by_method.get(
-            normalized_method, self.allowed_read_paths
-        )
-        if not any(fnmatch.fnmatchcase(parsed.path, pattern) for pattern in patterns):
-            raise NetworkGateError(
-                f"Endpoint is not on the configured path allowlist: {parsed.path}"
-            )
 
 
 _OUTCOMES = frozenset({"ALLOW", "ADJUST", "REJECT", "HALT"})

@@ -262,7 +262,6 @@ class RuntimeManagerTests(unittest.TestCase):
     def test_provider_and_one_platform_are_sufficient_without_optional_plugins(self) -> None:
         class Platform:
             name = "platform"
-            network_rule_engine = SimpleNamespace(target="network:platform")
 
             def create_write_gateway(self, state, risk):
                 self.received_risk = risk

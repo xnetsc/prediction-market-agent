@@ -23,7 +23,7 @@ API 插件还提供两组互补能力：标准业务接口供通用框架随时�
 
 插件读取 Prediction 主题、详情、盘口和 Spot 参考 K 线；写端实现 quote、BUY、SELL、CANCEL、
 REDEEM、TRANSFER_IN、TRANSFER_OUT。私有 JSON 拥有 REST URL、Key/Secret、预测钱包信息、资金
-账户、滑点、代理和网络规则。插件不会用本地“参数不齐”预检代替服务器验证；配置会原样进入签名请求，
+账户、滑点和代理。插件不会用本地“参数不齐”预检代替服务器验证；配置会原样进入签名请求，
 服务器拒绝会记录为执行错误。
 
 代理字段默认 `INHERIT`，使用程序设置中的统一代理；改成 `DIRECT` 或完整 HTTP(S) URL 只覆盖 Binance。
@@ -43,7 +43,7 @@ wallet address/id 齐全；直接集成测试不走该 readiness 门，因此仍
 - pUSD OUTBOUND 转账。
 
 私有 JSON 拥有所有端点、链、钱包私钥、CLOB L2、funder、用户/Builder Relayer、Builder Code、转出
-地址、代理和网络规则。当前适配器不能可靠判定 winner，因此能力清单明确把 `settlement_status` 设为
+地址和代理。当前适配器不能可靠判定 winner，因此能力清单明确把 `settlement_status` 设为
 false；这不是占位成功值。
 
 代理字段默认 `INHERIT`，使用程序设置中的统一代理；改成 `DIRECT` 或完整 HTTP(S) URL 只覆盖 Polymarket。

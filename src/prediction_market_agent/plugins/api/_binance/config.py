@@ -1,28 +1,10 @@
 from __future__ import annotations
 
-import json
 from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
 
 from prediction_market_agent.plugin_system.config_io import resolve_plugin_proxy
-
-
-def _network_rules(raw: str, field: str) -> dict[str, Any]:
-    try:
-        value = json.loads(raw)
-    except json.JSONDecodeError as error:
-        raise ValueError(f"{field} must be valid JSON") from error
-    if not isinstance(value, dict):
-        raise ValueError(f"{field} must be a JSON object")
-    for name in ("schemes", "hosts", "methods", "paths_by_method"):
-        if name not in value:
-            raise ValueError(f"{field} is missing {name}")
-    if not all(isinstance(value[name], list) for name in ("schemes", "hosts", "methods")):
-        raise ValueError(f"{field} schemes, hosts, and methods must be arrays")
-    if not isinstance(value["paths_by_method"], dict):
-        raise ValueError(f"{field} paths_by_method must be an object")
-    return value
 
 
 @dataclass(frozen=True)
@@ -35,7 +17,6 @@ class BinancePluginConfig:
     account_type: str
     slippage_bps: int
     http_proxy: str
-    network_rules: dict[str, Any]
     scan_interval_seconds: int
     error_backoff_seconds: int
     error_backoff_max_seconds: int
@@ -56,9 +37,6 @@ class BinancePluginConfig:
             slippage_bps=int(get("BINANCE_PREDICTION_SLIPPAGE_BPS", "0")),
             http_proxy=resolve_plugin_proxy(
                 get("BINANCE_HTTP_PROXY", ""), field_name="BINANCE_HTTP_PROXY"
-            ),
-            network_rules=_network_rules(
-                get("BINANCE_NETWORK_RULES_JSON", ""), "BINANCE_NETWORK_RULES_JSON"
             ),
             scan_interval_seconds=int(get("BINANCE_SCAN_INTERVAL_SECONDS", "60")),
             error_backoff_seconds=int(get("BINANCE_ERROR_BACKOFF_SECONDS", "30")),
@@ -102,7 +80,6 @@ class BinancePluginConfig:
             "account_type": self.account_type,
             "slippage_bps": self.slippage_bps,
             "http_proxy": self.http_proxy or "DIRECT",
-            "network_rules": self.network_rules,
             "runtime": {
                 "scan_interval_seconds": self.scan_interval_seconds,
                 "error_backoff_seconds": self.error_backoff_seconds,

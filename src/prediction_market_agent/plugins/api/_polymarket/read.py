@@ -6,19 +6,15 @@ import urllib.parse
 import urllib.request
 from typing import Any
 
-from prediction_market_agent.core.risk import NetworkWriteGate
 from .config import PolymarketPluginConfig
 
 
 class PolymarketReadClient:
-    """Public Gamma and CLOB V2 reader with every request checked by the risk gate."""
+    """Public Gamma and CLOB V2 reader."""
 
-    def __init__(
-        self, settings: PolymarketPluginConfig, gate: NetworkWriteGate
-    ):
+    def __init__(self, settings: PolymarketPluginConfig):
         self.gamma_url = settings.gamma_url.rstrip("/")
         self.clob_url = settings.clob_url.rstrip("/")
-        self.gate = gate
         handler = (
             urllib.request.ProxyHandler({"http": settings.http_proxy, "https": settings.http_proxy})
             if settings.http_proxy
@@ -31,7 +27,6 @@ class PolymarketReadClient:
             [(key, value) for key, value in (params or {}).items() if value is not None]
         )
         url = f"{base}{path}" + (f"?{query}" if query else "")
-        self.gate.check("GET", url)
         request = urllib.request.Request(
             url,
             headers={"Accept": "application/json", "User-Agent": "prediction-market-agent/0.5"},

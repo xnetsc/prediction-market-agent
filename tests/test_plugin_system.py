@@ -21,7 +21,6 @@ from prediction_market_agent.plugin_system.discovery import (
 )
 from prediction_market_agent.plugins.api._polymarket.config import PolymarketPluginConfig
 from prediction_market_agent.plugins.api._polymarket.write import PolymarketWriteTransport
-from prediction_market_agent.core.risk import NetworkWriteGate
 from prediction_market_agent.plugin_system.config import PluginDirectoryConfig
 
 
@@ -364,7 +363,6 @@ class PluginSystemTests(unittest.TestCase):
                 "POLYMARKET_RPC_URL": "https://polygon.drpc.org",
                 "POLYMARKET_CHAIN_ID": "137",
                 "POLYMARKET_HTTP_PROXY": "DIRECT",
-                "POLYMARKET_NETWORK_RULES_JSON": '{"schemes":["https"],"hosts":["clob.polymarket.com"],"methods":["GET","POST","DELETE"],"paths_by_method":{"GET":["/*"],"POST":["/*"],"DELETE":["/*"]}}',
                 "POLYMARKET_PRIVATE_KEY": "unused-by-mock",
                 "POLYMARKET_API_KEY": "key",
                 "POLYMARKET_API_SECRET": "secret",
@@ -373,13 +371,7 @@ class PluginSystemTests(unittest.TestCase):
                 "POLYMARKET_TRANSFER_RECIPIENT": "0x" + "4" * 40,
             }
         )
-        gate = NetworkWriteGate(
-            allowed_hosts=frozenset(),
-            allowed_schemes=frozenset(),
-            allowed_methods=frozenset(),
-            allowed_read_paths=frozenset(),
-        )
-        transport = PolymarketWriteTransport(settings, gate)
+        transport = PolymarketWriteTransport(settings)
         client = _PolymarketClient()
         transport._client = client
         quote = transport.get_quote(
@@ -409,6 +401,48 @@ class PluginSystemTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class RetiredFieldTests(unittest.TestCase):
+    """A field a plugin removed must not take the plugin down on upgrade."""
+
+    def _configuration(self, stored: dict, retired: tuple[str, ...]):
+        return PluginConfiguration(
+            fields=(PluginConfigField("KEPT", "Kept", "string", "still in use", default=""),),
+            load_callback=lambda: dict(stored),
+            save_callback=lambda values: None,
+            delete_callback=lambda: None,
+            storage={"kind": "json_file", "location": "/tmp/x.json"},
+            retired_fields=retired,
+        )
+
+    def test_a_value_left_over_from_a_removed_field_is_ignored(self) -> None:
+        stored = {"KEPT": "yes", "GONE": "old value"}
+        configuration = self._configuration(stored, ("GONE",))
+        self.assertEqual(configuration.load()["KEPT"], "yes")
+        self.assertNotIn("GONE", configuration.load())
+        self.assertTrue(configuration.manifest()["fields"])
+
+    def test_an_unrecognised_field_is_still_an_error(self) -> None:
+        """A typo silently ignored is a setting the operator believes is in force when it is not."""
+        configuration = self._configuration({"KEPT": "yes", "TYPO": "x"}, ("GONE",))
+        with self.assertRaisesRegex(ValueError, "TYPO"):
+            configuration.load()
+
+    def test_the_shipped_api_plugins_retire_the_network_rules_field(self) -> None:
+        """Saved configs in the wild still carry it; loading must not fail on them."""
+        from prediction_market_agent.plugin_system.discovery import load_plugin_catalog
+
+        catalog = load_plugin_catalog(Config.load())
+        try:
+            for name in ("binance", "polymarket"):
+                with self.subTest(plugin=name):
+                    spec = catalog.get("api", name)
+                    self.assertIn(
+                        f"{name.upper()}_NETWORK_RULES_JSON", spec.configuration.retired_fields
+                    )
+        finally:
+            catalog.shutdown()
 
 
 class CatalogCoverageTests(unittest.TestCase):

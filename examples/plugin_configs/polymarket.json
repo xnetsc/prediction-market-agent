@@ -12,7 +12,6 @@
   "POLYMARKET_FUNDER_ADDRESS": "<POLYMARKET_FUNDER_ADDRESS>",
   "POLYMARKET_GAMMA_URL": "https://gamma-api.polymarket.com",
   "POLYMARKET_HTTP_PROXY": "INHERIT",
-  "POLYMARKET_NETWORK_RULES_JSON": "{\"schemes\":[\"https\"],\"hosts\":[\"gamma-api.polymarket.com\",\"clob.polymarket.com\",\"data-api.polymarket.com\",\"relayer-v2.polymarket.com\",\"polygon.drpc.org\"],\"methods\":[\"GET\",\"POST\",\"DELETE\"],\"paths_by_method\":{\"GET\":[\"/events\",\"/events/*\",\"/book\",\"/prices-history\",\"/time\",\"/tick-size\",\"/neg-risk\",\"/version\",\"/positions\",\"/balance-allowance\",\"/balance-allowance/update\",\"/deployed\",\"/relay-payload\",\"/v1/account/transactions/params\",\"/v1/account/transactions/*\",\"/markets/*\",\"/clob-markets/*\"],\"POST\":[\"/\",\"/order\",\"/submit\"],\"DELETE\":[\"/order\",\"/orders\"]}}",
   "POLYMARKET_SCAN_INTERVAL_SECONDS": 60,
   "POLYMARKET_ERROR_BACKOFF_SECONDS": 30,
   "POLYMARKET_ERROR_BACKOFF_MAX_SECONDS": 900,

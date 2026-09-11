@@ -6,7 +6,6 @@ from typing import Any, Protocol
 
 from ..runtime.broker import ExecutionGateway, ExecutionRiskControl
 from ..core.domain import AccountState
-from ..core.risk import NetworkWriteGate
 
 
 @dataclass(frozen=True)
@@ -117,7 +116,6 @@ class PredictionMarketApiPlugin(Protocol):
 
     name: str
     capabilities: ApiCapabilities
-    network_rule_engine: NetworkWriteGate
 
     def sync_time(self) -> None: ...
 

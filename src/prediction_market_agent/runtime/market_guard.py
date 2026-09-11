@@ -54,10 +54,6 @@ class GuardedMarketApi:
     def capabilities(self) -> Any:
         return self._plugin.capabilities
 
-    @property
-    def network_rule_engine(self) -> Any:
-        return self._plugin.network_rule_engine
-
     def __getattr__(self, item: str) -> Any:
         return getattr(self._plugin, item)
 

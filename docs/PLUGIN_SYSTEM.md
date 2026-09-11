@@ -111,7 +111,7 @@ PluginConfigField("EFFORT", "推理强度", "string", "选择当前模型支持�
 `DiagnosticNetworkRoute(label, proxy, no_proxy)` 元组，不携带业务请求头、不创建交易实例；
 字段解析仍由插件负责。未启用插件不会为查询而初始化。完整契约与例子见 [环境诊断](ENVIRONMENT.md#插件扩展契约)。
 
-- `examples/api_plugins/static_demo.py`：标准化读取、私有 JSON、线上 HTTP 写传输、网络规则和卸载。
+- `examples/api_plugins/static_demo.py`：标准化读取、私有 JSON、线上 HTTP 写传输和卸载。
 - `examples/decision_provider_plugins/static_provider.py`：严格 schema 的结构化 Provider。
 - `examples/decision_strategy_plugins/example_strategy.py`：策略文本和私有候选筛选。
 - `examples/research_tool_plugins/static_evidence.py`：动态加入 Agent 控制 schema 的工具。

@@ -19,7 +19,6 @@ from prediction_market_agent.runtime.market_guard import (
 class FakePlugin:
     name = "binance"
     capabilities = ("read", "write")
-    network_rule_engine = object()
 
     def __init__(self) -> None:
         self.calls: list[str] = []
@@ -126,7 +125,6 @@ class MarketGuardTests(unittest.TestCase):
     def test_the_framework_still_sees_the_plugin_identity_through_the_guard(self) -> None:
         self.assertEqual(self.guard.name, "binance")
         self.assertEqual(self.guard.capabilities, ("read", "write"))
-        self.assertIs(self.guard.network_rule_engine, self.plugin.network_rule_engine)
 
     def test_methods_beyond_the_contract_pass_through_ungated(self) -> None:
         """A plugin offering more than the contract keeps working; this layer just does not gate it."""

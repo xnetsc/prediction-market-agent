@@ -38,8 +38,6 @@ from prediction_market_agent.plugin_system.contracts import (
     TopicPage,
 )
 from prediction_market_agent.core.risk import (
-    NetworkGateError,
-    NetworkWriteGate,
     RiskCoordinator,
 )
 from prediction_market_agent.runtime.market_guard import GuardedMarketApi, MarketActionRejected
@@ -72,7 +70,6 @@ BINANCE_ENV = {
     "BINANCE_PREDICTION_ACCOUNT_TYPE": "SPOT",
     "BINANCE_PREDICTION_SLIPPAGE_BPS": "100",
     "BINANCE_HTTP_PROXY": "DIRECT",
-    "BINANCE_NETWORK_RULES_JSON": '{"schemes":["https"],"hosts":["api.binance.com"],"methods":["GET","POST"],"paths_by_method":{"GET":["/*"],"POST":["/*"]}}',
 }
 
 POLYMARKET_ENV = {
@@ -83,18 +80,7 @@ POLYMARKET_ENV = {
     "POLYMARKET_RPC_URL": "https://polygon.drpc.org",
     "POLYMARKET_CHAIN_ID": "137",
     "POLYMARKET_HTTP_PROXY": "DIRECT",
-    "POLYMARKET_NETWORK_RULES_JSON": '{"schemes":["https"],"hosts":["clob.polymarket.com"],"methods":["GET","POST","DELETE"],"paths_by_method":{"GET":["/*"],"POST":["/*"],"DELETE":["/*"]}}',
 }
-
-
-def configured_read_gate() -> NetworkWriteGate:
-    return NetworkWriteGate(
-        allowed_hosts=frozenset({"api.binance.com"}),
-        allowed_schemes=frozenset({"https"}),
-        allowed_methods=frozenset({"GET"}),
-        allowed_read_paths=frozenset({"/api/v3/time"}),
-        target_name="network:test",
-    )
 
 
 def account_risk(state: AccountState, platform: str = "test") -> AccountLimitEngine:

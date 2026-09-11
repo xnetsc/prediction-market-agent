@@ -3,7 +3,6 @@
   "BINANCE_API_KEY": "<BINANCE_API_KEY>",
   "BINANCE_API_SECRET": "<BINANCE_API_SECRET>",
   "BINANCE_HTTP_PROXY": "INHERIT",
-  "BINANCE_NETWORK_RULES_JSON": "{\"schemes\":[\"https\"],\"hosts\":[\"api.binance.com\"],\"methods\":[\"GET\",\"POST\"],\"paths_by_method\":{\"GET\":[\"/api/v3/time\",\"/api/v3/klines\",\"/sapi/v1/w3w/wallet/prediction/category/list\",\"/sapi/v1/w3w/wallet/prediction/market/list\",\"/sapi/v1/w3w/wallet/prediction/market/search\",\"/sapi/v1/w3w/wallet/prediction/market/detail\",\"/sapi/v1/w3w/wallet/prediction/order-book\",\"/sapi/v1/w3w/wallet/prediction/order-book/last-trade-price\"],\"POST\":[\"/sapi/v1/w3w/wallet/prediction/trade/get-quote\",\"/sapi/v1/w3w/wallet/prediction/trade/place-order-bundle\",\"/sapi/v1/w3w/wallet/prediction/trade/batch-cancel\",\"/sapi/v1/w3w/wallet/prediction/batch-redeem\",\"/sapi/v1/w3w/wallet/prediction/transfer/inbound\",\"/sapi/v1/w3w/wallet/prediction/transfer/outbound\"]}}",
   "BINANCE_SCAN_INTERVAL_SECONDS": 60,
   "BINANCE_ERROR_BACKOFF_SECONDS": 30,
   "BINANCE_ERROR_BACKOFF_MAX_SECONDS": 900,
