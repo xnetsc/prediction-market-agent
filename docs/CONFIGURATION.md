@@ -51,7 +51,7 @@
 | `dashboard_refresh_seconds` | 页面自动刷新间隔 |
 
 应用配置示例见 `examples/application.json`。通用 Config 只提供各插件可选择继承的统一网络代理，不包含
-任何平台专属代理、平台 URL、API Key、私钥、资金、止损、扫描间隔、分页/每轮规模、失败退避、
+任何平台专属代理、平台 URL、API Key、私钥、资金、扫描间隔、分页/每轮规模、失败退避、
 Agent 动作策略或具体交易策略；这些只能由对应插件定义。兼容 API 不继承统一代理，默认 `DIRECT`。
 
 `shared_http_proxy` 支持 `HOST`、`ENVIRONMENT`、`DIRECT`、`SYSTEM`（仅原生 macOS）或完整 HTTP(S) URL。
