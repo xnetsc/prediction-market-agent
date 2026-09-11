@@ -80,7 +80,6 @@ class ToolCoverageTests(unittest.TestCase):
             "create_write_gateway", "write_transport", "configuration_manifest",
             "topic_page_size", "capabilities", "name", "mark",
             "cycle_limits",      # how often the platform scans, not a decision input
-            "opening_balance",   # surfaced as starting_capital inside READ_ACCOUNT
             "business_risk",     # the injected filter callback, not a capability
         }
         covered = set(DESCRIPTIONS) | {
@@ -186,16 +185,31 @@ if __name__ == "__main__":
 class FundingTests(unittest.TestCase):
     """An account with no money cannot trade, so where the money comes from must be explicit."""
 
-    def test_the_plugin_declares_what_its_account_opened_with(self) -> None:
-        from prediction_market_agent.plugins.api._binance.config import BinancePluginConfig
+    def test_a_platform_that_cannot_read_its_wallet_says_the_figure_is_declared(self) -> None:
+        """Labelling a configured number as the platform's own would invite trading money that is
+        sitting in a different account."""
         from prediction_market_agent.plugins.api._binance.adapter import BinancePredictionApiPlugin
         from tests._support import BINANCE_ENV
 
         plugin = BinancePredictionApiPlugin({**BINANCE_ENV, "BINANCE_TRADING_CAPITAL": "250"})
-        self.assertEqual(plugin.opening_balance(), 250.0)
+        funds = plugin.account_funds()
+        self.assertEqual(funds.available, 250.0)
+        self.assertEqual(funds.source, "declared")
+        self.assertIn("prediction wallet", funds.detail["why_declared"])
 
-    def test_the_opening_balance_reaches_the_account_the_bot_trades_with(self) -> None:
-        """This is the wiring that was missing: a declared balance that never became cash."""
+    def test_spot_money_is_reported_as_fundable_not_as_spendable(self) -> None:
+        """Predictions trade out of a separate wallet; spot is only what a top-up could draw on."""
+        from prediction_market_agent.plugins.api._binance.adapter import BinancePredictionApiPlugin
+        from tests._support import BINANCE_ENV
+
+        plugin = BinancePredictionApiPlugin({**BINANCE_ENV, "BINANCE_TRADING_CAPITAL": "10"})
+        plugin.client.spot_balances = lambda: {"USDT": {"free": 900.0, "locked": 0.0}}
+        funds = plugin.account_funds()
+        self.assertEqual(funds.available, 10.0, "spot money is not spendable on predictions")
+        self.assertEqual(funds.detail["fundable_from_spot"], 900.0)
+
+    def test_reported_funds_reach_the_account_the_bot_trades_with(self) -> None:
+        """This is the wiring that was missing: reported funds that never became spendable cash."""
         import tempfile, pathlib
         from prediction_market_agent.core.state import StateStore
 
@@ -213,7 +227,7 @@ class FundingTests(unittest.TestCase):
             state = StateStore(pathlib.Path(directory) / "state.json", 0.0).load()
             self.assertEqual(state.cash, 0.0)
 
-    def test_the_opening_balance_caps_nothing(self) -> None:
+    def test_reported_funds_cap_nothing(self) -> None:
         """It is the ledger's starting point, not a limit; only a filter plugin may refuse."""
         risk = RiskCoordinator()
         runtime = platform("binance", risk)
@@ -225,3 +239,119 @@ class FundingTests(unittest.TestCase):
             "market_id": "m", "outcome_id": "o",
         })
         self.assertEqual(result["order"]["status"], "FILLED")
+
+
+class FundsSemanticsTests(unittest.TestCase):
+    """available means spendable here and now; ensure_funds states a target, not a transfer size."""
+
+    def _binance(self, capital="10", spot=900.0):
+        from prediction_market_agent.plugins.api._binance.adapter import BinancePredictionApiPlugin
+        from tests._support import BINANCE_ENV
+
+        plugin = BinancePredictionApiPlugin({**BINANCE_ENV, "BINANCE_TRADING_CAPITAL": capital})
+        plugin.client.spot_balances = lambda: {"USDT": {"free": spot, "locked": 0.0}}
+        return plugin
+
+    def test_money_that_would_need_moving_is_not_counted_as_available(self) -> None:
+        plugin = self._binance(capital="10", spot=900.0)
+        funds = plugin.account_funds()
+        self.assertEqual(funds.available, 10.0)
+        self.assertNotEqual(funds.available, 900.0, "spot money is not spendable on predictions")
+        self.assertEqual(funds.detail["fundable_from_spot"], 900.0)
+
+    def test_ensure_funds_asks_for_a_target_not_a_transfer_amount(self) -> None:
+        """Already holding enough means nothing moves, however large the number asked for."""
+        plugin = self._binance(capital="100", spot=900.0)
+        moved = []
+        plugin._write_transport.transfer = lambda d, a: moved.append((d, a))
+        result = plugin.ensure_funds(80.0, "USDT")
+        self.assertTrue(result.satisfied)
+        self.assertEqual(result.action, "none")
+        self.assertEqual(moved, [], "a target already met must not move money")
+        self.assertIsNone(plugin.funding_requests.pending(), "and raises no request")
+
+    def test_an_ask_moves_nothing_until_the_operator_approves(self) -> None:
+        """Money leaving on the ask alone would be a transfer at a moment nobody chose."""
+        plugin = self._binance(capital="30", spot=900.0)
+        moved = []
+        plugin._write_transport.transfer = lambda d, a: moved.append((d, float(a)))
+        result = plugin.ensure_funds(100.0, "USDT")
+        self.assertFalse(result.satisfied)
+        self.assertEqual(result.action, "awaiting_operator_approval")
+        self.assertEqual(moved, [], "nothing moves before approval")
+        self.assertEqual(plugin.funding_requests.pending()["amount"], 100.0)
+
+    def test_approval_moves_only_the_shortfall(self) -> None:
+        plugin = self._binance(capital="30", spot=900.0)
+        moved = []
+        plugin._write_transport.transfer = lambda d, a: moved.append((d, float(a)))
+        plugin.ensure_funds(100.0, "USDT")
+        answer = plugin.approve_funding()
+        self.assertTrue(answer["ok"], answer)
+        self.assertEqual(moved, [("INBOUND", 70.0)], "target 100 against 30 held is a 70 top-up")
+        self.assertIsNone(plugin.funding_requests.pending(), "an approved request is cleared")
+
+    def test_a_later_ask_replaces_the_earlier_one(self) -> None:
+        """Asking for 50 then 200 wants 200, not 250; approving a queue would approve history."""
+        plugin = self._binance(capital="0", spot=900.0)
+        plugin.ensure_funds(50.0, "USDT")
+        plugin.ensure_funds(200.0, "USDT")
+        self.assertEqual(plugin.funding_requests.pending()["amount"], 200.0)
+
+    def test_a_dismissed_request_leaves_nothing_pending(self) -> None:
+        plugin = self._binance(capital="10", spot=900.0)
+        plugin.ensure_funds(100.0, "USDT")
+        plugin.reject_funding()
+        self.assertIsNone(plugin.funding_requests.pending())
+
+    def test_a_plugin_that_cannot_fund_says_so_instead_of_raising(self) -> None:
+        from prediction_market_agent.plugins.api._polymarket.adapter import PolymarketApiPlugin
+        from tests._support import POLYMARKET_ENV
+
+        plugin = PolymarketApiPlugin({**POLYMARKET_ENV, "POLYMARKET_TRADING_CAPITAL": "5"})
+        plugin._write_transport.collateral_balance = lambda: 5.0
+        plugin._write_transport.deposit_target = lambda: {
+            "wallet_address": "0xabc", "signer_address": "0xdef", "wallet_type": "proxy",
+            "collateral_token": "0xUSDC", "self_funding_possible": False,
+        }
+        result = plugin.ensure_funds(50.0, "pUSD")
+        self.assertFalse(result.satisfied)
+        self.assertEqual(result.action, "awaiting_external_transfer")
+        self.assertIn("0xabc", result.detail, "say where the money has to go")
+
+    def test_a_confirmation_is_checked_against_the_balance_not_believed(self) -> None:
+        from prediction_market_agent.plugins.api._polymarket.adapter import PolymarketApiPlugin
+        from tests._support import POLYMARKET_ENV
+
+        plugin = PolymarketApiPlugin({**POLYMARKET_ENV, "POLYMARKET_TRADING_CAPITAL": "5"})
+        plugin._write_transport.collateral_balance = lambda: 5.0
+        plugin._write_transport.deposit_target = lambda: {
+            "wallet_address": "0xabc", "signer_address": "0xdef", "wallet_type": "proxy",
+            "collateral_token": "0xUSDC", "self_funding_possible": False,
+        }
+        plugin.ensure_funds(50.0, "pUSD")
+        refused = plugin.confirm_funding()
+        self.assertFalse(refused["ok"])
+        self.assertIn("short of", refused["message"])
+        self.assertIsNotNone(plugin.funding_requests.pending(), "an unmet request stays open")
+
+        plugin._write_transport.collateral_balance = lambda: 50.0
+        accepted = plugin.confirm_funding()
+        self.assertTrue(accepted["ok"], accepted)
+        self.assertIsNone(plugin.funding_requests.pending())
+
+
+class FrameworkStaysGenericTests(unittest.TestCase):
+    def test_the_framework_names_no_platform_and_assumes_no_currency(self) -> None:
+        """Venue knowledge belongs in the plugin; the framework only speaks the contract."""
+        import pathlib, re
+
+        root = pathlib.Path(__file__).resolve().parents[1] / "src/prediction_market_agent"
+        offenders = []
+        for area in ("core", "plugin_system", "runtime"):
+            for path in (root / area).rglob("*.py"):
+                text = path.read_text(encoding="utf-8")
+                for term in ("binance", "polymarket"):
+                    if re.search(rf"\b{term}\b", text, re.I):
+                        offenders.append(f"{area}/{path.name}:{term}")
+        self.assertEqual(offenders, [])

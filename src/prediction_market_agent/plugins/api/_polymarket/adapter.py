@@ -6,6 +6,12 @@ from collections.abc import Mapping
 from datetime import datetime
 from typing import Any
 
+from pathlib import Path
+
+from prediction_market_agent.plugins.api._funding import (
+    FundingRequests,
+    shortfall_message,
+)
 from prediction_market_agent.runtime.broker import ExecutionGateway
 from prediction_market_agent.core.domain import AccountState
 from prediction_market_agent.plugin_system.contracts import (
@@ -19,6 +25,8 @@ from prediction_market_agent.plugin_system.contracts import (
     Topic,
     TopicDetail,
     TopicPage,
+    AccountFunds,
+    FundingResult,
 )
 from .read import PolymarketReadClient
 from .write import PolymarketWriteTransport
@@ -93,6 +101,11 @@ class PolymarketApiPlugin:
         self.settings = PolymarketPluginConfig.from_mapping(environment)
         self.client = PolymarketReadClient(self.settings)
         self._write_transport = PolymarketWriteTransport(self.settings)
+        self.funding_requests = FundingRequests(
+            Path(self.settings.funding_request_file)
+            if self.settings.funding_request_file
+            else Path('config/plugins/polymarket_funding_request.json')
+        )
         self._events: list[dict[str, Any]] = []
 
     def sync_time(self) -> None:
@@ -104,9 +117,109 @@ class PolymarketApiPlugin:
             self.settings.max_decisions_per_cycle,
         )
 
-    def opening_balance(self) -> float:
-        """What this account started with. A fact the operator states, not a cap anyone enforces."""
-        return float(self.settings.trading_capital)
+    def account_funds(self) -> AccountFunds:
+        """Ask the platform what the wallet's collateral actually is, and say when that failed.
+
+        Falling back to the configured figure is fine; passing it off as the platform's answer is
+        not, so `source` records which one this is.
+        """
+        try:
+            balance = self._write_transport.collateral_balance()
+        except Exception as error:
+            return AccountFunds(
+                available=float(self.settings.trading_capital),
+                currency="pUSD",
+                source="declared",
+                detail={
+                    "why": "the platform balance could not be read; this is "
+                    "POLYMARKET_TRADING_CAPITAL as configured",
+                    "error": str(error)[:300],
+                },
+            )
+        return AccountFunds(
+            available=balance, currency="pUSD", source="platform", total=balance,
+            detail={"asset_type": "COLLATERAL"},
+        )
+
+    def ensure_funds(self, amount: float, currency: str) -> FundingResult:
+        """Record what is needed and name where to send it. This plugin cannot pull money in.
+
+        Collateral has to arrive from an address this client does not sign for, so the operator
+        makes the transfer and then confirms it in the plugin's panel, where the balance is checked
+        rather than taken on trust.
+        """
+        funds = self.account_funds()
+        if funds.available >= amount:
+            return FundingResult(
+                requested=amount, currency=funds.currency, available=funds.available,
+                satisfied=True, action="none", detail="Already available",
+            )
+        self.funding_requests.record(
+            amount=amount, currency=funds.currency, available=funds.available,
+            reason="requested by the trading loop",
+        )
+        try:
+            target = self._write_transport.deposit_target()
+            where = (
+                f" Send at least {amount - funds.available:.6f} {funds.currency} of "
+                f"{target['collateral_token']} to {target['wallet_address']}, then confirm it in "
+                "this plugin's panel."
+            )
+        except Exception as error:
+            where = f" The deposit address could not be read: {str(error)[:200]}"
+        return FundingResult(
+            requested=amount, currency=funds.currency, available=funds.available,
+            satisfied=False, action="awaiting_external_transfer",
+            detail=(
+                "This plugin cannot pull collateral in: it only transfers out of the wallet it "
+                "authenticates as." + where
+            ),
+        )
+
+    def confirm_funding(self) -> dict[str, Any]:
+        """Check whether the money actually arrived, instead of believing that it did."""
+        request = self.funding_requests.pending()
+        if request is None:
+            return {"ok": False, "message": "There is no funding request to confirm"}
+        funds = self.account_funds()
+        if funds.source != "platform":
+            return {
+                "ok": False,
+                "message": (
+                    "The balance could not be read from the platform, so this confirmation cannot "
+                    f"be checked: {funds.detail.get('error', 'no detail')}"
+                ),
+            }
+        if funds.available + 1e-9 < float(request["amount"]):
+            return {"ok": False, "message": shortfall_message(request, funds.available)}
+        self.funding_requests.clear()
+        return {
+            "ok": True,
+            "message": (
+                f"Confirmed: {funds.available:.6f} {funds.currency} is available, meeting the "
+                f"{float(request['amount']):.6f} requested"
+            ),
+        }
+
+    def reject_funding(self) -> dict[str, Any]:
+        self.funding_requests.clear()
+        return {"ok": True, "message": "The funding request was dismissed"}
+
+    def funding_panel(self) -> dict[str, Any]:
+        funds = self.account_funds()
+        panel: dict[str, Any] = {
+            "pending_request": self.funding_requests.pending(),
+            "available": funds.available,
+            "currency": funds.currency,
+            "source": funds.source,
+            "detail": funds.detail,
+            "funding_mode": "external_transfer_then_confirm",
+        }
+        try:
+            panel["deposit_target"] = self._write_transport.deposit_target()
+        except Exception as error:
+            panel["deposit_target_error"] = str(error)[:300]
+        return panel
 
     def topic_page_size(self) -> int:
         return self.settings.topic_page_size

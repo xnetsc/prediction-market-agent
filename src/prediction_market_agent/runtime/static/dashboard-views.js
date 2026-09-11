@@ -100,6 +100,7 @@ function renderManager(m) {
             const selector=kind==='decision_provider'?'':kind==='decision_strategy'?'<label><input type="radio" name="strategy" data-kind="'+kind+'" data-name="'+esc(p.name)+'" value="'+esc(p.name)+'" '+(p.enabled?'checked':'')+'> 使用此策略</label>':'<label><input class="enable" type="checkbox" data-kind="'+kind+'" data-name="'+esc(p.name)+'" '+(p.enabled?'checked':'')+'> 启用</label><label>顺序 <input aria-label="'+esc(p.name)+' 顺序" class="priority" type="number" min="1" data-kind="'+kind+'" data-name="'+esc(p.name)+'" value="'+esc(p.priority??99)+'"></label>';
             card.innerHTML='<div class="section-heading"><h4>'+esc(label)+'</h4><span class="badge '+(p.enabled&&ready?'ready':'')+'">'+(!p.enabled?'未启用':ready?'已就绪':'待检查 / 配置')+'</span></div>'+(selector?'<div class="selection-row">'+selector+'</div><p id="selectionStatus_'+kind+'_'+esc(p.name)+'" class="status selection-status" role="status"></p>':'')+'<p class="muted">'+esc(p.enabled?p.description:'尚未加载。请先在“模型服务”启用并保存，才能查看此服务的配置。')+'</p>';
             if(p.enabled&&p.readiness&&!ready)card.insertAdjacentHTML('beforeend','<details class="diagnostic-detail"><summary>为什么还未就绪？</summary><p>'+esc(p.readiness.reasons.join('；'))+'</p></details>');
+            if(p.enabled&&(p.notices||[]).length)renderPluginNotices(card,kind,p);
             if(p.enabled){
                 const fields=p.configuration?.fields;
                 card.insertAdjacentHTML('beforeend','<details class="plugin-config"><summary>编辑配置'+(fields?' · '+fields.length+' 项':'')+'</summary><div class="preset-slot"></div><p class="description">带 * 为必填。密钥留空会保留已保存值；删除需要明确操作。保存后将重新检查运行条件。</p>'+(fields?configurationFieldsHtml(kind,p.name,fields):'<p>此插件无需配置。</p>')+(fields?'<div class="toolbar form-actions"><button class="primary" onclick="savePluginConfig(\''+kind+'\',\''+p.name+'\')">保存配置</button><details class="inline-menu"><summary>重置配置</summary><button class="danger" onclick="deletePluginConfig(\''+kind+'\',\''+p.name+'\')">删除配置并恢复默认</button></details><span id="pluginStatus_'+kind+'_'+esc(p.name)+'" class="status plugin-card-status" role="status"></span></div>':'')+'</details>');
@@ -460,4 +461,44 @@ function renderDecisionLedger(rows){
         ['规则检查后',r.risk_decision?reason(r.risk_decision):'没有记录规则检查结果',{risk:r.risk_decision,final:r.final_decision}],
         ['实际执行与后续',r.error?String(r.error):r.execution?'已记录执行处理结果，请查看详情；这可能是跳过操作的记录，不代表已向平台下单':'未记录平台执行结果',{execution:r.execution,subsequent_observation:r.subsequent_observation}]
     ];return '<details class="decision-entry" data-id="'+esc(r.id)+'" '+(opened.has(String(r.id))?'open':'')+'><summary><span class="decision-meta">'+esc(new Date(r.created_at).toLocaleString())+' · '+esc(r.platform)+' · #'+esc(r.id)+'</span><span class="decision-title">'+esc(r.context?.market?.title||r.market_topic_id||'未记录市场')+'</span><span class="decision-outcome"><span class="badge">'+esc((r.final_decision?'最终：':'建议：')+actionTitle(d.action))+'</span><span>'+esc(decisionStatusTitle(r.status))+'</span></span><span class="decision-reason">'+esc(reason(d))+'</span><span class="text-link">查看决策过程</span></summary><p class="description">模型服务：'+esc(serviceTitle(r.provider))+' · 策略：'+esc(r.strategy_name||'未记录')+'。模型建议不等于成交，后续观察也不自动等于已实现盈亏。</p><ol class="decision-timeline">'+stages.map(([title,summary,raw])=>'<li><h4>'+title+'</h4><p>'+esc(summary)+'</p>'+detail(raw)+'</li>').join('')+'</ol></details>'}).join('');
+}
+
+
+/* Plugin notices: the plugin declares what it may need to say, the framework only renders it.
+   Nothing here knows which plugin it is talking to or what any notice means. */
+async function renderPluginNotices(card,kind,plugin){
+    const host=controlNode('div','',card);host.className='plugin-notices';
+    host.innerHTML='<p class="muted">正在读取插件状态…</p>';
+    let payload;
+    try{payload=await post('/api/plugins/notices',{kind,name:plugin.name})}
+    catch(e){host.innerHTML='<p class="danger">读取插件状态失败：'+esc(e.message)+'</p>';return}
+    host.replaceChildren();
+    for(const notice of payload.notices||[]){
+        const box=controlNode('section','',host);box.className='notice-card';
+        const head=controlNode('div','',box);head.className='section-heading';
+        controlNode('h5',notice.title,head);
+        if(notice.description)controlNode('p',notice.description,box).className='muted';
+        if(notice.error){controlNode('p','插件报告错误：'+notice.error,box).className='danger';continue}
+        const body=controlNode('pre','',box);body.className='notice-content';
+        body.textContent=JSON.stringify(notice.content??{},null,2);
+        const verbs=[['confirm',notice.action_label],['dismiss',notice.dismiss_label]].filter(v=>v[1]);
+        if(!verbs.length)continue;
+        const bar=controlNode('div','',box);bar.className='toolbar';
+        const status=controlNode('span','',bar);status.className='status muted';
+        const run=async(action,label)=>{
+            const button=controlNode('button',label,bar);
+            if(action==='confirm')button.className='primary';
+            button.onclick=async()=>{
+                button.disabled=true;setOperationStatus(status,'处理中…','pending');
+                try{
+                    const answer=await post('/api/plugins/notices/action',{kind,name:plugin.name,key:notice.key,action,values:{}});
+                    setOperationStatus(status,answer.message||(answer.ok?'完成':'未完成'),answer.ok?'':'danger');
+                    if(answer.ok)renderPluginNotices(card,kind,plugin),host.remove();
+                }catch(e){setOperationStatus(status,e.message,'danger')}
+                button.disabled=false;
+            };
+        };
+        for(const [verb,label] of verbs)run(verb,label);
+    }
+    if(!host.children.length)host.remove();
 }

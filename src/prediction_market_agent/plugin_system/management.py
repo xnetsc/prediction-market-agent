@@ -11,7 +11,7 @@ from .managed_config import (
     atomic_write_text,
     save_managed_config,
 )
-from .discovery import PluginCatalog, load_plugin_catalog
+from .discovery import PluginCatalog, load_plugin_catalog, validated_notices
 from .config import PluginDirectoryConfig
 
 
@@ -122,6 +122,31 @@ class PluginManagementService:
                 if dependency in submitted:context[dependency]=configuration._validate_value(spec,submitted[dependency])
             return {"items": configuration.context_choices_callback(field,context)}
         return {"items": configuration.choices_callback(field)}
+
+    def notice_content(self, kind: str, name: str) -> dict[str, Any]:
+        """Ask a plugin, right now, whether it has anything to tell the operator.
+
+        A plugin that raises reports it in its own panel rather than taking the page down: the
+        configuration form the operator came here to fill in still has to render.
+        """
+        spec = self.catalog.get(kind, name)
+        if spec.notices_callback is None:
+            return {"kind": kind, "name": name, "notices": []}
+        try:
+            notices = validated_notices(spec.notices_callback())
+        except Exception as error:
+            return {"kind": kind, "name": name, "notices": [], "error": str(error)[:300]}
+        return {"kind": kind, "name": name, "notices": notices}
+
+    def notice_action(
+        self, kind: str, name: str, key: str, action: str, values: dict[str, Any]
+    ) -> dict[str, Any]:
+        if not isinstance(values, dict):
+            raise ValueError("Notice values must be an object")
+        spec = self.catalog.get(kind, name)
+        if spec.notice_action_callback is None:
+            raise ValueError(f"Plugin {kind}:{name} offers no notice actions")
+        return spec.notice_action_callback(key, action, values)
 
     def control_action(self, kind: str, name: str, action: str,
                        values: dict[str, Any]) -> dict[str, Any]:

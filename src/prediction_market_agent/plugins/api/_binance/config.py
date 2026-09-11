@@ -17,6 +17,7 @@ class BinancePluginConfig:
     account_type: str
     slippage_bps: int
     trading_capital: float
+    funding_request_file: str
     http_proxy: str
     scan_interval_seconds: int
     error_backoff_seconds: int
@@ -37,6 +38,10 @@ class BinancePluginConfig:
             account_type=get("BINANCE_PREDICTION_ACCOUNT_TYPE", "").strip().upper(),
             slippage_bps=int(get("BINANCE_PREDICTION_SLIPPAGE_BPS", "0")),
             trading_capital=float(get("BINANCE_TRADING_CAPITAL", "0") or 0),
+            funding_request_file=str(
+                get("BINANCE_FUNDING_REQUEST_FILE", "")
+                or f"config/plugins/binance_funding_request.json"
+            ),
             http_proxy=resolve_plugin_proxy(
                 get("BINANCE_HTTP_PROXY", ""), field_name="BINANCE_HTTP_PROXY"
             ),

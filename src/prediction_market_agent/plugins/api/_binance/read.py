@@ -46,6 +46,21 @@ class BinancePredictionReadClient:
         except urllib.error.URLError as error:
             raise RuntimeError(f"Binance connection failed: {error.reason}") from error
 
+    def spot_balances(self) -> dict[str, dict[str, float]]:
+        """Free and locked balances from the signed spot account endpoint.
+
+        This is the wallet an INBOUND transfer draws on, so it answers both "what is really there"
+        and "can a top-up succeed" with one signed call the API key already has rights to make.
+        """
+        payload = self._request_get("/api/v3/account", {}, signed=True)
+        return {
+            str(item["asset"]).upper(): {
+                "free": float(item.get("free", 0) or 0),
+                "locked": float(item.get("locked", 0) or 0),
+            }
+            for item in payload.get("balances", [])
+        }
+
     def sync_time(self) -> None:
         result = self._request_get("/api/v3/time", {}, signed=False)
         self._time_offset_ms = int(result["serverTime"]) - int(time.time() * 1000)

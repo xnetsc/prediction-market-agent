@@ -332,6 +332,42 @@ class PluginRuntime:
         return value
 
 
+NOTICE_KINDS = ("display", "confirm")
+
+
+def validated_notices(items: Any) -> list[dict[str, Any]]:
+    """Check the shape of what a plugin says it wants shown, without interpreting any of it.
+
+    The framework has no idea what a notice means - only that a button needs a label and a handler
+    to be usable. An item it cannot render is reported as a broken notice rather than drawn as a
+    button that does nothing, because a control that silently fails is worse than a visible fault.
+    """
+    if items is None:
+        return []
+    if not isinstance(items, (list, tuple)):
+        raise ValueError("A plugin must return its notices as a list")
+    checked: list[dict[str, Any]] = []
+    for item in items:
+        if not isinstance(item, dict):
+            raise ValueError("Each plugin notice must be an object")
+        entry = dict(item)
+        key, title = str(entry.get("key", "")), str(entry.get("title", ""))
+        kind = str(entry.get("kind", "display"))
+        if not key or not title:
+            raise ValueError("A plugin notice requires a key and a title")
+        if kind not in NOTICE_KINDS:
+            raise ValueError(f"Unknown plugin notice kind: {kind}")
+        if kind == "confirm" and not str(entry.get("action_label", "")):
+            raise ValueError(f"Notice {key} asks for confirmation but declares no button label")
+        # A message with no dismiss label is one the framework cannot put away, which is fine:
+        # it disappears when the plugin stops reporting it. Marking something read and dismissing
+        # it are the same act - the operator is done with it - so there is one verb, and the label
+        # the plugin chooses says which it means.
+        entry["kind"] = kind
+        checked.append(entry)
+    return checked
+
+
 @dataclass(frozen=True)
 class PluginControls:
     """Optional management panel; protocols and credentials remain plugin-owned."""
@@ -357,6 +393,23 @@ class PluginSpec:
     readiness_callback: Callable[[], PluginReadiness] | None = None
     runtime: PluginRuntime | None = None
     controls: PluginControls | None = None
+    notices_callback: Callable[[], Any] | None = None
+    """Asked whenever this plugin's page is open: "do you have anything to tell the operator?"
+
+    Not declared up front, because what a plugin needs to say depends on what has happened to it,
+    and a list fixed at initialisation would either promise messages that never come or be unable
+    to raise the one that matters. The plugin keeps its own record of what is outstanding and
+    answers from it; an empty answer shows nothing at all.
+    """
+
+    notice_action_callback: Callable[[str, str, dict[str, Any]], dict[str, Any]] | None = None
+    """Invoked when the operator presses a button a notice offered: key, action, submitted values.
+
+    The action is whichever verb the notice offered a label for: `confirm` to go ahead with what
+    it proposed, or `dismiss` to put it away - which covers both refusing it and having read it,
+    since both mean the operator is finished with it. Whether a dismissed message comes back is
+    the plugin's own record to keep.
+    """
     network_routes_callback: Callable[[], tuple[DiagnosticNetworkRoute, ...]] | None = None
 
     def __post_init__(self) -> None:
@@ -408,6 +461,7 @@ class PluginSpec:
             "readiness": readiness,
             "has_runtime": self.runtime is not None,
             "has_controls": self.controls is not None,
+            "has_notices": self.notices_callback is not None,
             "has_network_routes": self.network_routes_callback is not None,
             "runtime": self.runtime.status() if self.runtime else None,
         }

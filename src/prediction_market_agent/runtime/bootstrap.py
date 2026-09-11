@@ -44,6 +44,19 @@ class EngineComponents:
     strategy_evolution: bool
 
 
+def _reported_funds(plugin: Any) -> float | None:
+    """Open a new account's ledger at whatever the platform says it can spend.
+
+    A plugin that cannot answer must not take the robot down over it - the ledger simply opens
+    empty, which is honest and visible, rather than guessing a figure nobody stated.
+    """
+    try:
+        return float(plugin.account_funds().available)
+    except Exception:
+        LOGGER.exception("%s could not report its funds; opening the ledger empty", plugin.name)
+        return None
+
+
 def bootstrap_engine(
     config: Config, *, catalog: PluginCatalog | None = None
 ) -> EngineComponents:
@@ -94,7 +107,7 @@ def bootstrap_engine(
         # manually triggered cycles all go through the same door.
         for plugin in [GuardedMarketApi(item, risk) for item in plugins]:
             state_path = platform_state_path(config.state_file, plugin.name, multiple)
-            store = StateStore(state_path, plugin.opening_balance())
+            store = StateStore(state_path, _reported_funds(plugin))
             state = store.load()
             gateway = plugin.create_write_gateway(state)
             platforms[plugin.name] = PlatformRuntime(

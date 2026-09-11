@@ -9,6 +9,50 @@ from ..core.domain import AccountState
 
 
 @dataclass(frozen=True)
+class AccountFunds:
+    """What one platform says the trading account can currently spend.
+
+    `source` is the honest part. A platform that exposes a balance endpoint answers "platform" and
+    the number is a fact; one that does not answers "declared" and the number is whatever the
+    operator configured, which can drift from reality without anyone noticing. Callers that care
+    about the difference - and anything deciding how much to risk should care - can tell them apart
+    instead of trusting a figure whose origin is hidden.
+    """
+
+    available: float
+    """Spendable on this prediction market right now, without anything having to be moved first.
+
+    Money the venue holds somewhere that a transfer would have to reach does not count, however
+    certain that transfer is. A number that includes it would tell a caller it can trade funds that
+    are not there yet, and the order is what would discover the difference.
+    """
+
+    currency: str
+    source: str
+    total: float | None = None
+    locked: float | None = None
+    detail: dict[str, Any] = field(default_factory=dict)
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass(frozen=True)
+class FundingResult:
+    """What came of asking a platform to make a target amount available."""
+
+    requested: float
+    currency: str
+    available: float
+    satisfied: bool
+    action: str
+    detail: str = ""
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass(frozen=True)
 class ApiCapabilities:
     realtime_order_book: bool
     candles: bool
@@ -139,13 +183,30 @@ class PredictionMarketApiPlugin(Protocol):
 
     def cycle_limits(self) -> tuple[int, int]: ...
 
-    def opening_balance(self) -> float: ...
-    """What this platform's trading account started with.
+    def account_funds(self) -> AccountFunds: ...
+    """Report what this account can spend right now.
 
-    Account setup rather than a limit: the framework never checks an action against it. It is the
-    baseline the ledger and READ_ACCOUNT measure profit and loss from, and the plugin owns it
-    because only the plugin knows what its account is - Binance moves money between wallet and
-    prediction account, while Polymarket trades the wallet's own collateral and can only send out.
+    The plugin owns this because only it knows what its account is and how to look: Spendable is not the same as
+    owned: a venue may hold money somewhere that has to be moved first, and only the plugin can
+    tell the difference. A plugin that cannot ask still answers, marking the figure as declared.
+    """
+
+    def ensure_funds(self, amount: float, currency: str) -> FundingResult: ...
+    """Make `amount` spendable on this prediction market, by whatever means the venue needs.
+
+    The caller is stating a target for `account_funds().available`, not requesting a transfer of
+    that size: a venue already holding enough does nothing and reports satisfied. How the gap gets
+    closed - a transfer, an approval, an on-chain deposit, or nothing the plugin can do on its own
+    - is the plugin's business. One that cannot close it says so in the result rather than raising,
+    because "I could not, and here is what you would have to do" is an answer the caller can act on
+    and an exception in the middle of a decision is not.
+    """
+    """Ask the platform to make `amount` available, and do whatever that takes internally.
+
+    Whether that means a transfer, an approval, or nothing at all is the plugin's business; the
+    framework states a need and reads back what actually happened. A plugin that cannot add funds
+    says so in the result rather than raising, because "I could not" is an answer the caller can
+    act on and an exception in the middle of a decision is not.
     """
 
     def topic_page_size(self) -> int: ...

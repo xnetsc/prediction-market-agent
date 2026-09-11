@@ -142,7 +142,9 @@ def build_report(
             }
         )
 
-    state_files = state_file if isinstance(state_file, dict) else {"binance": state_file}
+    # One unnamed state file belongs to whichever platform happens to be the only one; naming a
+    # specific plugin here would put that plugin's name on another plugin's money.
+    state_files = state_file if isinstance(state_file, dict) else {"account": state_file}
     accounts: dict[str, Any] = {}
     for platform, path in state_files.items():
         if not path.exists():

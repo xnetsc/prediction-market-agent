@@ -194,8 +194,10 @@ class RiskAndExecutionTests(unittest.TestCase):
                 del reference_symbol, interval, limit
                 return []
 
-            def opening_balance(self):
-                return 0.0
+            def account_funds(self):
+                from prediction_market_agent.plugin_system.contracts import AccountFunds
+
+                return AccountFunds(available=0.0, currency="USDT", source="declared")
 
             def create_write_gateway(self, state):
                 return ExecutionGateway(

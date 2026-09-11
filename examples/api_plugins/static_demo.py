@@ -114,8 +114,18 @@ class StaticDemoPlugin:
         del reference_symbol, interval, limit
         return []
 
-    def opening_balance(self):
-        return 0.0
+    def account_funds(self):
+        from prediction_market_agent.plugin_system.contracts import AccountFunds
+
+        return AccountFunds(available=0.0, currency="USDT", source="declared")
+
+    def ensure_funds(self, amount, currency):
+        from prediction_market_agent.plugin_system.contracts import FundingResult
+
+        return FundingResult(
+            requested=amount, currency=currency, available=0.0, satisfied=False,
+            action="none", detail="The example plugin holds no money",
+        )
 
     def create_write_gateway(self, state):
         return ExecutionGateway(state, platform=self.name, write_transport=self._write_transport)
