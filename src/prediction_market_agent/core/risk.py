@@ -5,12 +5,12 @@ import urllib.parse
 from dataclasses import dataclass, field
 from typing import Any, Protocol, runtime_checkable
 
-class RiskRejected(RuntimeError):
-    """A configured risk engine rejected an operation."""
+class NetworkGateError(RuntimeError):
+    """A request did not match the endpoints an API plugin declared it talks to.
 
-
-class NetworkGateError(RiskRejected):
-    """A network request did not match the configured allowlist."""
+    Deliberately not a risk-rule error: the two filter categories answer with a RuleDecision on the
+    chain, while this is one plugin's own HTTP client refusing a URL it never declared.
+    """
 
 
 @dataclass(frozen=True)
@@ -46,20 +46,20 @@ class NetworkWriteGate:
     allowed_paths_by_method: dict[str, frozenset[str]] = field(default_factory=dict)
     target_name: str = ""
 
-    @property
-    def target(self) -> str:
-        return self.target_name or "network:" + ",".join(sorted(self.allowed_hosts))
+    """The endpoints one API plugin declares it talks to, enforced inside that plugin's HTTP client.
 
-    def evaluate(self, operation: str, context: dict[str, Any]) -> RuleDecision:
-        try:
-            self.check(operation, str(context.get("url", "")))
-        except NetworkGateError as error:
-            return RuleDecision("REJECT", str(error))
-        return RuleDecision("ALLOW", "Request is on the configured network allowlist")
+    This is not a filter category and does not join the risk chain: an operator cannot enable,
+    order or stack it, and it judges URLs rather than actions. It is the plugin stating its own
+    access surface, which also catches a mistyped base URL before a request leaves the process.
+    """
+
+    @property
+    def name(self) -> str:
+        return self.target_name or "network:" + ",".join(sorted(self.allowed_hosts))
 
     def manifest(self) -> dict[str, Any]:
         return {
-            "target": self.target,
+            "declared_by": self.name,
             "allowed_methods": sorted(self.allowed_methods),
             "allowed_schemes": sorted(self.allowed_schemes),
             "allowed_hosts": sorted(self.allowed_hosts),
@@ -188,13 +188,10 @@ class UnrestrictedExecutionRiskControl:
     """Neutral gateway adapter used when no account-risk plugin is enabled."""
 
     def __init__(self, platform: str, state: Any):
-        self.target = f"account:{platform}"
+        self.target = f"market:{platform}"
         self.state = state
 
     def refresh_halt(self) -> None:
-        return None
-
-    def require_risk_increase_allowed(self) -> None:
         return None
 
     def allowed_buy_notional(
@@ -207,18 +204,6 @@ class UnrestrictedExecutionRiskControl:
         del current_position_value, fee_bps, token_id
         return requested
 
-    def validate_buy_fill(
-        self,
-        notional: float,
-        fee: float,
-        existing_position_value: float,
-        token_id: str,
-    ) -> None:
-        del notional, fee, existing_position_value, token_id
-
-    def validate_inbound_transfer(self, amount: float) -> None:
-        del amount
-
     def evaluate(self, operation: str, context: dict[str, Any]) -> RuleDecision:
         del operation, context
         return RuleDecision("ALLOW", "No enabled account-risk plugin applies")
@@ -230,7 +215,7 @@ class UnrestrictedExecutionRiskControl:
 class UnrestrictedGlobalRiskControl:
     """Neutral global adapter used when no portfolio-risk plugin is enabled."""
 
-    target = "portfolio:global"
+    target = "market:*"
 
     def refresh_halt(self) -> None:
         return None

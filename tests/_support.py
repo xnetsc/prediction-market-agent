@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import tempfile
 import unittest
+from types import SimpleNamespace
 from pathlib import Path
 from unittest.mock import patch
 
@@ -41,6 +42,7 @@ from prediction_market_agent.core.risk import (
     NetworkWriteGate,
     RiskCoordinator,
 )
+from prediction_market_agent.runtime.market_guard import GuardedMarketApi, MarketActionRejected
 from prediction_market_agent.plugins.agent_policy.agent_actions import AgentActionRuleEngine
 from prediction_market_agent.plugins.risk.custom_rules import BusinessRuleEngine
 from prediction_market_agent.plugins.risk.portfolio_limits import (

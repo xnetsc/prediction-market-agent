@@ -27,8 +27,9 @@
 - 每个研究工具的参数、结果与错误；
 - 模型原始输出和结构化提案；
 - Agent 行为风控的允许、缩减、拒绝或停止原因（`risk_decision` 字段）；
-- 业务风控与账户风控的拒绝理由：它们以执行失败的形式出现在 `execution` 里，状态为 `EXECUTION_ERROR`，
-  原因字符串保留插件给出的理由。这两类拒绝**不写入** `risk_decision`——该字段只记 `agent:actions` 一路；
+- 业务风控的拒绝理由：以执行失败的形式出现在 `execution` 里，状态为 `EXECUTION_ERROR`，原因字符串保留
+  插件给出的理由。它**不写入** `risk_decision`——该字段只记 `agent:actions` 一路；
+- 额度不足导致没下单时，动作层单独记为 `BUY_REJECTED`，`result.status` 为 `RISK_REJECTED`；
 - 最终动作及远端执行响应/失败；
 - 同 token 后续决策快照中的初始/最新 midpoint 与变化，或明确显示尚无后续观察。
 
