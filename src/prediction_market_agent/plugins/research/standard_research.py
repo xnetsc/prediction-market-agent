@@ -2,10 +2,8 @@ from __future__ import annotations
 from prediction_market_agent.plugin_system.network_diagnostics import configured_proxy_route
 
 import html
-import ipaddress
 import json
 import re
-import socket
 import urllib.parse
 import urllib.request
 from dataclasses import asdict, dataclass, field
@@ -84,8 +82,6 @@ class StandardResearchSettings:
     default_search_results: int
     max_search_results: int
     query_max_chars: int
-    allowed_url_schemes: tuple[str, ...]
-    block_non_public_addresses: bool
     kline_intervals: tuple[str, ...]
     default_kline_interval: str
     kline_default_limit: int
@@ -119,24 +115,6 @@ class StandardResearchExecutor:
         except (TypeError, ValueError):
             result = default
         return max(minimum, min(maximum, result))
-
-    def _permitted_url(self, url: str) -> str:
-        parsed = urllib.parse.urlparse(url)
-        if parsed.scheme not in self.settings.allowed_url_schemes or not parsed.hostname:
-            raise ResearchToolError("URL scheme or host is not permitted by the research plugin")
-        if parsed.username or parsed.password:
-            raise ResearchToolError("URLs containing credentials are blocked")
-        if not self.settings.block_non_public_addresses:
-            return url
-        try:
-            addresses = {item[4][0] for item in socket.getaddrinfo(parsed.hostname, parsed.port or 443, type=socket.SOCK_STREAM)}
-        except socket.gaierror as error:
-            raise ResearchToolError(f"Unable to resolve URL host: {error}") from error
-        for value in addresses:
-            address = ipaddress.ip_address(value)
-            if address.is_private or address.is_loopback or address.is_link_local or address.is_reserved or address.is_multicast or address.is_unspecified:
-                raise ResearchToolError("Non-public network targets are blocked by plugin configuration")
-        return url
 
     def execute(self, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
         return {
@@ -173,10 +151,10 @@ class StandardResearchExecutor:
         return {"query": query, "results": results, "source": self.settings.search_url}
 
     def _fetch_url(self, arguments: dict[str, Any]) -> dict[str, Any]:
-        url = self._permitted_url(str(arguments.get("url", "")).strip())
+        url = str(arguments.get("url", "")).strip()
         request = urllib.request.Request(url, headers={"User-Agent": self.settings.user_agent, "Accept": "text/html,text/plain,application/json"}, method="GET")
         with self.opener.open(request, timeout=self.settings.timeout_seconds) as response:
-            final_url = self._permitted_url(response.geturl())
+            final_url = response.geturl()
             content_type = response.headers.get_content_type()
             raw = response.read(self.settings.fetch_response_bytes).decode("utf-8", errors="replace")
         if content_type == "application/json":
@@ -237,8 +215,6 @@ def initialize_plugin(context: PluginInitializationContext) -> PluginSpec:
         PluginConfigField("DEFAULT_SEARCH_RESULTS", "默认搜索条数", "integer", "Agent 未指定时返回的搜索结果数。", required=True),
         PluginConfigField("MAX_SEARCH_RESULTS", "最大搜索条数", "integer", "单次网页搜索允许返回的最大结果数。", required=True),
         PluginConfigField("QUERY_MAX_CHARS", "查询字符上限", "integer", "网页与市场搜索查询字符串的最大字符数。", required=True),
-        PluginConfigField("ALLOWED_URL_SCHEMES", "URL scheme 白名单", "string", "FETCH_URL 允许的 URL scheme，逗号分隔。", required=True),
-        PluginConfigField("BLOCK_NON_PUBLIC_ADDRESSES", "阻止非公网地址", "boolean", "解析并阻止私网、回环、链路本地、保留和组播目标。", required=True),
         PluginConfigField("KLINE_INTERVALS", "K线周期白名单", "string", "允许 Agent 请求的 K 线周期，逗号分隔。", required=True),
         PluginConfigField("DEFAULT_KLINE_INTERVAL", "默认K线周期", "string", "Agent 未指定时使用的 K 线周期。", required=True),
         PluginConfigField("KLINE_DEFAULT_LIMIT", "默认K线条数", "integer", "Agent 未指定时请求的 K 线条数。", required=True),
@@ -248,21 +224,22 @@ def initialize_plugin(context: PluginInitializationContext) -> PluginSpec:
         PluginConfigField("MARKET_MAX_RESULTS", "最大跨市场条数", "integer", "每个平台单次允许返回的最大候选数。", required=True),
         PluginConfigField("HISTORY_MAX_RESULTS", "历史召回上限", "integer", "单次历史召回允许的最大记录数。", required=True),
     )
-    configuration = PluginConfiguration(fields, load, save, delete, storage)
+    configuration = PluginConfiguration(
+        fields, load, save, delete, storage,
+        retired_fields=("ALLOWED_URL_SCHEMES", "BLOCK_NON_PUBLIC_ADDRESSES"),
+    )
 
     def factory(config):
         del config
         values = configuration.load()
         settings = StandardResearchSettings(
-            search_url=values["SEARCH_URL"], proxy=context.proxy_settings(str(values["HTTP_PROXY"]), field_name="HTTP_PROXY")["proxy"], timeout_seconds=values["HTTP_TIMEOUT_SECONDS"], user_agent=values["USER_AGENT"], search_response_bytes=values["SEARCH_RESPONSE_BYTES"], fetch_response_bytes=values["FETCH_RESPONSE_BYTES"], fetch_text_chars=values["FETCH_TEXT_CHARS"], default_search_results=values["DEFAULT_SEARCH_RESULTS"], max_search_results=values["MAX_SEARCH_RESULTS"], query_max_chars=values["QUERY_MAX_CHARS"], allowed_url_schemes=_csv(values["ALLOWED_URL_SCHEMES"]), block_non_public_addresses=values["BLOCK_NON_PUBLIC_ADDRESSES"], kline_intervals=_csv(values["KLINE_INTERVALS"]), default_kline_interval=values["DEFAULT_KLINE_INTERVAL"], kline_default_limit=values["KLINE_DEFAULT_LIMIT"], kline_min_limit=values["KLINE_MIN_LIMIT"], kline_max_limit=values["KLINE_MAX_LIMIT"], market_default_results=values["MARKET_DEFAULT_RESULTS"], market_max_results=values["MARKET_MAX_RESULTS"], history_max_results=values["HISTORY_MAX_RESULTS"],
+            search_url=values["SEARCH_URL"], proxy=context.proxy_settings(str(values["HTTP_PROXY"]), field_name="HTTP_PROXY")["proxy"], timeout_seconds=values["HTTP_TIMEOUT_SECONDS"], user_agent=values["USER_AGENT"], search_response_bytes=values["SEARCH_RESPONSE_BYTES"], fetch_response_bytes=values["FETCH_RESPONSE_BYTES"], fetch_text_chars=values["FETCH_TEXT_CHARS"], default_search_results=values["DEFAULT_SEARCH_RESULTS"], max_search_results=values["MAX_SEARCH_RESULTS"], query_max_chars=values["QUERY_MAX_CHARS"], kline_intervals=_csv(values["KLINE_INTERVALS"]), default_kline_interval=values["DEFAULT_KLINE_INTERVAL"], kline_default_limit=values["KLINE_DEFAULT_LIMIT"], kline_min_limit=values["KLINE_MIN_LIMIT"], kline_max_limit=values["KLINE_MAX_LIMIT"], market_default_results=values["MARKET_DEFAULT_RESULTS"], market_max_results=values["MARKET_MAX_RESULTS"], history_max_results=values["HISTORY_MAX_RESULTS"],
         )
         integers = [settings.timeout_seconds, settings.search_response_bytes, settings.fetch_response_bytes, settings.fetch_text_chars, settings.default_search_results, settings.max_search_results, settings.query_max_chars, settings.kline_default_limit, settings.kline_min_limit, settings.kline_max_limit, settings.market_default_results, settings.market_max_results, settings.history_max_results]
         if any(value <= 0 for value in integers):
             raise ValueError("Standard research numeric limits must be positive")
         if settings.default_search_results > settings.max_search_results:
             raise ValueError("DEFAULT_SEARCH_RESULTS cannot exceed MAX_SEARCH_RESULTS")
-        if not settings.allowed_url_schemes:
-            raise ValueError("ALLOWED_URL_SCHEMES cannot be empty")
         if not settings.kline_intervals:
             raise ValueError("KLINE_INTERVALS cannot be empty")
         if not settings.kline_min_limit <= settings.kline_default_limit <= settings.kline_max_limit:
