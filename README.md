@@ -157,7 +157,7 @@ Windows 更新时将最后一条替换为 `.\start-local.ps1`。`once` 是明确
 - [API 插件](docs/API_PLUGINS.md)
 - [Provider、策略与研究工具](docs/DECISION_PLUGINS.md)
 - [两类过滤插件](docs/RISK_FILTERS.md)
-- [决策台账与 HTTP 界面](docs/HTTP_AUDIT.md)
+- [决策台账与管理界面](docs/CONSOLE_AND_LEDGER.md)
 - [管理员 Passkey、ECDH 与加密会话](docs/AUTHENTICATION.md)
 - [集成测试](docs/INTEGRATION_TESTS.md)
 - [时区信息延迟案例研究](docs/STRATEGY_RESEARCH.md)
