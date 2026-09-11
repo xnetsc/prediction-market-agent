@@ -11,7 +11,6 @@ from prediction_market_agent.agent.decision import Decision, ProviderResult
 from prediction_market_agent.runtime.engine import TradingEngine
 from prediction_market_agent.plugin_system.contracts import PredictionMarketApiPlugin
 from prediction_market_agent.plugin_system.registry import load_api_plugins
-from prediction_market_agent.core.risk import NetworkGateError
 
 
 class ProductionApiIntegrationTests(unittest.TestCase):
@@ -61,27 +60,12 @@ class ProductionApiIntegrationTests(unittest.TestCase):
         registry, plugins = load_api_plugins(config)
         self.assertIn("binance", registry.registered_names)
         self._exercise_public_surface(plugins[0])
-        plugins[0].network_rule_engine.check(
-            "POST",
-            f"{plugins[0].settings.base_url}/sapi/v1/w3w/wallet/prediction/trade/place-order-bundle",
-        )
-        with self.assertRaises(NetworkGateError):
-            plugins[0].network_rule_engine.check(
-                "POST", f"{plugins[0].settings.base_url}/not-allowed"
-            )
 
     def test_02_polymarket_plugin_production_reads_and_configured_write_route(self) -> None:
         config = self._config(("polymarket",))
         registry, plugins = load_api_plugins(config)
         self.assertIn("polymarket", registry.registered_names)
         self._exercise_public_surface(plugins[0])
-        plugins[0].network_rule_engine.check(
-            "POST", f"{plugins[0].settings.clob_url}/order"
-        )
-        with self.assertRaises(NetworkGateError):
-            plugins[0].network_rule_engine.check(
-                "POST", f"{plugins[0].settings.clob_url}/not-allowed"
-            )
 
     def test_03_binance_and_polymarket_run_in_one_registry(self) -> None:
         config = self._config(("binance", "polymarket"))
@@ -175,7 +159,7 @@ class ProductionApiIntegrationTests(unittest.TestCase):
         )
         for base_url, method, path in probes:
             with self.subTest(platform="polymarket", method=method, path=path):
-                with transport._gated_http_client(base_url) as client:
+                with transport._http_client(base_url) as client:
                     response = client.request(method, path, json={})
                 self.assertGreaterEqual(response.status_code, 400)
 

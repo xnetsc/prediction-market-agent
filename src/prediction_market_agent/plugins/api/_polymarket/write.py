@@ -9,7 +9,6 @@ import httpx
 from polymarket import BuilderApiKey, PRODUCTION, RelayerApiKey, SecureClient
 from polymarket.models import ApiKeyCreds
 
-from prediction_market_agent.core.risk import NetworkWriteGate
 from .config import PolymarketPluginConfig
 
 
@@ -46,9 +45,8 @@ class _QuoteSpec:
 class PolymarketWriteTransport:
     """Official unified client adapter for orders, cancellation, redemption, and pUSD transfer."""
 
-    def __init__(self, settings: PolymarketPluginConfig, gate: NetworkWriteGate):
+    def __init__(self, settings: PolymarketPluginConfig):
         self.settings = settings
-        self.gate = gate
         self._quotes: dict[str, _QuoteSpec] = {}
         self._client: SecureClient | None = None
 
@@ -70,17 +68,13 @@ class PolymarketWriteTransport:
             )
         return None
 
-    def _gated_http_client(self, base_url: str) -> httpx.Client:
-        def check(request: httpx.Request) -> None:
-            self.gate.check(request.method, str(request.url))
-
+    def _http_client(self, base_url: str) -> httpx.Client:
         return httpx.Client(
             base_url=base_url,
             proxy=self.settings.http_proxy or None,
             trust_env=False,
             http2=True,
             timeout=20,
-            event_hooks={"request": [check]},
             headers={"User-Agent": "prediction-market-agent/0.6"},
         )
 
@@ -100,7 +94,7 @@ class PolymarketWriteTransport:
             old = transport._client
             base_url = str(old.base_url)
             old.close()
-            transport._client = self._gated_http_client(base_url)
+            transport._client = self._http_client(base_url)
             transport._owns_client = True
 
     def _require_client(self) -> SecureClient:

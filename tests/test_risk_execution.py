@@ -48,7 +48,6 @@ class RiskAndExecutionTests(unittest.TestCase):
             SimpleNamespace(
                 name="test",  # must match the engine's market:<platform> target
                 capabilities=None,
-                network_rule_engine=None,
                 create_write_gateway=lambda state, engine: self.gateway,
             ),
             self.coordinator,
@@ -153,13 +152,6 @@ class RiskAndExecutionTests(unittest.TestCase):
                 supported_order_types=("MARKET",),
                 write_workflows=("BUY",),
                 data_features=(),
-            )
-            network_rule_engine = NetworkWriteGate(
-                frozenset({"example.test"}),
-                frozenset({"https"}),
-                frozenset({"GET", "POST"}),
-                frozenset({"/read", "/write"}),
-                target_name="network:fake",
             )
 
             def sync_time(self):
@@ -296,7 +288,7 @@ class RiskAndExecutionTests(unittest.TestCase):
 
     def test_binance_transport_normalizes_platform_order_status(self) -> None:
         settings = BinancePluginConfig.from_mapping(BINANCE_ENV)
-        transport = BinancePredictionWriteTransport(settings, configured_read_gate())
+        transport = BinancePredictionWriteTransport(settings)
         with patch.object(
             transport,
             "_post",

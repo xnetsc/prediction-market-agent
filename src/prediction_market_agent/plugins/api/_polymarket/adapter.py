@@ -8,7 +8,6 @@ from typing import Any
 
 from prediction_market_agent.runtime.broker import ExecutionGateway
 from prediction_market_agent.core.domain import AccountState
-from prediction_market_agent.core.risk import NetworkWriteGate
 from prediction_market_agent.plugin_system.contracts import (
     ApiCapabilities,
     Candle,
@@ -92,21 +91,8 @@ class PolymarketApiPlugin:
         if environment is None:
             raise ValueError("Polymarket plugin configuration mapping is required")
         self.settings = PolymarketPluginConfig.from_mapping(environment)
-        network = self.settings.network_rules
-        gate = NetworkWriteGate(
-            allowed_hosts=frozenset(str(item) for item in network["hosts"]),
-            allowed_schemes=frozenset(str(item) for item in network["schemes"]),
-            allowed_methods=frozenset(str(item).upper() for item in network["methods"]),
-            allowed_read_paths=frozenset(str(item) for item in network.get("paths", [])),
-            allowed_paths_by_method={
-                str(method).upper(): frozenset(str(path) for path in paths)
-                for method, paths in network.get("paths_by_method", {}).items()
-            },
-            target_name=f"network:{self.name}",
-        )
-        self.network_rule_engine = gate
-        self.client = PolymarketReadClient(self.settings, gate)
-        self._write_transport = PolymarketWriteTransport(self.settings, gate)
+        self.client = PolymarketReadClient(self.settings)
+        self._write_transport = PolymarketWriteTransport(self.settings)
         self._events: list[dict[str, Any]] = []
 
     def sync_time(self) -> None:

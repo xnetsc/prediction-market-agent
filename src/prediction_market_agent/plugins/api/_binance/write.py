@@ -9,16 +9,13 @@ import urllib.parse
 import urllib.request
 from typing import Any
 
-from prediction_market_agent.core.risk import NetworkWriteGate
 from .config import BinancePluginConfig
 
 
 class BinancePredictionWriteTransport:
     """Binance-specific signed write transport. Generic engine code never imports this class."""
 
-    def __init__(
-        self, settings: BinancePluginConfig, gate: NetworkWriteGate
-    ):
+    def __init__(self, settings: BinancePluginConfig):
         self.api_key = settings.api_key
         self.secret = settings.api_secret.encode("utf-8")
         self.base_url = settings.base_url.rstrip("/")
@@ -26,7 +23,6 @@ class BinancePredictionWriteTransport:
         self.wallet_id = settings.wallet_id
         self.account_type = settings.account_type
         self.slippage_bps = settings.slippage_bps
-        self.gate = gate
         handler = (
             urllib.request.ProxyHandler({"http": settings.http_proxy, "https": settings.http_proxy})
             if settings.http_proxy
@@ -44,7 +40,6 @@ class BinancePredictionWriteTransport:
     def _post(
         self, path: str, body_items: list[tuple[str, Any]], *, preserve_brackets: bool = False
     ) -> dict[str, Any]:
-        self.gate.check("POST", f"{self.base_url}{path}")
         timestamp_query = f"timestamp={int(time.time() * 1000)}"
         body = self._form(body_items, preserve_brackets=preserve_brackets)
         total_params = timestamp_query + body

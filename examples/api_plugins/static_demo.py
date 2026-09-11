@@ -26,18 +26,15 @@ from prediction_market_agent.plugin_system.discovery import (
     PluginReadiness,
     PluginRuntime,
 )
-from prediction_market_agent.core.risk import NetworkWriteGate
 
 
 class ExampleHttpWriteTransport:
-    def __init__(self, base_url, token, gate):
+    def __init__(self, base_url, token):
         self.base_url = base_url.rstrip("/")
         self.token = token
-        self.gate = gate
 
     def _post(self, path, payload):
         url = self.base_url + path
-        self.gate.check("POST", url)
         request = urllib.request.Request(
             url,
             data=json.dumps(payload).encode("utf-8"),
@@ -88,15 +85,7 @@ class StaticDemoPlugin:
         parsed = urllib.parse.urlparse(base_url)
         if parsed.scheme not in {"http", "https"} or not parsed.hostname:
             raise ValueError("BASE_URL must be an HTTP(S) URL")
-        self.network_rule_engine = NetworkWriteGate(
-            allowed_hosts=frozenset({parsed.hostname}),
-            allowed_schemes=frozenset({parsed.scheme}),
-            allowed_methods=frozenset({"POST"}),
-            allowed_read_paths=frozenset(),
-            allowed_paths_by_method={"POST": frozenset({"/quote", "/order", "/cancel", "/redeem", "/transfer"})},
-            target_name="network:static_demo",
-        )
-        self._write_transport = ExampleHttpWriteTransport(base_url, api_token, self.network_rule_engine)
+        self._write_transport = ExampleHttpWriteTransport(base_url, api_token)
         self._cycle_limits = (maximum_topics, maximum_decisions)
         self._page_size = page_size
 

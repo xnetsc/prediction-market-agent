@@ -6,7 +6,6 @@ from typing import Any
 
 from prediction_market_agent.runtime.broker import ExecutionGateway
 from prediction_market_agent.core.domain import AccountState
-from prediction_market_agent.core.risk import NetworkWriteGate
 from prediction_market_agent.plugin_system.contracts import (
     ApiCapabilities,
     Candle,
@@ -64,25 +63,11 @@ class BinancePredictionApiPlugin:
         if environment is None:
             raise ValueError("Binance plugin configuration mapping is required")
         self.settings = BinancePluginConfig.from_mapping(environment)
-        network = self.settings.network_rules
-        gate = NetworkWriteGate(
-            allowed_hosts=frozenset(str(item) for item in network["hosts"]),
-            allowed_schemes=frozenset(str(item) for item in network["schemes"]),
-            allowed_methods=frozenset(str(item).upper() for item in network["methods"]),
-            allowed_read_paths=frozenset(str(item) for item in network.get("paths", [])),
-            allowed_paths_by_method={
-                str(method).upper(): frozenset(str(path) for path in paths)
-                for method, paths in network.get("paths_by_method", {}).items()
-            },
-            target_name=f"network:{self.name}",
-        )
-        self.network_rule_engine = gate
-        self._write_transport = BinancePredictionWriteTransport(self.settings, gate)
+        self._write_transport = BinancePredictionWriteTransport(self.settings)
         self.client = BinancePredictionReadClient(
             self.settings.api_key,
             self.settings.api_secret,
             self.settings.base_url,
-            gate=gate,
             http_proxy=self.settings.http_proxy,
         )
         self._topics: list[dict[str, Any]] = []

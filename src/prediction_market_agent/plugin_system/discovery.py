@@ -89,6 +89,15 @@ class PluginConfiguration:
     choice_fields: tuple[str, ...] = ()
     presets: tuple[dict[str, Any], ...] = ()
     context_choices_callback: Callable[[str, dict[str, Any]], list[dict[str, str]]] | None = None
+    retired_fields: tuple[str, ...] = ()
+    """Field names this plugin used to accept and has since removed.
+
+    An unknown field is normally an error, because a typo silently ignored is a setting the
+    operator believes is in force when it is not. A field the plugin itself deleted is different:
+    the value is sitting in configs that were valid when written, and refusing to load would take
+    the plugin down on upgrade. Naming them here ignores exactly those and nothing else; the next
+    save drops them from the file.
+    """
 
     def __post_init__(self) -> None:
         names = [field.name for field in self.fields]
@@ -119,6 +128,7 @@ class PluginConfiguration:
         raw = self.load_callback()
         if not isinstance(raw, dict):
             raise ValueError("Plugin configuration load function must return a JSON object")
+        raw = {key: value for key, value in raw.items() if key not in self.retired_fields}
         unknown = sorted(set(raw) - {field.name for field in self.fields})
         if unknown:
             raise ValueError(f"Plugin configuration has unknown fields: {', '.join(unknown)}")
@@ -221,6 +231,7 @@ class PluginConfiguration:
         raw = self.load_callback()
         if not isinstance(raw, dict):
             raise ValueError("Plugin configuration load function must return a JSON object")
+        raw = {key: value for key, value in raw.items() if key not in self.retired_fields}
         known = {field.name for field in self.fields}
         unknown = sorted(set(raw) - known)
         if unknown:
