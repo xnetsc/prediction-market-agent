@@ -129,3 +129,50 @@ class ChainTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class RuleLaneTests(unittest.TestCase):
+    """The same rule file loaded into either category must land on that category's target."""
+
+    def test_each_category_loads_trusted_python_onto_its_own_target(self) -> None:
+        from prediction_market_agent.plugins.agent_policy.custom_rules import AgentRuleEngine
+        from prediction_market_agent.plugins.risk.custom_rules import BusinessRuleEngine
+
+        import tempfile, pathlib
+        with tempfile.TemporaryDirectory() as directory:
+            path = pathlib.Path(directory) / "rule.py"
+            path.write_text(
+                "def evaluate(operation, context):\n"
+                "    return {'outcome': 'ALLOW', 'reason': 'ok'}\n",
+                encoding="utf-8",
+            )
+            self.assertEqual(BusinessRuleEngine(path, 0).target, "market:*")
+            self.assertEqual(AgentRuleEngine(path, 1).target, "agent:actions")
+
+    def test_a_rule_can_still_govern_agent_behaviour(self) -> None:
+        """Splitting the categories must not drop the ability to filter tool calls with Python."""
+        from prediction_market_agent.plugins.agent_policy.custom_rules import AgentRuleEngine
+
+        import tempfile, pathlib
+        with tempfile.TemporaryDirectory() as directory:
+            path = pathlib.Path(directory) / "rule.py"
+            path.write_text(
+                "def evaluate(operation, context):\n"
+                "    if context.get('kind') == 'tool' and operation == 'SEARCH_WEB':\n"
+                "        return {'outcome': 'REJECT', 'reason': 'no web search'}\n"
+                "    return {'outcome': 'ALLOW', 'reason': 'ok'}\n",
+                encoding="utf-8",
+            )
+            coordinator = RiskCoordinator()
+            coordinator.register(AgentRuleEngine(path, 0))
+            blocked = coordinator.evaluate("agent:actions", "SEARCH_WEB", {"kind": "tool"})
+            allowed = coordinator.evaluate("agent:actions", "READ_BOOK", {"kind": "tool"})
+            self.assertEqual(blocked.outcome, "REJECT")
+            self.assertEqual(allowed.outcome, "ALLOW")
+
+    def test_an_adjust_without_a_value_refuses_rather_than_allowing(self) -> None:
+        coordinator = RiskCoordinator()
+        coordinator.register(Recorder("market:*", "ADJUST"))
+        decision = coordinator.evaluate("market:binance", "place_order", {"requested_value": 100})
+        self.assertEqual(decision.outcome, "REJECT")
+        self.assertIn("adjusted_value", decision.reason)

@@ -65,6 +65,16 @@ class GuardedMarketApi:
         decision = self._risk.evaluate(
             self._target, operation, {"kind": "market_api", "platform": self.name, **context}
         )
+        if decision.outcome == "ADJUST":
+            # A market API call cannot be made smaller here. The size is already bound to a quote
+            # the platform issued, and a read has no size at all. Letting it through would leave the
+            # rule author believing a cap applied while the full order went out, so this refuses and
+            # says where reducing does work.
+            raise MarketActionRejected(
+                f"{operation} refused: business risk cannot reduce a market API call "
+                f"({decision.reason}). Reduce the size from an agent_policy rule instead, which "
+                f"runs before the platform is quoted."
+            )
         if decision.outcome in {"REJECT", "HALT"}:
             LOGGER.warning(
                 "business risk %s %s on %s: %s",

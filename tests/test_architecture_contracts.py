@@ -209,6 +209,9 @@ class ArchitectureContractTests(unittest.TestCase):
             "decision_strategy_plugins": "*.py",
             "research_tool_plugins": "*.py",
             "risk_plugins": "*.py",
+            "risk_rules": "*.py",
+            "agent_policy_plugins": "*.py",
+            "agent_policy_rules": "*.py",
         }
         missing = [name for name, pattern in expected.items() if not list((examples / name).glob(pattern))]
         self.assertEqual(missing, [])
@@ -219,6 +222,8 @@ class ArchitectureContractTests(unittest.TestCase):
             "standard_research": "research_standard.json",
             "agent_actions": "risk_agent_actions.json",
             "custom_rules": "risk_custom_rules.json",
+            "refuse_tool": "refuse_tool.json",
+            "reject_operation": "reject_operation.json",
             "portfolio_limits": "risk_portfolio_limits.json",
             "general_agent": "strategy_general_agent.json",
             "timezone_latency": "strategy_timezone_latency.json",

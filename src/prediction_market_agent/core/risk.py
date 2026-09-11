@@ -165,7 +165,15 @@ class RiskCoordinator:
                 # continuing would run later plugins - including operator-supplied Python, with
                 # whatever side effects it has - for a verdict that is already settled.
                 return decision
-            if outcome == "ADJUST" and decision.adjusted_value is not None:
+            if outcome == "ADJUST":
+                if decision.adjusted_value is None:
+                    # "Reduce it" without saying to what is not an answer, and treating it as
+                    # permission would pass the action at full size.
+                    return RuleDecision(
+                        "REJECT",
+                        f"Filter plugin {engine.target} asked to adjust {operation} "
+                        f"without an adjusted_value: {decision.reason}",
+                    )
                 adjustments.append(decision.adjusted_value)
         if adjustments:
             requested = context.get("requested_value")

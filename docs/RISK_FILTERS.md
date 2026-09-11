@@ -26,10 +26,21 @@
 - 任意一个**抛异常** → 同样算拒绝。一个崩掉的检查并没有"放行"，它只是没能回答；因为检查坏了就放行，
   是唯一一种会让缺失的防护变成真金白银流出去的失败方式。
 - 任意一个返回内核不认识的结果 → 也算拒绝，理由同上。
-- 全部返回 `ADJUST` 时取最严格的那个值。
+- 全部返回 `ADJUST` 时取最严格的那个值，**但只有 Agent 行为风控能真正缩减**，见下一节。
 
 链是"与"关系，没有优先级也没有覆盖。所以一条宽的公司级规则和一条窄的部门级规则可以同时启用，
 互相不需要知道对方存在。
+
+## ADJUST 只在 Agent 行为风控有效
+
+`ADJUST`（把金额缩减到某个值）要起作用，必须发生在向平台要报价**之前**。Agent 行为风控审的是模型提出
+的交易动作，那时还没报价，缩减后再去报价即可，所以这一类用得上。
+
+业务风控审的是已经成形的市场 API 调用：金额已经和平台给出的 `quoteId` 绑死，只读调用更没有"金额"可言，
+**缩不动**。所以业务风控插件返回 `ADJUST` 时，这次动作会被**拒绝**，并提示改到 Agent 行为风控里做，
+而不是放行。放行才是最坏的：规则作者以为自己限住了额度，实际整笔原样发出去了。
+
+要限额，就把规则写成 `agent_policy` 类。
 
 ## 出厂不启用任何过滤插件
 
@@ -68,11 +79,27 @@
   只存在于当前私有配置，不是内核或文档默认值。
 - `agent_actions`（Agent 行为风控）：插件 JSON 定义 Agent 工具和交易动作白名单。
 - `custom_rules`（业务风控）：插件 JSON 指定受信任 `.py` 文件；每个文件导出
-  `evaluate(operation, context)`，可拒绝、停止或缩减，异常失败关闭。目标为 `market:*`，即覆盖全部平台的
-  全部市场 API 动作。
+  `evaluate(operation, context)`，异常失败关闭。目标为 `market:*`，覆盖全部平台的全部市场 API 动作。
+  规则收到的 `operation` 是市场 API 调用名（`place_order`、`cancel_orders`、`redeem`、`transfer`、
+  `get_order_book`、`get_candles`、`list_topics` 等）。可拒绝或停止，不能缩减。
+- `custom_rules`（Agent 行为风控）：同样加载受信任 `.py` 文件，但目标是 `agent:actions`。规则收到的
+  `operation` 是工具名或交易动作，`context["kind"]` 为 `tool` 或 `trade`。这一类可以缩减。
+
+两个 `custom_rules` 同名但分属不同类别，各自在自己的类别页配置，配置文件分别是
+`config/plugins/risk_custom_rules.json` 和 `config/plugins/agent_policy_custom_rules.json`。
 
 没有硬编码永久写拦截，也没有执行模式。规则允许的动作会进入线上传输；API 权限、签名和业务参数由
-远端最终判定。`examples/risk_plugins/` 和 `examples/risk_rules/` 分别给出完整插件与自定义脚本例子。
+远端最终判定。例子按类别分开放，照抄哪一类就用哪一份：
+
+| 例子 | 类别 | 演示 |
+| --- | --- | --- |
+| `examples/risk_plugins/reject_operation.py` | 业务风控 | 完整插件，`market:*` 目标，拒绝指定市场 API 动作 |
+| `examples/risk_rules/refuse_large_orders.py` | 业务风控 | 规则脚本，拒绝转账和超额下单 |
+| `examples/agent_policy_plugins/refuse_tool.py` | Agent 行为风控 | 完整插件，`agent:actions` 目标，拒绝指定工具或动作 |
+| `examples/agent_policy_rules/cap_trade_size.py` | Agent 行为风控 | 规则脚本，用 `ADJUST` 把每笔买入压到 1 USDT |
+
+插件声明的 `target` 必须落在协调器真正分发的两族目标上（`agent:actions` 或 `market:<平台>`，可用通配）。
+自己发明一个目标名的插件能加载、界面也显示已启用，但**永远不会被调用**。
 
 ## 网络允许清单不是第三类过滤
 

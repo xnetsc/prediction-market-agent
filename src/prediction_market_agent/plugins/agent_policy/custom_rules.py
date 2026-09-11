@@ -15,28 +15,28 @@ from prediction_market_agent.plugins._rules import (
     rule_readiness,
 )
 
-BUSINESS_TARGET = "market:*"
-"""Every market API action on every platform.
+AGENT_TARGET = "agent:actions"
+"""Every tool call the model makes, plus the trade it proposes.
 
-Business risk is defined by what is being done to a market, not by which platform or which caller,
-so one rule file covers them all rather than needing an entry per platform.
+Unlike business risk this runs before the platform is quoted, so a rule here can still reduce a
+requested size with ADJUST rather than only refusing it.
 """
 
 
-def BusinessRuleEngine(module_path: Path, index: int) -> TrustedRuleEngine:
-    return TrustedRuleEngine(module_path, index, BUSINESS_TARGET, namespace="business_rule")
+def AgentRuleEngine(module_path: Path, index: int) -> TrustedRuleEngine:
+    return TrustedRuleEngine(module_path, index, AGENT_TARGET, namespace="agent_rule")
 
 
 def initialize_plugin(context: PluginInitializationContext) -> PluginSpec:
     load, save, delete, storage = json_file_callbacks(
-        context.working_directory / "config" / "plugins" / "risk_custom_rules.json"
+        context.working_directory / "config" / "plugins" / "agent_policy_custom_rules.json"
     )
     configuration = PluginConfiguration(
         fields=(
             rule_path_field(
-                "受信任 Python 业务风控规则文件路径列表；多个路径使用系统路径分隔符分隔。"
-                "规则收到的是市场 API 操作名（place_order、cancel_orders、redeem、transfer、"
-                "get_order_book 等），protected_target 形如 market:binance。"
+                "受信任 Python Agent 行为规则文件路径列表；多个路径使用系统路径分隔符分隔。"
+                "规则收到的是工具名或交易动作（BUY、SELL、HOLD 及各研究工具名），"
+                "context 的 kind 为 tool 或 trade，protected_target 为 agent:actions。"
                 "留空时本插件不加载任何规则，也就不施加任何限制。"
             ),
         ),
@@ -49,14 +49,14 @@ def initialize_plugin(context: PluginInitializationContext) -> PluginSpec:
     def factory(config, services):
         del config, services
         return [
-            BusinessRuleEngine(Path(path), index)
+            AgentRuleEngine(Path(path), index)
             for index, path in enumerate(configured_paths(configuration))
         ]
 
     return PluginSpec(
-        "risk",
+        "agent_policy",
         "custom_rules",
-        "用你自己的 Python 规则约束一切市场 API 动作，可拒绝或停止。",
+        "用你自己的 Python 规则约束模型发起的工具调用与交易动作，可拒绝、停止或缩减。",
         str(context.module_path),
         factory,
         configuration,

@@ -95,7 +95,7 @@ PluginConfigField("EFFORT", "推理强度", "string", "选择当前模型支持�
 兼容 API、模型和新扩展安装只在 `#models` 管理，不在插件中心重复出现。
 技术来源、错误原因和私有配置默认折叠；禁用插件仍只依据文件信息显示。页面操作例子见 [Web UI](WEB_UI.md)。
 
-管理页面合计覆盖六类插件：安装新源码、启用/禁用、优先级、当前策略、刷新、动态配置表单、字段删除和整个
+管理页面合计覆盖七类插件：安装新源码、启用/禁用、优先级、当前策略、刷新、动态配置表单、字段删除和整个
 配置删除。安装接口先验证类别、名称、Python 语法及顶层 `initialize_plugin`，只允许写入该类别当前配置的
 目录且不覆盖现有文件；安装后保持禁用，所以不会立即导入不受信任代码。启用、私有配置保存、暂停和刷新
 都会停止旧 runtime、执行 teardown、重新扫描并按 readiness 自动决定是否启动。
@@ -115,8 +115,10 @@ PluginConfigField("EFFORT", "推理强度", "string", "选择当前模型支持�
 - `examples/decision_provider_plugins/static_provider.py`：严格 schema 的结构化 Provider。
 - `examples/decision_strategy_plugins/example_strategy.py`：策略文本和私有候选筛选。
 - `examples/research_tool_plugins/static_evidence.py`：动态加入 Agent 控制 schema 的工具。
-- `examples/risk_plugins/reject_operation.py`：命名目标和标准规则结果。
-- `examples/risk_rules/cap_trade_size.py`：`custom_rules` 加载的受信任 Python 规则脚本。
+- `examples/risk_plugins/reject_operation.py`：业务风控完整插件，`market:*` 目标和标准规则结果。
+- `examples/risk_rules/refuse_large_orders.py`：业务风控 `custom_rules` 加载的受信任 Python 规则脚本。
+- `examples/agent_policy_plugins/refuse_tool.py`：Agent 行为风控完整插件，`agent:actions` 目标。
+- `examples/agent_policy_rules/cap_trade_size.py`：Agent 行为风控 `custom_rules` 规则脚本，演示 `ADJUST` 缩减。
 - `examples/plugin_directories.json` 与 `examples/plugin_configs/`：目录和字段值样例。
 
 插件与自定义 Python 规则在机器人进程内运行，属于受信任代码边界。

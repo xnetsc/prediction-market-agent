@@ -43,13 +43,14 @@ class FakePlugin:
 class Recorder:
     target = "market:*"
 
-    def __init__(self, outcome="ALLOW"):
+    def __init__(self, outcome="ALLOW", *, value=None):
         self.outcome = outcome
+        self.value = value
         self.seen: list[tuple[str, dict]] = []
 
     def evaluate(self, operation, context):
         self.seen.append((operation, context))
-        return RuleDecision(self.outcome, f"recorder said {self.outcome}")
+        return RuleDecision(self.outcome, f"recorder said {self.outcome}", self.value)
 
     def manifest(self): return {"target": self.target}
 
@@ -89,6 +90,20 @@ class MarketGuardTests(unittest.TestCase):
         guard = GuardedMarketApi(self.plugin, self._coordinator("HALT"))
         with self.assertRaises(MarketActionRejected):
             guard.list_topics(offset=0, limit=1)
+
+    def test_a_shrink_request_refuses_rather_than_passing_the_call_at_full_size(self) -> None:
+        """A quote's size is already bound and a read has none, so ADJUST cannot be honoured here.
+
+        Passing it through would leave the rule author believing a cap applied while the full order
+        went out - the failure mode that turns a missing guard into money leaving.
+        """
+        guard = GuardedMarketApi(self.plugin, self._coordinator("ADJUST", value=10.0))
+        with self.assertRaises(MarketActionRejected) as caught:
+            guard.create_write_gateway(object(), object()).business_risk(
+                "place_order", {"notional": 100}
+            )
+        self.assertIn("agent_policy", str(caught.exception), "say where reducing does work")
+        self.assertEqual(self.plugin.calls, [])
 
     def test_an_allowed_read_returns_the_platform_result_unchanged(self) -> None:
         self.assertEqual(self.guard.get_topic("t-9"), {"id": "t-9"})
@@ -130,9 +145,9 @@ class MarketGuardTests(unittest.TestCase):
         with self.assertRaises(MarketActionRejected):
             gateway.business_risk("transfer", {"amount": 5})
 
-    def _coordinator(self, outcome: str) -> RiskCoordinator:
+    def _coordinator(self, outcome: str, *, value: float | None = None) -> RiskCoordinator:
         coordinator = RiskCoordinator()
-        coordinator.register(Recorder(outcome))
+        coordinator.register(Recorder(outcome, value=value))
         return coordinator
 
 

@@ -94,6 +94,7 @@ class PluginSystemTests(unittest.TestCase):
                 "decision_strategy": [str(project / "examples/decision_strategy_plugins")],
                 "research_tool": [str(project / "examples/research_tool_plugins")],
                 "risk": [str(project / "examples/risk_plugins")],
+                "agent_policy": [str(project / "examples/agent_policy_plugins")],
             }
             directory_path.write_text(json.dumps({"categories": categories}), encoding="utf-8")
             selected = {
@@ -102,6 +103,7 @@ class PluginSystemTests(unittest.TestCase):
                 "decision_strategy": ("example_strategy",),
                 "research_tool": ("static_evidence",),
                 "risk": ("reject_operation",),
+                "agent_policy": ("refuse_tool",),
             }
             catalog = discover_plugin_catalog(
                 PluginDirectoryConfig.load(directory_path),
@@ -117,7 +119,11 @@ class PluginSystemTests(unittest.TestCase):
                 research = catalog.get("research_tool", "static_evidence").factory(runtime)
                 self.assertIn("READ_STATIC_EVIDENCE", research.descriptions)
                 risk = catalog.get("risk", "reject_operation").factory(runtime, {})
-                self.assertEqual(risk.target, "example:operation_policy")
+                policy = catalog.get("agent_policy", "refuse_tool").factory(runtime, {})
+                # A target the coordinator never dispatches is never consulted, so each example
+                # must claim one of the two real target families.
+                self.assertEqual(risk.target, "market:*")
+                self.assertEqual(policy.target, "agent:actions")
             finally:
                 catalog.shutdown()
 
