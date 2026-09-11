@@ -363,6 +363,25 @@ def validated_notices(items: Any) -> list[dict[str, Any]]:
         # it disappears when the plugin stops reporting it. Marking something read and dismissing
         # it are the same act - the operator is done with it - so there is one verb, and the label
         # the plugin chooses says which it means.
+        for verb in ("action_fields", "dismiss_fields"):
+            fields = entry.get(verb) or []
+            if not isinstance(fields, (list, tuple)):
+                raise ValueError(f"Notice {key}: {verb} must be a list")
+            checked_fields = []
+            for field in fields:
+                if not isinstance(field, dict) or not str(field.get("name", "")):
+                    raise ValueError(f"Notice {key}: every {verb} entry needs a name")
+                checked_fields.append({
+                    "name": str(field["name"]),
+                    "label": str(field.get("label", field["name"])),
+                    "placeholder": str(field.get("placeholder", "")),
+                    "multiline": bool(field.get("multiline", False)),
+                    # A marker the page draws. Whether an empty answer is acceptable
+                    # is the plugin's rule, enforced in its own handler: the framework
+                    # has no idea what the field is for.
+                    "required": bool(field.get("required", False)),
+                })
+            entry[verb] = checked_fields
         entry["kind"] = kind
         checked.append(entry)
     return checked

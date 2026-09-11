@@ -148,6 +148,7 @@ class PluginManagementService:
             raise ValueError(f"Plugin {kind}:{name} offers no notice actions")
         return spec.notice_action_callback(key, action, values)
 
+
     def control_action(self, kind: str, name: str, action: str,
                        values: dict[str, Any]) -> dict[str, Any]:
         if not isinstance(values, dict):

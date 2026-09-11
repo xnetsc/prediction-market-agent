@@ -15,6 +15,8 @@ from __future__ import annotations
 from dataclasses import asdict, is_dataclass
 from typing import Any
 
+from ..plugin_system.contracts import FUNDING_TIMEOUT_SECONDS
+
 
 
 def account_snapshot(state: Any, *, include_positions: bool = False) -> dict[str, Any]:
@@ -98,11 +100,28 @@ DESCRIPTIONS: dict[str, Any] = {
     },
     "ENSURE_FUNDS": {
         "purpose": (
-            "Tell the platform you need a given amount available and let it do whatever that takes "
-            "- a transfer, or nothing, or telling you it cannot. Read `satisfied` and `detail`: a "
-            "platform that cannot add funds says so rather than failing."
+            "Ask for an amount to be spendable here. The reply carries a `state`: satisfied means "
+            "it is there now; pending means someone has to approve or send it, and you get a "
+            "`request_id` to check later with FUNDING_STATUS; refused or failed means it will not "
+            "happen. Say why you need it: a person may have to approve the transfer, and the "
+            "reason is the one thing they cannot work out for themselves. Set allow_pending "
+            "false if you cannot wait, and a platform that cannot finish immediately will say so "
+            "instead of parking the request."
         ),
-        "arguments": {"amount": "required number", "currency": "optional string; defaults to whatever this platform settles in", "platform": "optional string"},
+        "arguments": {
+            "amount": "required number",
+            "reason": "required string: why the money is needed, shown to whoever approves it",
+            "currency": "optional string; defaults to whatever this platform settles in",
+            "allow_pending": "optional boolean, default true",
+            "platform": "optional string",
+        },
+    },
+    "FUNDING_STATUS": {
+        "purpose": (
+            "Check where an earlier ENSURE_FUNDS got to, by its request_id. States are satisfied, "
+            "pending, partial (some arrived - `available` says how much), refused and failed."
+        ),
+        "arguments": {"request_id": "required string", "platform": "optional string"},
     },
     "LIST_PLATFORMS": {
         "purpose": "List every connected market platform and what each one supports.",
@@ -210,9 +229,21 @@ class MarketToolset:
 
     def _ensure_funds(self, arguments: dict[str, Any]) -> dict[str, Any]:
         runtime = self._runtime(arguments)
-        # The settlement currency is the plugin's to name, not the framework's to assume.
+        # The settlement currency is the plugin's to name, not the framework's to assume; how long
+        # a request may stay open is the framework's to set, not the plugin's.
         currency = str(arguments.get("currency") or runtime.plugin.account_funds().currency)
-        result = runtime.plugin.ensure_funds(float(arguments["amount"]), currency)
+        result = runtime.plugin.ensure_funds(
+            float(arguments["amount"]),
+            currency,
+            reason=str(arguments.get("reason", "")),
+            allow_pending=bool(arguments.get("allow_pending", True)),
+            timeout_seconds=FUNDING_TIMEOUT_SECONDS,
+        )
+        return {"platform": runtime.plugin.name, **result.to_dict()}
+
+    def _funding_status(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        runtime = self._runtime(arguments)
+        result = runtime.plugin.funding_status(str(arguments["request_id"]))
         return {"platform": runtime.plugin.name, **result.to_dict()}
 
     def _list_platforms(self, arguments: dict[str, Any]) -> dict[str, Any]:
