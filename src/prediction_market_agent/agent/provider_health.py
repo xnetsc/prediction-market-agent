@@ -54,7 +54,17 @@ COOLDOWN_SECONDS = {
     "contract": 15,
     "unknown": 60,
 }
-COOLDOWN_CEILING = 3600
+COOLDOWN_CEILING = 900
+"""Longest any provider stays out of the rotation, whatever its failure kind.
+
+A quota ceiling is not a fact about the world: the operator can change plan, buy credits, switch
+account, or the platform can widen a limit on its own. The provider's own "try again at" is a guess
+about one of those and would keep a provider sidelined for days, so it is not used as a floor. The
+cap bounds how stale that judgement can get instead.
+"""
+
+PROBE_INTERVAL_SECONDS = 300
+"""Shortest gap between two out-of-band liveness probes of the same provider."""
 
 
 def classify_error(message: str) -> str:
@@ -85,6 +95,8 @@ class ProviderState:
     last_error: str = ""
     last_error_kind: str = ""
     last_success_at: float = 0.0
+    probation: bool = False
+    last_probe_at: float = 0.0
     attempts: int = 0
     successes: int = 0
     failures_by_kind: dict[str, int] = field(default_factory=dict)
@@ -101,10 +113,24 @@ class ProviderState:
     def available_at(self, now: float) -> bool:
         return now >= self.cooldown_until
 
+    def needs_probe(self, now: float) -> bool:
+        """Whether this provider should be tried out of band rather than on a decision.
+
+        A failed probe can be slow - a client may spend half a minute retrying its transport before
+        reporting the refusal - so a provider that has not proved itself since its last failure is
+        checked away from the decision path, not on it.
+        """
+        return (
+            self.probation
+            and self.available_at(now)
+            and now - self.last_probe_at >= PROBE_INTERVAL_SECONDS
+        )
+
     def manifest(self, now: float) -> dict[str, Any]:
         return {
             "provider": self.name,
             "available": self.available_at(now),
+            "probation": self.probation,
             "cooldown_seconds_remaining": max(0, round(self.cooldown_until - now)),
             "consecutive_failures": self.consecutive_failures,
             "attempts": self.attempts,
@@ -161,6 +187,9 @@ class ProviderHealthRegistry:
                     not self._states.setdefault(
                         item[1], ProviderState(item[1])
                     ).available_at(moment),
+                    # Not yet proved since its last failure: usable, but not ahead of a provider
+                    # that is currently working.
+                    self._states[item[1]].probation,
                     -self._quality.get(item[1], 1.0),
                     item[0],
                 ),
@@ -177,6 +206,7 @@ class ProviderHealthRegistry:
             state.last_error = ""
             state.last_error_kind = ""
             state.last_success_at = time.time()
+            state.probation = False
             state.latency_total += max(0.0, latency_seconds)
 
     def record_failure(self, name: str, message: str) -> str:
@@ -188,6 +218,7 @@ class ProviderHealthRegistry:
             state.consecutive_failures += 1
             state.last_error = message
             state.last_error_kind = kind
+            state.probation = True
             state.failures_by_kind[kind] = state.failures_by_kind.get(kind, 0) + 1
             base = COOLDOWN_SECONDS.get(kind, COOLDOWN_SECONDS["unknown"])
             backoff = min(
@@ -195,6 +226,39 @@ class ProviderHealthRegistry:
             )
             state.cooldown_until = time.time() + backoff
         return kind
+
+    def due_for_probe(self, names: tuple[str, ...] = ()) -> list[str]:
+        now = time.time()
+        with self._lock:
+            candidates = names or tuple(self._states)
+            return [
+                name
+                for name in candidates
+                if name in self._states and self._states[name].needs_probe(now)
+            ]
+
+    def record_probe(self, name: str) -> None:
+        with self._lock:
+            self._states.setdefault(name, ProviderState(name)).last_probe_at = time.time()
+
+    def recheck(self, name: str = "") -> list[str]:
+        """Put cooled-down providers back in line right now.
+
+        Entitlement changes out of band: a plan changes, credits are bought, an account is swapped.
+        The operator knows when that happened and the runtime cannot, so this exists to be pressed.
+        """
+        with self._lock:
+            targets = [name] if name else list(self._states)
+            cleared = []
+            for target in targets:
+                state = self._states.get(target)
+                if state is None:
+                    continue
+                state.cooldown_until = 0.0
+                state.consecutive_failures = 0
+                state.last_probe_at = 0.0
+                cleared.append(target)
+            return cleared
 
     def manifest(self) -> list[dict[str, Any]]:
         now = time.time()

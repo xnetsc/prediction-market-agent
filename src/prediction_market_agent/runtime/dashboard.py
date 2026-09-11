@@ -561,6 +561,8 @@ def create_app(config: Config, *, start_robot: bool = True) -> FastAPI:
             return management.manifest()
         if path == "/api/strategies/export":
             return runtime.export_strategies(str(payload.get("lane", "")))
+        if path == "/api/providers/recheck":
+            return runtime.recheck_providers(str(payload.get("provider", "")))
         if path == "/api/plugins/controls":
             return management.control_status()
         if path == "/api/plugins/controls/action":

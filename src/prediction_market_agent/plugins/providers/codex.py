@@ -31,6 +31,24 @@ class CodexCliBackend:
         self.control = control
         self.effort = effort
 
+    def entitlement(self) -> bool | None:
+        """Whether this account can serve a request, asked without spending anything.
+
+        The client knows its own quota and its own session state, so both questions are put to it
+        rather than answered by sending a request and seeing what happens. Returns None when the
+        client cannot say, which leaves the caller free to find out the expensive way.
+        """
+        if not self.control:
+            return None
+        usage = self.control.usage()
+        if usage.get("available") is not None:
+            return bool(usage["available"])
+        return self.control.authenticated()
+
+    def liveness(self) -> bool | None:
+        """Free signal the client provides about its own session; None when unavailable."""
+        return self.control.authenticated() if self.control else None
+
     def complete(self, prompt: str, schema: dict[str, Any], schema_name: str) -> StructuredResult:
         with tempfile.TemporaryDirectory(prefix="prediction-codex-") as directory:
             root = Path(directory)

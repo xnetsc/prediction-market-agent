@@ -176,13 +176,43 @@ function renderServiceConnections(){
             controlNode('p','客户端版本：'+(s.installed_version||'未检测')+' · '+(s.update_available?'有新版可升级':s.update_message||'尚未检查更新'),more).className='description';
             if(s.update_checked_at)controlNode('p','最近检查：'+new Date(s.update_checked_at*1000).toLocaleString(),more).className='description';
             const diagnostics=controlNode('details','',more);diagnostics.className='diagnostic-detail';controlNode('summary','连接技术信息',diagnostics);controlNode('p',s.proxy_message||'未提供连接信息',diagnostics);
+            const usage=s.usage||{};
+            if(usage.checked_at||usage.error){
+                const box=controlNode('div','',more);box.className='usage-readout';
+                const fresh=new Date(usage.checked_at*1000).toLocaleString();
+                const rows=(usage.windows||[]).map(w=>{
+                    const reset=w.resets_text||(w.resets_at?new Date(w.resets_at*1000).toLocaleString():'');
+                    const pct=w.used_percent==null?'—':Math.round(w.used_percent)+'%';
+                    return '<li><span>'+esc(w.label)+'</span><b>'+esc(pct)+' 已用</b>'+(reset?'<small>重置 '+esc(reset)+'</small>':'')+'</li>'}).join('');
+                box.innerHTML='<h5>账号状态</h5>'
+                    +'<p class="description">'+(usage.error?'查询失败：'+esc(usage.error)
+                        :(usage.available===false?'额度已用尽':usage.available===true?'额度可用':'额度未知')
+                         +(usage.note?' · '+esc(usage.note):''))+'</p>'
+                    +(rows?'<ul class="usage-windows">'+rows+'</ul>':'')
+                    +'<p class="description">模型：'+esc(s.model||'客户端默认')+' · 查询于 '+esc(fresh)
+                    +(usage.source?' · '+esc(usage.source):'')+'</p>';
+            }
             const maintenance=controlNode('div','',more);maintenance.className='toolbar';
             if(s.state==='authorizing'){const resume=controlNode('button','继续登录',bar);resume.className='primary';resume.onclick=()=>showLoginWizard(item)}
+            const groups=new Map();
             for(const action of s.actions||[]){
                 if(action.id==='cancel'&&s.state!=='authorizing')continue;
                 const prominent=action.id==='login'&&s.state!=='authenticated'&&s.state!=='authorizing';
-                const box=controlNode('div','',prominent?bar:maintenance);box.className='action-item';const inputs={};
-                for(const field of action.fields||[]){const label=controlNode('label',field.label,box);label.className='field';const input=controlNode('input','',label);input.type=field.type==='secret'?'password':field.type==='file'?'file':'text';if(field.type==='file'){input.accept='application/json,.json'}else{input.autocomplete='off'}input.setAttribute('aria-label',field.label);inputs[field.name]=input;controlNode('small',field.description,label)}
+                // Actions the plugin puts in a group get their own labelled block. A plain toolbar
+                // row cannot hold one that carries a file picker: the label collapses to a single
+                // character column once the row runs out of width.
+                let host=prominent?bar:maintenance;
+                if(action.group){
+                    if(!groups.has(action.group)){
+                        const block=controlNode('div','',more);block.className='action-group';
+                        controlNode('h5',action.group,block);
+                        if(action.group_note)controlNode('p',action.group_note,block).className='description';
+                        groups.set(action.group,block);
+                    }
+                    host=groups.get(action.group);
+                }
+                const box=controlNode('div','',host);box.className='action-item';const inputs={};
+                for(const field of action.fields||[]){const label=controlNode('label',field.label,box);label.className='field';const input=controlNode('input','',label);input.type=field.type==='secret'?'password':field.type==='file'?'file':'text';if(field.type==='file'){input.accept='application/json,.json'}else{input.autocomplete='off'}input.setAttribute('aria-label',field.label);inputs[field.name]=input;controlNode('small',field.description,box)}
                 const button=controlNode('button',action.label,box);button.disabled=!!action.disabled;button.className=prominent?'primary':action.id==='logout'?'danger':'';
                 button.onclick=async()=>{if(action.confirm&&!confirm(action.confirm))return;button.disabled=true;const values={flow_id:s.flow_id};try{for(const [key,input]of Object.entries(inputs)){if(input.type==='file'){const file=input.files&&input.files[0];if(!file)throw Error('请先选择凭据文件');values[key]=await file.text()}else{values[key]=input.value}input.value=''}const status=await post('/api/plugins/controls/action',{kind:item.kind,name,action:action.id==='login'?loginAction(name):action.id,values});if(['login','login_remote'].includes(action.id))showLoginWizard({...item,status});if(action.id==='export_credentials')downloadCredentialBundle(name,status);document.getElementById('clientControlError').textContent='';button.blur();await refreshClientControls()}catch(e){document.getElementById('clientControlError').textContent=e.message}finally{button.disabled=!!action.disabled}};
             }

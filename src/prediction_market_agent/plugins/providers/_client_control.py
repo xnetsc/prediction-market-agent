@@ -45,6 +45,9 @@ the machine inside a credential file.
 
 CREDENTIAL_FILE_MAX_BYTES = 1_048_576
 
+USAGE_TIMEOUT_SECONDS = 45
+"""Quota reads talk to the vendor, so they need more room than a local status check."""
+
 def client_configuration_loader(load, prefix: str):
     """Read pre-script configurations without altering credentials or private files."""
     def compatible_load():
@@ -246,17 +249,23 @@ class ClientControl:
                 value["wizard"] = True
             if value.get("login_mode") == "remote":
                 value["wizard"] = True
+            value["usage"] = dict(self.state.get("usage") or {})
+            value["model"] = str(self.values().get(f"{self.prefix}_MODEL", "") or "")
             value["actions"] = [
+                {"id": "refresh_usage", "label": "刷新账号状态", "group": "账号状态",
+                 "group_note": "向客户端查询登录状态和剩余额度。这条查询不消耗模型额度。"},
                 {"id": "login", "label": "登录 / 重新登录"},
                 {"id": "cancel", "label": "取消登录"},
                 {"id": "logout", "label": "退出账号", "confirm": "退出此客户端账号？"},
                 {"id": "check", "label": "检查登录与版本"},
-                {"id": "export_credentials", "label": "导出登录凭据",
+                {"id": "export_credentials", "label": "导出", "group": "登录凭据",
+                 "group_note": "把当前登录态存成文件，换一个部署时导入即可，不必重新登录。"
+                               "文件含可直接使用的令牌，请只保存在你信任的位置。",
                  "disabled": value["state"] != "authenticated",
                  "confirm": "导出的文件包含可直接使用的登录令牌。任何拿到它的人都能以此账号发起请求；请只保存在你信任的位置。"},
-                {"id": "import_credentials", "label": "导入登录凭据",
-                 "fields": [{"name": "bundle", "label": "凭据文件", "type": "file",
-                             "description": "选择本机器人导出的同一客户端凭据文件；导入会覆盖当前登录状态。"}],
+                {"id": "import_credentials", "label": "导入", "group": "登录凭据",
+                 "fields": [{"name": "bundle", "label": "选择凭据文件", "type": "file",
+                             "description": "须是本机器人导出的同一客户端文件；导入会覆盖当前登录状态。"}],
                  "confirm": "用文件中的凭据覆盖当前登录状态？"},
                 {"id": "upgrade", "label": "升级客户端", "disabled": not value["update_available"] or value["update_state"] == "installing",
                  "confirm": "安装官方最新客户端？成功后用于后续请求，已有请求继续使用旧版本。"},
@@ -299,6 +308,11 @@ class ClientControl:
             self.inspect()
         elif action == "check":
             self._background_check()
+        elif action == "refresh_usage":
+            reading = self.usage()
+            with self.lock:
+                self.state["usage"] = reading
+            self.inspect()
         elif action == "upgrade":
             self.upgrade()
         elif action == "export_credentials":
@@ -308,6 +322,126 @@ class ClientControl:
         else:
             raise ValueError("Unknown client action")
         return self.snapshot()
+
+    def usage(self) -> dict[str, Any]:
+        """Ask the client what quota this account has left, without spending any.
+
+        Neither client offers this as a plain subcommand, which is why it looks absent from
+        `--help`. Both answer it anyway and for free: Claude through its own /usage command in
+        print mode, Codex through account/rateLimits/read on its app-server protocol. Learning the
+        same thing by sending a throwaway completion would cost credit to discover whether credit
+        remains, and would report nothing at all once the account is already exhausted.
+        """
+        started = int(time.time())
+        try:
+            reading = self._codex_usage() if self.name == "codex" else self._claude_usage()
+        except (OSError, ValueError, subprocess.SubprocessError) as error:
+            return {"checked_at": started, "windows": [], "available": None, "error": str(error)[:300]}
+        reading["checked_at"] = started
+        reading.setdefault("error", "")
+        return reading
+
+    def _codex_usage(self) -> dict[str, Any]:
+        """Read the account's limits over the app-server protocol.
+
+        The server answers on a live stdio session, so the request cannot simply be piped in and
+        the pipe closed: it needs the connection held open until the reply arrives.
+        """
+        process = subprocess.Popen(
+            [self.executable(), "app-server"], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL, env=self.environment(), text=True, bufsize=1,
+        )
+        deadline = time.time() + USAGE_TIMEOUT_SECONDS
+        payload = None
+        try:
+            for request in (
+                {"jsonrpc": "2.0", "id": 0, "method": "initialize",
+                 "params": {"clientInfo": {"name": "prediction-market-agent",
+                                           "version": "1", "title": "runtime"}}},
+                {"jsonrpc": "2.0", "id": 1, "method": "account/rateLimits/read", "params": {}},
+            ):
+                process.stdin.write(json.dumps(request) + "\n")
+                process.stdin.flush()
+            while time.time() < deadline:
+                line = process.stdout.readline()
+                if not line:
+                    break
+                line = line.strip()
+                if not line.startswith("{"):
+                    continue
+                try:
+                    message = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if message.get("id") == 1:
+                    payload = message.get("result")
+                    break
+        finally:
+            process.kill()
+            process.wait(timeout=5)
+        if not isinstance(payload, dict):
+            raise ValueError("客户端没有返回额度信息")
+        limits = payload.get("rateLimits") or {}
+        windows = []
+        for label, key in (("当前窗口", "primary"), ("次级窗口", "secondary")):
+            window = limits.get(key)
+            if not isinstance(window, dict):
+                continue
+            windows.append({
+                "label": label,
+                "used_percent": window.get("usedPercent"),
+                "resets_at": window.get("resetsAt"),
+                "window_minutes": window.get("windowDurationMins"),
+            })
+        return {
+            "available": payload.get("ordinaryUsageAllowed"),
+            "windows": windows,
+            "source": "codex app-server · account/rateLimits/read",
+        }
+
+    def _claude_usage(self) -> dict[str, Any]:
+        completed = subprocess.run(
+            [self.executable(), "-p", "/usage", "--output-format", "json"],
+            env=self.environment(), stdin=subprocess.DEVNULL, capture_output=True, text=True,
+            timeout=USAGE_TIMEOUT_SECONDS, check=False,
+        )
+        try:
+            payload = json.loads(completed.stdout)
+        except json.JSONDecodeError as error:
+            raise ValueError("客户端没有返回可解析的额度信息") from error
+        report = str(payload.get("result", ""))
+        windows = []
+        for line in report.splitlines():
+            match = re.match(r"\s*(.+?)\s*[:：]\s*(\d+(?:\.\d+)?)%\s*used(?:\s*[·.]\s*resets\s*(.+))?", line)
+            if match:
+                windows.append({
+                    "label": match.group(1).strip(),
+                    "used_percent": float(match.group(2)),
+                    "resets_text": (match.group(3) or "").strip(),
+                })
+        available = None
+        if windows:
+            available = max(float(w["used_percent"]) for w in windows) < 100
+        return {
+            "available": available,
+            "windows": windows,
+            "note": report.splitlines()[0].strip() if report else "",
+            "source": "claude · /usage",
+        }
+
+    def authenticated(self) -> bool | None:
+        """What the client's own status command says about this session.
+
+        Neither official client reports remaining quota - `codex doctor` and `claude doctor` only
+        inspect the local installation, and the usage figures live on the vendor's website - so
+        this answers the auth question alone. A rate limit still needs a real request to observe.
+        Returns None when the check itself could not run.
+        """
+        try:
+            self.inspect()
+        except Exception:
+            return None
+        return self.state.get("state") == "authenticated"
 
     def export_credentials(self) -> dict[str, Any]:
         """Package the files that restore this client's signed-in session.
