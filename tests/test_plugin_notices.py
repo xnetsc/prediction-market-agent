@@ -114,3 +114,73 @@ class NoticeDispatchTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class CredentialHonestyTests(unittest.TestCase):
+    """What a plugin cannot run without must be said once, where the page can see it."""
+
+    def _catalog(self):
+        from prediction_market_agent.plugin_system.discovery import load_plugin_catalog
+
+        catalog = load_plugin_catalog(Config.load())
+        self.addCleanup(catalog.shutdown)
+        return catalog
+
+    def test_credentials_are_marked_as_needed_to_run(self) -> None:
+        """Shown as optional while the plugin refuses to start without them is the lie to avoid."""
+        expected = {
+            "binance": {
+                "BINANCE_API_KEY", "BINANCE_API_SECRET",
+                "BINANCE_PREDICTION_WALLET_ADDRESS", "BINANCE_PREDICTION_WALLET_ID",
+            },
+            "polymarket": {
+                "POLYMARKET_PRIVATE_KEY", "POLYMARKET_API_KEY", "POLYMARKET_API_SECRET",
+                "POLYMARKET_API_PASSPHRASE", "POLYMARKET_FUNDER_ADDRESS",
+            },
+        }
+        catalog = self._catalog()
+        for name, names in expected.items():
+            with self.subTest(plugin=name):
+                fields = catalog.get("api", name).configuration.fields
+                marked = {f.name for f in fields if f.needed_to_run}
+                self.assertEqual(marked, names)
+
+    def test_readiness_reports_exactly_what_the_schema_marked(self) -> None:
+        """One declaration, two readers. Two lists of the same fact drift, and one did."""
+        catalog = self._catalog()
+        for name in ("binance", "polymarket"):
+            with self.subTest(plugin=name):
+                spec = catalog.get("api", name)
+                stored = spec.configuration.load()
+                expected = {
+                    f.name
+                    for f in spec.configuration.fields
+                    if f.needed_to_run and not str(stored.get(f.name, "")).strip()
+                }
+                reasons = spec.readiness_callback().reasons
+                reported = {r.replace("Missing runtime field: ", "") for r in reasons}
+                self.assertEqual(reported, expected)
+
+    def test_nothing_fixed_and_public_is_left_for_the_operator_to_type(self) -> None:
+        """An endpoint the plugin already knows is a typo waiting to point credentials elsewhere."""
+        from prediction_market_agent.plugin_system.discovery import UNSET
+
+        catalog = self._catalog()
+        for name in ("binance", "polymarket"):
+            with self.subTest(plugin=name):
+                blank = [
+                    f.name
+                    for f in catalog.get("api", name).configuration.fields
+                    if f.required and (f.default is UNSET or f.default in ("", None))
+                ]
+                self.assertEqual(blank, [])
+
+    def test_the_polymarket_endpoints_come_from_the_official_client(self) -> None:
+        """Copied by hand they would drift the day the venue moves one."""
+        from polymarket import PRODUCTION
+
+        fields = {f.name: f.default for f in self._catalog().get("api", "polymarket").configuration.fields}
+        self.assertEqual(fields["POLYMARKET_GAMMA_URL"], PRODUCTION.gamma_url)
+        self.assertEqual(fields["POLYMARKET_CLOB_URL"], PRODUCTION.clob_url)
+        self.assertEqual(fields["POLYMARKET_RELAYER_URL"], PRODUCTION.relayer_url)
+        self.assertEqual(fields["POLYMARKET_CHAIN_ID"], PRODUCTION.chain_id)

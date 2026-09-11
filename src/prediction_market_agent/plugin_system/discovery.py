@@ -28,6 +28,17 @@ class PluginConfigField:
     field_type: str
     description: str
     required: bool = False
+    """Whether the configuration can be saved at all without this. Blocks storing, not starting."""
+
+    needed_to_run: bool = False
+    """Whether the plugin can actually work without this.
+
+    Kept apart from `required` because they are different questions with different answers. An API
+    key is useless to omit yet has to be savable while the form is half filled, so it blocks
+    starting without blocking storing. Conflating the two forces a choice between a form nobody can
+    save and a page that shows a credential as optional while the plugin refuses to start without
+    it - which is what this field exists to stop.
+    """
 
     default: Any = UNSET
     options: tuple[str, ...] = ()
@@ -64,6 +75,7 @@ class PluginConfigField:
             "type": self.field_type,
             "description": self.description,
             "required": self.required,
+            "needed_to_run": self.needed_to_run,
             "has_default": self.default is not UNSET,
             "default": None if self.default is UNSET else self.default,
             "options": list(self.options),
