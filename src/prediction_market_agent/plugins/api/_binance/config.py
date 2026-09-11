@@ -16,6 +16,7 @@ class BinancePluginConfig:
     wallet_id: str
     account_type: str
     slippage_bps: int
+    trading_capital: float
     http_proxy: str
     scan_interval_seconds: int
     error_backoff_seconds: int
@@ -35,6 +36,7 @@ class BinancePluginConfig:
             wallet_id=get("BINANCE_PREDICTION_WALLET_ID", "").strip(),
             account_type=get("BINANCE_PREDICTION_ACCOUNT_TYPE", "").strip().upper(),
             slippage_bps=int(get("BINANCE_PREDICTION_SLIPPAGE_BPS", "0")),
+            trading_capital=float(get("BINANCE_TRADING_CAPITAL", "0") or 0),
             http_proxy=resolve_plugin_proxy(
                 get("BINANCE_HTTP_PROXY", ""), field_name="BINANCE_HTTP_PROXY"
             ),

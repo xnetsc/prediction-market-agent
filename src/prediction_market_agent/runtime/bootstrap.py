@@ -94,7 +94,7 @@ def bootstrap_engine(
         # manually triggered cycles all go through the same door.
         for plugin in [GuardedMarketApi(item, risk) for item in plugins]:
             state_path = platform_state_path(config.state_file, plugin.name, multiple)
-            store = StateStore(state_path, None)
+            store = StateStore(state_path, plugin.opening_balance())
             state = store.load()
             gateway = plugin.create_write_gateway(state)
             platforms[plugin.name] = PlatformRuntime(

@@ -194,6 +194,9 @@ class RiskAndExecutionTests(unittest.TestCase):
                 del reference_symbol, interval, limit
                 return []
 
+            def opening_balance(self):
+                return 0.0
+
             def create_write_gateway(self, state):
                 return ExecutionGateway(
                     state, platform=self.name, write_transport=FailingTransport()

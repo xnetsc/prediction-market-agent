@@ -80,6 +80,7 @@ class ToolCoverageTests(unittest.TestCase):
             "create_write_gateway", "write_transport", "configuration_manifest",
             "topic_page_size", "capabilities", "name", "mark",
             "cycle_limits",      # how often the platform scans, not a decision input
+            "opening_balance",   # surfaced as starting_capital inside READ_ACCOUNT
             "business_risk",     # the injected filter callback, not a capability
         }
         covered = set(DESCRIPTIONS) | {
@@ -180,3 +181,47 @@ class ToolsStillPassFiltersTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class FundingTests(unittest.TestCase):
+    """An account with no money cannot trade, so where the money comes from must be explicit."""
+
+    def test_the_plugin_declares_what_its_account_opened_with(self) -> None:
+        from prediction_market_agent.plugins.api._binance.config import BinancePluginConfig
+        from prediction_market_agent.plugins.api._binance.adapter import BinancePredictionApiPlugin
+        from tests._support import BINANCE_ENV
+
+        plugin = BinancePredictionApiPlugin({**BINANCE_ENV, "BINANCE_TRADING_CAPITAL": "250"})
+        self.assertEqual(plugin.opening_balance(), 250.0)
+
+    def test_the_opening_balance_reaches_the_account_the_bot_trades_with(self) -> None:
+        """This is the wiring that was missing: a declared balance that never became cash."""
+        import tempfile, pathlib
+        from prediction_market_agent.core.state import StateStore
+
+        with tempfile.TemporaryDirectory() as directory:
+            store = StateStore(pathlib.Path(directory) / "state.json", 250.0)
+            state = store.load()
+            self.assertEqual(state.cash, 250.0)
+            self.assertEqual(state.starting_capital, 250.0)
+
+    def test_an_undeclared_balance_leaves_the_account_empty_rather_than_guessing(self) -> None:
+        import tempfile, pathlib
+        from prediction_market_agent.core.state import StateStore
+
+        with tempfile.TemporaryDirectory() as directory:
+            state = StateStore(pathlib.Path(directory) / "state.json", 0.0).load()
+            self.assertEqual(state.cash, 0.0)
+
+    def test_the_opening_balance_caps_nothing(self) -> None:
+        """It is the ledger's starting point, not a limit; only a filter plugin may refuse."""
+        risk = RiskCoordinator()
+        runtime = platform("binance", risk)
+        runtime.state.cash = 10.0
+        runtime.state.starting_capital = 10.0
+        tools = MarketToolset({"binance": runtime}, "binance")
+        result = tools.execute("PLACE_ORDER", {
+            "side": "BUY", "price": 0.5, "quantity": 1000,  # far beyond the opening balance
+            "market_id": "m", "outcome_id": "o",
+        })
+        self.assertEqual(result["order"]["status"], "FILLED")

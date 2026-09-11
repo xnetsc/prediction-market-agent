@@ -262,6 +262,9 @@ class RuntimeManagerTests(unittest.TestCase):
         class Platform:
             name = "platform"
 
+            def opening_balance(self):
+                return 0.0
+
             def create_write_gateway(self, state):
                 self.received_state = state
                 return SimpleNamespace()

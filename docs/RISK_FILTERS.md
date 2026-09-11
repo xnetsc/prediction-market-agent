@@ -77,8 +77,19 @@
 | 结算判定 | `OUTCOME_WON` |
 | 交易与资金 | `GET_QUOTE`、`PLACE_ORDER`、`CANCEL_ORDERS`、`REDEEM`、`TRANSFER` |
 
-`TRANSFER` 就是资金通路：`INBOUND` 给交易账户入金，买入才有钱可花；`OUTBOUND` 把卖出和赎回赚到的
-收回钱包。各平台支持哪个方向见 `LIST_PLATFORMS`。
+## 账户的钱从哪来
+
+买卖要有本金,所以每个 API 插件在自己的配置里声明这个平台的**交易账户起始资金**
+（`BINANCE_TRADING_CAPITAL` / `POLYMARKET_TRADING_CAPITAL`）。
+
+这是**账户设置,不是风控上限**——框架从不拿它拦任何动作,它只是记账的起点：模型 `READ_ACCOUNT` 看到的
+`starting_capital` 和 `net_result` 都以它为基准。填 0 就是账户没钱,买不了任何东西。
+
+由插件声明而不是框架分配，是因为只有插件知道自己的账户是什么：Binance 在钱包和预测账户之间双向划转，
+Polymarket 直接用钱包里的抵押品交易、**只支持转出**。所以框架里没有"给各平台分多少钱"这种逻辑。
+
+`TRANSFER` 是运行中的资金通路：`INBOUND` 给交易账户入金；`OUTBOUND` 把卖出和赎回赚到的收回钱包。
+各平台支持哪个方向见 `LIST_PLATFORMS`——Polymarket 只有 `OUTBOUND`。
 
 注意 `READ_ACCOUNT` 读的是**本机账本**——两个内置插件都没有实现平台侧余额查询端点，所以它反映的是
 本程序记录的数字，不是链上或交易所的真实余额。
