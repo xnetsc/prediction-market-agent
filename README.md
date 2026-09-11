@@ -38,7 +38,7 @@ Prediction 与 Polymarket API 插件，以及 Codex、Claude、OpenAI-compatible
 - Web 界面可筛选查看“上下文 → 证据 → 模型提案 → 风控调整 → 最终动作 → 执行 → 后续盘口”，并查看、
   修改、删除全部程序配置、插件目录、插件启用状态和动态私有配置；也可安装新插件、暂停全部机器人或
   单独暂停某个平台。
-- 模型服务页统一管理客户端、OpenRouter / 自定义兼容 API、启用顺序与模型服务扩展；插件中心展示其余五类能力，附用途与流程
+- 模型服务页统一管理客户端、OpenRouter / 自定义兼容 API、启用顺序与模型服务扩展；插件中心展示其余六类能力，附用途与流程
   提示；决策先显示结论与原因，技术详情按需展开。操作步骤见 [Web 控制台](docs/WEB_UI.md)。
 - 全系统只有两类插件会拒绝动作：`agent_policy` 管 LLM 的一切工具调用，`risk` 管一切市场 API 动作
   （含只读）。每一类都可同时启用多个并串成一条链，任意一个拒绝或抛异常，这次动作就整体失败。
@@ -162,7 +162,7 @@ Windows 更新时将最后一条替换为 `.\start-local.ps1`。`once` 是明确
 - [集成测试](docs/INTEGRATION_TESTS.md)
 - [时区信息延迟案例研究](docs/STRATEGY_RESEARCH.md)
 - [敏感信息与发布安全](SECURITY.md)
-- `examples/`：六类插件、动态 Python 规则、插件 JSON 和插件目录配置的完整例子。
+- `examples/`：各类插件、两类过滤插件各自的 Python 规则脚本、插件 JSON 和插件目录配置的完整例子。
 
 ## 源码开发与测试（可选）
 

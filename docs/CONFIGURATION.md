@@ -34,7 +34,7 @@
 |---|---|
 | `working_directory` | 所有相对配置和运行数据路径的基准目录 |
 | `management_file` | 插件启用、禁用、优先级和当前策略文件 |
-| `plugin_directories_file` | 六类插件扫描目录文件 |
+| `plugin_directories_file` | 七类插件扫描目录文件 |
 | `state_file` | 已确认远端结果的账户镜像；多平台自动加后缀 |
 | `session_db` | 会话、研究步骤、执行动作和决策台账 SQLite |
 | `auth_db` | admin Passkey、公钥计数器和登录会话 SQLite |
@@ -59,7 +59,7 @@ Agent 动作策略或具体交易策略；这些只能由对应插件定义。�
 
 ## 插件扫描目录与启用状态
 
-`plugin_directories_file` 指向包含六个固定类别的 JSON。每个类别是有序目录列表；文件不存在时先使用
+`plugin_directories_file` 指向包含七个固定类别的 JSON。每个类别是有序目录列表；文件不存在时先使用
 `${WORKING_DIRECTORY}/plugins/<类别>` 的可写安装目录，再使用安装包内置目录。界面的“安装新插件”可选择
 其中一个当前配置目录写入新 `.py` 文件；不覆盖同名文件，安装后保持禁用。示例见
 `examples/plugin_directories.json`。

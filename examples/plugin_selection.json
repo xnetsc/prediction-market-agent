@@ -13,15 +13,16 @@
     "decision_strategy": [
       "general_agent"
     ],
+    "market_discovery": [],
     "research_tool": [
       "standard_research"
+    ],
+    "agent_policy": [
+      "agent_actions"
     ],
     "risk": [
       "portfolio_limits",
       "custom_rules"
-    ],
-    "agent_policy": [
-      "agent_actions"
     ]
   },
   "decision_strategy": "general_agent",

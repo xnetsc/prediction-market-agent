@@ -13,9 +13,17 @@
       "../plugins/decision_strategy",
       "../src/prediction_market_agent/plugins/strategies"
     ],
+    "market_discovery": [
+      "../plugins/market_discovery",
+      "../src/prediction_market_agent/plugins/market_discovery"
+    ],
     "research_tool": [
       "../plugins/research_tool",
       "../src/prediction_market_agent/plugins/research"
+    ],
+    "agent_policy": [
+      "../plugins/agent_policy",
+      "../src/prediction_market_agent/plugins/agent_policy"
     ],
     "risk": [
       "../plugins/risk",
