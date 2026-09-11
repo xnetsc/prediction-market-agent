@@ -38,6 +38,7 @@ def initialize_plugin(context: PluginInitializationContext) -> PluginSpec:
         PluginConfigField("POLYMARKET_BUILDER_API_SECRET", "Builder API Secret", "secret", "使用 Builder relayer 身份时的 API Secret。"),
         PluginConfigField("POLYMARKET_BUILDER_API_PASSPHRASE", "Builder Passphrase", "secret", "使用 Builder relayer 身份时的 API Passphrase。"),
         PluginConfigField("POLYMARKET_TRANSFER_RECIPIENT", "转出地址", "string", "TRANSFER_OUT 操作默认接收 pUSD 的 EVM 地址。"),
+        PluginConfigField("POLYMARKET_TRADING_CAPITAL", "交易账户起始资金(USDT)", "number", "这个平台的交易账户开户时有多少钱。这是账户设置,不是风控上限——框架不会用它拦任何动作,它只是记账的起点,决定模型 READ_ACCOUNT 时看到的本金和净结果基准。Polymarket 只支持转出,所以这笔钱要先在钱包里。填 0 表示账户没钱,买不了任何东西。", default=0),
         PluginConfigField("POLYMARKET_HTTP_PROXY", "代理使用方式", "string", "默认 INHERIT，使用程序设置里的统一代理。也可单独填 DIRECT、HOST、ENVIRONMENT、SYSTEM（仅原生 macOS）或完整 http(s) URL。", required=True, default="INHERIT"),
         PluginConfigField("POLYMARKET_SCAN_INTERVAL_SECONDS", "扫描间隔（秒）", "integer", "Polymarket 完成一个市场扫描与决策周期后等待到下一周期的秒数。", default=60),
         PluginConfigField("POLYMARKET_ERROR_BACKOFF_SECONDS", "失败退避初值（秒）", "integer", "Polymarket 周期失败后的首次重试等待秒数；连续失败时指数增长。", default=30),

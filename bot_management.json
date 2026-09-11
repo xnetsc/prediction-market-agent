@@ -10,15 +10,15 @@
       "claude",
       "openai_compatible"
     ],
+    "decision_strategy": [
+      "general_agent"
+    ],
+    "market_discovery": [],
     "research_tool": [
       "standard_research"
     ],
-    "risk": [
-      "portfolio_limits",
-      "agent_actions",
-      "dynamic_python"
-    ],
-    "hook": []
+    "agent_policy": [],
+    "risk": []
   },
   "decision_strategy": "general_agent"
 }

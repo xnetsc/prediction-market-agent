@@ -139,6 +139,15 @@ class PredictionMarketApiPlugin(Protocol):
 
     def cycle_limits(self) -> tuple[int, int]: ...
 
+    def opening_balance(self) -> float: ...
+    """What this platform's trading account started with.
+
+    Account setup rather than a limit: the framework never checks an action against it. It is the
+    baseline the ledger and READ_ACCOUNT measure profit and loss from, and the plugin owns it
+    because only the plugin knows what its account is - Binance moves money between wallet and
+    prediction account, while Polymarket trades the wallet's own collateral and can only send out.
+    """
+
     def topic_page_size(self) -> int: ...
 
     def outcome_won(

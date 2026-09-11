@@ -104,6 +104,10 @@ class PolymarketApiPlugin:
             self.settings.max_decisions_per_cycle,
         )
 
+    def opening_balance(self) -> float:
+        """What this account started with. A fact the operator states, not a cap anyone enforces."""
+        return float(self.settings.trading_capital)
+
     def topic_page_size(self) -> int:
         return self.settings.topic_page_size
 

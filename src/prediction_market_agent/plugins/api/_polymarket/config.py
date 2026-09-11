@@ -27,6 +27,7 @@ class PolymarketPluginConfig:
     builder_api_secret: str
     builder_api_passphrase: str
     transfer_recipient: str
+    trading_capital: float
     http_proxy: str
     scan_interval_seconds: int
     error_backoff_seconds: int
@@ -57,6 +58,7 @@ class PolymarketPluginConfig:
             builder_api_secret=get("POLYMARKET_BUILDER_API_SECRET", "").strip(),
             builder_api_passphrase=get("POLYMARKET_BUILDER_API_PASSPHRASE", "").strip(),
             transfer_recipient=get("POLYMARKET_TRANSFER_RECIPIENT", "").strip(),
+            trading_capital=float(get("POLYMARKET_TRADING_CAPITAL", "0") or 0),
             http_proxy=resolve_plugin_proxy(
                 get("POLYMARKET_HTTP_PROXY", ""), field_name="POLYMARKET_HTTP_PROXY"
             ),
