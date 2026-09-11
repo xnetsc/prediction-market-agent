@@ -9,6 +9,7 @@ from typing import Any
 from prediction_market_agent.plugin_system.config_io import json_file_callbacks
 from prediction_market_agent.plugin_system.discovery import (
     PluginConfigField,
+    PluginReadiness,
     PluginConfiguration,
     PluginInitializationContext,
     PluginSpec,
@@ -80,7 +81,7 @@ def initialize_plugin(context: PluginInitializationContext) -> PluginSpec:
     )
     configuration = PluginConfiguration(
         fields=(
-            PluginConfigField("MODULE_PATHS", "Python 规则文件", "string", "受信任 Python 风控规则文件路径列表；多个路径使用系统路径分隔符分隔；空字符串表示本插件当前不加载附加规则。"),
+            PluginConfigField("MODULE_PATHS", "Python 规则文件", "string", "受信任 Python 风控规则文件路径列表；多个路径使用系统路径分隔符分隔。留空时本插件不加载任何规则，也就不施加任何限制。", default=""),
         ),
         load_callback=load,
         save_callback=save,
@@ -88,12 +89,35 @@ def initialize_plugin(context: PluginInitializationContext) -> PluginSpec:
         storage=storage,
     )
 
+    def rule_paths() -> list[str]:
+        configured = str(configuration.load().get("MODULE_PATHS", "") or "")
+        return [item.strip() for item in configured.split(os.pathsep) if item.strip()]
+
     def factory(config, services):
         del config, services
-        values = configuration.load()
-        configured = values["MODULE_PATHS"]
-        paths = [item.strip() for item in configured.split(os.pathsep) if item.strip()]
-        return [DynamicPythonRuleEngine(Path(path), index) for index, path in enumerate(paths)]
+        return [DynamicPythonRuleEngine(Path(path), index) for index, path in enumerate(rule_paths())]
+
+    def readiness() -> PluginReadiness:
+        """Report what this plugin will actually enforce, not merely that it can load.
+
+        A risk control that is enabled but holds no rules imposes nothing. Reporting that as ready
+        would put a green badge next to a check that is not being made, which on a trading robot is
+        the most misleading state available.
+        """
+        paths = rule_paths()
+        if not paths:
+            return PluginReadiness(
+                False, ("未指定规则文件，本插件当前不施加任何限制；填写规则文件路径或停用它",)
+            )
+        missing = tuple(
+            f"规则文件不存在或不是 .py：{path}"
+            for path in paths
+            if not (Path(path) if Path(path).is_absolute() else Path.cwd() / path)
+            .resolve()
+            .is_file()
+            or not path.lower().endswith(".py")
+        )
+        return PluginReadiness(False, missing) if missing else PluginReadiness(True)
 
     return PluginSpec(
         "risk",
@@ -103,4 +127,5 @@ def initialize_plugin(context: PluginInitializationContext) -> PluginSpec:
         factory,
         configuration,
         lambda: None,
+        readiness_callback=readiness,
     )

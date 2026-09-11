@@ -294,3 +294,53 @@ class RiskAndExecutionTests(unittest.TestCase):
             )
         self.assertEqual(result["status"], "OPEN")
         self.assertEqual(result["platformStatus"], "LIVE")
+
+
+class DynamicRiskReadinessTests(unittest.TestCase):
+    """An enabled risk control that enforces nothing must not report itself as ready."""
+
+    def _spec(self, root: Path):
+        from prediction_market_agent.plugin_system.discovery import PluginInitializationContext
+        from prediction_market_agent.plugins.risk import dynamic_python
+
+        return dynamic_python.initialize_plugin(
+            PluginInitializationContext(
+                kind="risk",
+                module_path=Path(dynamic_python.__file__),
+                working_directory=root,
+            )
+        )
+
+    def test_an_unconfigured_plugin_loads_no_rules_and_says_so(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            spec = self._spec(Path(directory))
+            readiness = spec.readiness()
+            self.assertFalse(readiness.ready, "no rules means nothing is being enforced")
+            self.assertIn("不施加任何限制", readiness.reasons[0])
+            self.assertEqual(
+                spec.factory(None, {}), [], "an empty configuration must not raise"
+            )
+
+    def test_a_configured_rule_file_makes_it_ready_and_loads(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            rule = root / "rule.py"
+            rule.write_text(
+                "def evaluate(operation, context):\n"
+                "    return {'outcome': 'REJECT', 'reason': 'test rule'}\n",
+                encoding="utf-8",
+            )
+            spec = self._spec(root)
+            spec.configuration.save({"MODULE_PATHS": str(rule)})
+            self.assertTrue(spec.readiness().ready, spec.readiness().reasons)
+            engines = spec.factory(None, {})
+            self.assertEqual(len(engines), 1)
+            self.assertEqual(engines[0].evaluate("BUY", {}).outcome, "REJECT")
+
+    def test_a_missing_rule_file_is_reported_rather_than_ignored(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            spec = self._spec(Path(directory))
+            spec.configuration.save({"MODULE_PATHS": str(Path(directory) / "absent.py")})
+            readiness = spec.readiness()
+            self.assertFalse(readiness.ready)
+            self.assertIn("不存在", readiness.reasons[0])
