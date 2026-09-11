@@ -18,11 +18,13 @@
     ],
     "risk": [
       "portfolio_limits",
-      "agent_actions",
-      "dynamic_python"
+      "custom_rules"
     ],
     "hook": [
       "jsonl_audit"
+    ],
+    "agent_policy": [
+      "agent_actions"
     ]
   },
   "decision_strategy": "general_agent",

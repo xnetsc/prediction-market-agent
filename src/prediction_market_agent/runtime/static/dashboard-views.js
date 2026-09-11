@@ -5,11 +5,12 @@ const CATEGORY_HELP = {
     decision_strategy: {title:'决策策略', role:'可选地告诉模型如何分析', description:'定义模型需要关注的证据、判断过程和输出要求。它是可选分析方法，不是模型账号，也不是机器人启动条件。', steps:['选择插件或使用内置策略','读取策略文本与实测叠加层','形成交易建议'], next:'可安装并选择一项策略插件；不选时由内置决策策略工作，它的当前全文可在下方导出。'},
     market_discovery: {title:'标的发现策略', role:'决定每轮先看哪些标的', description:'机器人每轮只能深入分析少数标的。发现策略决定把这几个名额给谁：宽扫平台、按实测结果排序、再由模型挑最终名单。未安装插件时使用内置策略。', steps:['宽扫平台全部标的','按实测优先级排序','模型挑出本轮名单'], next:'不装插件也在工作。要用自己的发现逻辑再安装插件；内置策略的当前全文可在下方导出查看。'},
     research_tool: {title:'信息与研究', role:'帮助模型补充证据', description:'在已有市场数据不够时，让模型主动查询外部资料。是否调用、查询什么，由当次决策过程决定。', steps:['模型提出问题','工具收集信息','结果回到决策'], next:'启用需要的信息工具，并补齐其访问配置。工具可用不代表每次都会被调用。'},
-    risk: {title:'风险检查', role:'按你的规则检查行为', description:'在相关检查点审核决策、资金或网络请求。实际允许什么、限制什么，由已启用插件及其配置决定。', steps:['接收待检查行为','逐项应用规则','放行、调整或拒绝'], next:'出厂不启用任何风控插件：装完即用的状态下没有仓位上限、没有止损、没有动作白名单。要限制就自己选并配置，且不要把“已启用”理解成已经配置了止损或保证不会亏损。'},
+    agent_policy: {title:'Agent 行为', role:'限制模型能发起什么调用', description:'模型每次调用工具都要经过这里。工具里既有市场 API（下单、买卖），也有网页搜索、行情查询等其它工具。它问的是“这个 Agent 被允许发起这类调用吗”，不问这笔动作的业务后果。', steps:['模型提出调用','比对允许清单','放行或拒绝'], next:'出厂不启用。启用后需要列出允许的工具名和允许的交易动作；未列出的一律拒绝。'},
+    risk: {title:'业务风控', role:'限制资金与仓位的后果', description:'审核由市场 API 产生的业务动作——下单、撤单、赎回、转账等一切写动作，与是谁发起的无关。同一笔下单会先后经过 Agent 行为和业务风控两道检查，这是有意的重复。', steps:['接收业务动作','应用限额与自定义规则','放行、缩减或停机'], next:'出厂不启用任何业务风控：装完即用的状态下没有仓位上限、没有止损。要限制就自己选并配置，且不要把“已启用”理解成已经配置了止损或保证不会亏损。'},
     hook: {title:'流程扩展', role:'在业务步骤前后增加处理', description:'在下单前后等指定位置执行额外逻辑，例如记录或通知。它与用于分析的策略、用于审核的规则分工不同。', steps:['进入业务步骤','执行扩展回调','继续后续处理'], next:'没有额外需求可以不启用。自定义扩展属于可执行代码，只安装你信任的内容。'}
 };
 const SERVICE_TITLES = {codex:'Codex',claude:'Claude',openai_compatible:'兼容 API · OpenRouter / 自定义'};
-const PLUGIN_CENTER_KINDS = ['api','market_discovery','decision_strategy','research_tool','risk','hook'];
+const PLUGIN_CENTER_KINDS = ['api','market_discovery','decision_strategy','research_tool','agent_policy','risk','hook'];
 const STRATEGY_LANES = {market_discovery:'discovery', decision_strategy:'decision'};
 const serviceTitle = name => SERVICE_TITLES[name] || name || '未记录';
 function downloadCredentialBundle(name,status){
@@ -81,7 +82,7 @@ function renderManager(m) {
     // The provider form has only one DOM instance, even when reached from two pages.
     document.getElementById('modelConfigurations').replaceChildren();
     const manager=document.getElementById('pluginManager');manager.replaceChildren();
-    document.getElementById('pluginCategoryHome').innerHTML='<h3>给机器人选择扩展能力</h3><p class="muted">交易平台、策略、研究、风险检查和流程扩展在这里管理。AI 账号、兼容 API、模型与调用顺序统一放在左侧“模型服务”，不在插件中心重复出现。</p>'+processStrip(['平台发现市场','策略 + 模型分析','工具补充证据','规则检查','平台执行'])+'<div class="category-grid">'+PLUGIN_CENTER_KINDS.map(kind=>{const h=CATEGORY_HELP[kind],all=m.plugins[kind]||[],on=all.filter(p=>p.enabled).length;return '<a class="category-tile" href="#plugins/'+kind+'"><span class="eyebrow">'+esc(on+' / '+all.length+' 已启用')+'</span><h4>'+h.title+' <span aria-hidden="true">→</span></h4><p>'+h.role+'</p></a>'}).join('')+'</div>';
+    document.getElementById('pluginCategoryHome').innerHTML='<h3>给机器人选择扩展能力</h3><p class="muted">交易平台、策略、研究、Agent 行为、业务风控和流程扩展在这里管理。AI 账号、兼容 API、模型与调用顺序统一放在左侧“模型服务”，不在插件中心重复出现。</p>'+processStrip(['平台发现市场','策略 + 模型分析','工具补充证据','行为与风控检查','平台执行'])+'<div class="category-grid">'+PLUGIN_CENTER_KINDS.map(kind=>{const h=CATEGORY_HELP[kind],all=m.plugins[kind]||[],on=all.filter(p=>p.enabled).length;return '<a class="category-tile" href="#plugins/'+kind+'"><span class="eyebrow">'+esc(on+' / '+all.length+' 已启用')+'</span><h4>'+h.title+' <span aria-hidden="true">→</span></h4><p>'+h.role+'</p></a>'}).join('')+'</div>';
     document.getElementById('pluginCategoryNav').innerHTML='<a href="#plugins">全部分类</a>'+PLUGIN_CENTER_KINDS.map(k=>'<a href="#plugins/'+k+'">'+LABELS[k]+'</a>').join('');
     for(const kind of KINDS){
         const parent=kind==='decision_provider'?document.getElementById('modelConfigurations'):manager;

@@ -14,6 +14,7 @@ PLUGIN_KINDS = (
     "decision_strategy",
     "market_discovery",
     "research_tool",
+    "agent_policy",
     "risk",
     "hook",
 )

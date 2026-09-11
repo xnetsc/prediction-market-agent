@@ -63,7 +63,7 @@ def initialize_plugin(context: PluginInitializationContext) -> PluginSpec:
         )
 
     return PluginSpec(
-        "risk",
+        "agent_policy",
         "agent_actions",
         "对 Agent 可调用工具及可输出交易动作实施白名单控制。",
         str(context.module_path),
