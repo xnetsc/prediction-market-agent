@@ -1,13 +1,21 @@
 {
   "version": 1,
   "enabled": {
-    "api": ["binance", "polymarket"],
-    "decision_provider": ["codex", "claude", "openai_compatible"],
+    "api": [
+      "binance",
+      "polymarket"
+    ],
+    "decision_provider": [
+      "codex",
+      "claude",
+      "openai_compatible"
+    ],
     "market_discovery": [],
-    "research_tool": ["standard_research"],
+    "research_tool": [
+      "standard_research"
+    ],
     "agent_policy": [],
-    "risk": [],
-    "hook": []
+    "risk": []
   },
   "decision_strategy": "general_agent",
   "robot_paused": false,

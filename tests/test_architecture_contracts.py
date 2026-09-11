@@ -209,7 +209,6 @@ class ArchitectureContractTests(unittest.TestCase):
             "decision_strategy_plugins": "*.py",
             "research_tool_plugins": "*.py",
             "risk_plugins": "*.py",
-            "hooks": "*.py",
         }
         missing = [name for name, pattern in expected.items() if not list((examples / name).glob(pattern))]
         self.assertEqual(missing, [])
@@ -221,7 +220,6 @@ class ArchitectureContractTests(unittest.TestCase):
             "agent_actions": "risk_agent_actions.json",
             "custom_rules": "risk_custom_rules.json",
             "portfolio_limits": "risk_portfolio_limits.json",
-            "jsonl_audit": "hook_jsonl_audit.json",
             "general_agent": "strategy_general_agent.json",
             "timezone_latency": "strategy_timezone_latency.json",
         }
@@ -233,7 +231,7 @@ class ArchitectureContractTests(unittest.TestCase):
                 "decision_strategy",
                 "research_tool",
                 "risk",
-                "hook",
+                "agent_policy",
             ):
                 for spec in catalog.specs(kind):
                     if spec.configuration is None:

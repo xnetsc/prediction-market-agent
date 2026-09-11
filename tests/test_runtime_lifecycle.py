@@ -266,7 +266,7 @@ class RuntimeManagerTests(unittest.TestCase):
 
             def create_write_gateway(self, state, risk):
                 self.received_risk = risk
-                return SimpleNamespace(risk=risk, hooks=None)
+                return SimpleNamespace(risk=risk)
 
         platform = Platform()
         api = PluginSpec(
@@ -355,7 +355,6 @@ class RuntimeManagerTests(unittest.TestCase):
             market_api_plugins=("broken", "working"),
             decision_strategy_name="",
             risk_plugins=(),
-            hook_plugins=(),
             research_tool_plugins=(),
         )
         manager = RobotRuntimeManager(Path("/tmp/application.json"))

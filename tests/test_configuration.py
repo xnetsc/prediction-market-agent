@@ -155,7 +155,6 @@ class ShippedDefaultSelectionTests(unittest.TestCase):
         )
         enabled = json.loads(shipped.read_text(encoding="utf-8"))["enabled"]
         self.assertEqual(enabled["risk"], [])
-        self.assertEqual(enabled["hook"], [])
         self.assertEqual(
             enabled["api"], ["binance", "polymarket"], "platforms stay discoverable"
         )

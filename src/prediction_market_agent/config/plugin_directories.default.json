@@ -1,13 +1,33 @@
 {
   "version": 1,
   "categories": {
-    "api": ["${WORKING_DIRECTORY}/plugins/api", "${PACKAGE_ROOT}/plugins/api"],
-    "decision_provider": ["${WORKING_DIRECTORY}/plugins/decision_provider", "${PACKAGE_ROOT}/plugins/providers"],
-    "decision_strategy": ["${WORKING_DIRECTORY}/plugins/decision_strategy", "${PACKAGE_ROOT}/plugins/strategies"],
-    "market_discovery": ["${WORKING_DIRECTORY}/plugins/market_discovery", "${PACKAGE_ROOT}/plugins/market_discovery"],
-    "research_tool": ["${WORKING_DIRECTORY}/plugins/research_tool", "${PACKAGE_ROOT}/plugins/research"],
-    "agent_policy": ["${WORKING_DIRECTORY}/plugins/agent_policy", "${PACKAGE_ROOT}/plugins/agent_policy"],
-    "risk": ["${WORKING_DIRECTORY}/plugins/risk", "${PACKAGE_ROOT}/plugins/risk"],
-    "hook": ["${WORKING_DIRECTORY}/plugins/hook", "${PACKAGE_ROOT}/plugins/hooks"]
+    "api": [
+      "${WORKING_DIRECTORY}/plugins/api",
+      "${PACKAGE_ROOT}/plugins/api"
+    ],
+    "decision_provider": [
+      "${WORKING_DIRECTORY}/plugins/decision_provider",
+      "${PACKAGE_ROOT}/plugins/providers"
+    ],
+    "decision_strategy": [
+      "${WORKING_DIRECTORY}/plugins/decision_strategy",
+      "${PACKAGE_ROOT}/plugins/strategies"
+    ],
+    "market_discovery": [
+      "${WORKING_DIRECTORY}/plugins/market_discovery",
+      "${PACKAGE_ROOT}/plugins/market_discovery"
+    ],
+    "research_tool": [
+      "${WORKING_DIRECTORY}/plugins/research_tool",
+      "${PACKAGE_ROOT}/plugins/research"
+    ],
+    "agent_policy": [
+      "${WORKING_DIRECTORY}/plugins/agent_policy",
+      "${PACKAGE_ROOT}/plugins/agent_policy"
+    ],
+    "risk": [
+      "${WORKING_DIRECTORY}/plugins/risk",
+      "${PACKAGE_ROOT}/plugins/risk"
+    ]
   }
 }

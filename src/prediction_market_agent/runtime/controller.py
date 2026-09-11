@@ -100,14 +100,12 @@ class RobotRuntimeManager:
             ready_optional: dict[str, list[str]] = {
                 "research_tool": [],
                 "risk": [],
-                "hook": [],
             }
             ready_strategy = ""
             for kind, names in (
                 ("decision_strategy", (config.decision_strategy_name,)),
                 ("research_tool", config.research_tool_plugins),
                 ("risk", config.risk_plugins),
-                ("hook", config.hook_plugins),
             ):
                 for name in names:
                     if not name:
@@ -174,7 +172,6 @@ class RobotRuntimeManager:
                 decision_strategy_name=ready_strategy,
                 research_tool_plugins=tuple(ready_optional["research_tool"]),
                 risk_plugins=tuple(ready_optional["risk"]),
-                hook_plugins=tuple(ready_optional["hook"]),
             )
             try:
                 engine = TradingEngine(runtime_config, catalog=catalog)

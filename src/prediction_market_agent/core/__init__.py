@@ -1,1 +1,1 @@
-"""Domain state, configuration, hooks, and risk contracts."""
+"""Domain state, configuration, and risk contracts."""

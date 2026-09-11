@@ -7,7 +7,6 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from prediction_market_agent.core.config import Config
-from prediction_market_agent.core.hooks import HookManager
 from prediction_market_agent.plugin_system.config_io import json_file_callbacks
 from prediction_market_agent.plugin_system.management import PluginManagementService
 from prediction_market_agent.plugin_system.managed_config import ManagedRuntimeConfig
@@ -95,7 +94,6 @@ class PluginSystemTests(unittest.TestCase):
                 "decision_strategy": [str(project / "examples/decision_strategy_plugins")],
                 "research_tool": [str(project / "examples/research_tool_plugins")],
                 "risk": [str(project / "examples/risk_plugins")],
-                "hook": [str(project / "examples/hooks")],
             }
             directory_path.write_text(json.dumps({"categories": categories}), encoding="utf-8")
             selected = {
@@ -104,7 +102,6 @@ class PluginSystemTests(unittest.TestCase):
                 "decision_strategy": ("example_strategy",),
                 "research_tool": ("static_evidence",),
                 "risk": ("reject_operation",),
-                "hook": ("audit_hook",),
             }
             catalog = discover_plugin_catalog(
                 PluginDirectoryConfig.load(directory_path),
@@ -121,8 +118,6 @@ class PluginSystemTests(unittest.TestCase):
                 self.assertIn("READ_STATIC_EVIDENCE", research.descriptions)
                 risk = catalog.get("risk", "reject_operation").factory(runtime, {})
                 self.assertEqual(risk.target, "example:operation_policy")
-                hook = catalog.get("hook", "audit_hook").factory(runtime, {"hooks": HookManager()})
-                self.assertEqual(hook["events"], ["after_order", "after_cancel"])
             finally:
                 catalog.shutdown()
 
@@ -193,7 +188,7 @@ class PluginSystemTests(unittest.TestCase):
                             "decision_strategy": [],
                             "research_tool": [],
                             "risk": [],
-                            "hook": [],
+                            "agent_policy": [],
                         }
                     }
                 ),
@@ -209,10 +204,10 @@ class PluginSystemTests(unittest.TestCase):
     def test_catalog_shutdown_calls_teardown_and_unregisters_everything(self) -> None:
         calls = []
         catalog = PluginCatalog()
-        catalog.record_file(PluginFile("hook", "sample", "/tmp/sample.py"))
+        catalog.record_file(PluginFile("agent_policy", "sample", "/tmp/sample.py"))
         catalog.register(
             PluginSpec(
-                "hook",
+                "agent_policy",
                 "sample",
                 "Lifecycle sample.",
                 "/tmp/sample.py",
@@ -223,15 +218,15 @@ class PluginSystemTests(unittest.TestCase):
         )
         catalog.shutdown()
         self.assertEqual(calls, ["teardown"])
-        self.assertEqual(catalog.names("hook"), ())
-        self.assertEqual(catalog.discovered_names("hook"), ())
+        self.assertEqual(catalog.names("agent_policy"), ())
+        self.assertEqual(catalog.discovered_names("agent_policy"), ())
 
     def test_management_enables_and_disables_with_refresh(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             config = Config(management_file=Path(directory) / "managed.json")
             service = PluginManagementService(config)
             initial = service.manifest()
-            disabled = initial["plugins"]["hook"][0]
+            disabled = initial["plugins"]["agent_policy"][0]
             self.assertFalse(disabled["initialized"])
             self.assertEqual(disabled["description"], "")
             payload = {
@@ -242,17 +237,16 @@ class PluginSystemTests(unittest.TestCase):
                     "research_tool": ["standard_research"],
                     "risk": ["portfolio_limits", "custom_rules"],
                     "agent_policy": ["agent_actions"],
-                    "hook": ["jsonl_audit"],
                 },
                 "decision_strategy": "general_agent",
             }
             enabled = service.save_enabled(payload)
-            hook = enabled["plugins"]["hook"][0]
-            self.assertTrue(hook["initialized"])
-            self.assertTrue(hook["configuration"]["fields"])
-            payload["enabled"]["hook"] = []
+            policy = enabled["plugins"]["agent_policy"][0]
+            self.assertTrue(policy["initialized"])
+            self.assertTrue(policy["configuration"]["fields"])
+            payload["enabled"]["agent_policy"] = []
             disabled_again = service.save_enabled(payload)
-            self.assertFalse(disabled_again["plugins"]["hook"][0]["initialized"])
+            self.assertFalse(disabled_again["plugins"]["agent_policy"][0]["initialized"])
             payload["enabled"]["decision_strategy"] = []
             payload["decision_strategy"] = ""
             without_strategy = service.save_enabled(payload)
@@ -271,22 +265,22 @@ class PluginSystemTests(unittest.TestCase):
     def test_manual_refresh_unloads_and_unregisters_removed_plugin_file(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            hook_dir = root / "hooks"
-            hook_dir.mkdir()
+            policy_dir = root / "agent_policy"
+            policy_dir.mkdir()
             marker = root / "torn-down.txt"
-            plugin_path = hook_dir / "sample.py"
+            plugin_path = policy_dir / "sample.py"
             plugin_path.write_text(
                 "from prediction_market_agent.plugin_system.discovery import PluginSpec\n"
                 "def initialize_plugin(context):\n"
                 f"    marker = __import__('pathlib').Path({str(marker)!r})\n"
-                "    return PluginSpec('hook','sample','sample hook',str(context.module_path),lambda config, services: None,None,lambda: marker.write_text('done', encoding='utf-8'))\n",
+                "    return PluginSpec('agent_policy','sample','sample policy',str(context.module_path),lambda config, services: None,None,lambda: marker.write_text('done', encoding='utf-8'))\n",
                 encoding="utf-8",
             )
             directory_path = root / "plugin-directories.json"
             directory_path.write_text(
                 json.dumps({"categories": {
                     "api": [], "decision_provider": [], "decision_strategy": [],
-                    "research_tool": [], "risk": [], "hook": [str(hook_dir)],
+                    "research_tool": [], "risk": [], "agent_policy": [str(policy_dir)],
                 }}),
                 encoding="utf-8",
             )
@@ -294,7 +288,7 @@ class PluginSystemTests(unittest.TestCase):
             management_path.write_text(
                 json.dumps({"enabled": {
                     "api": [], "decision_provider": [], "decision_strategy": [],
-                    "research_tool": [], "risk": [], "hook": ["sample"],
+                    "research_tool": [], "risk": [], "agent_policy": ["sample"],
                 }, "decision_strategy": ""}),
                 encoding="utf-8",
             )
@@ -305,25 +299,25 @@ class PluginSystemTests(unittest.TestCase):
                 decision_providers=(),
                 research_tool_plugins=(),
                 risk_plugins=(),
-                hook_plugins=("sample",),
+                agent_policy_plugins=("sample",),
             )
             service = PluginManagementService(runtime)
-            self.assertEqual(service.catalog.names("hook"), ("sample",))
+            self.assertEqual(service.catalog.names("agent_policy"), ("sample",))
             plugin_path.unlink()
             refreshed = service.refresh()
             self.assertEqual(marker.read_text(encoding="utf-8"), "done")
-            self.assertEqual(refreshed["plugins"]["hook"], [])
-            self.assertEqual(service.catalog.names("hook"), ())
+            self.assertEqual(refreshed["plugins"]["agent_policy"], [])
+            self.assertEqual(service.catalog.names("agent_policy"), ())
 
     def test_ui_service_installs_new_plugin_disabled_without_importing_it(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            hook_dir = root / "plugins" / "hook"
+            policy_dir = root / "plugins" / "agent_policy"
             directory_path = root / "plugin-directories.json"
             directory_path.write_text(
                 json.dumps({"categories": {
                     "api": [], "decision_provider": [], "decision_strategy": [],
-                    "research_tool": [], "risk": [], "hook": [str(hook_dir)],
+                    "research_tool": [], "risk": [], "agent_policy": [str(policy_dir)],
                 }}),
                 encoding="utf-8",
             )
@@ -332,24 +326,24 @@ class PluginSystemTests(unittest.TestCase):
                 plugin_directories_file=directory_path,
                 management_file=root / "management.json",
                 market_api_plugins=(), decision_providers=(),
-                research_tool_plugins=(), risk_plugins=(), hook_plugins=(),
+                research_tool_plugins=(), risk_plugins=(),
                 decision_strategy_name="",
             )
             service = PluginManagementService(config)
             marker = root / "imported.txt"
             result = service.install_plugin(
-                "hook",
-                "new_hook",
+                "agent_policy",
+                "new_policy",
                 "from pathlib import Path\n"
                 f"Path({str(marker)!r}).write_text('imported')\n"
                 "def initialize_plugin(context):\n    raise RuntimeError('disabled')\n",
-                str(hook_dir),
+                str(policy_dir),
             )
             self.assertTrue(Path(result["installed"]).is_file())
             self.assertFalse(marker.exists())
             installed = next(
-                item for item in result["management"]["plugins"]["hook"]
-                if item["name"] == "new_hook"
+                item for item in result["management"]["plugins"]["agent_policy"]
+                if item["name"] == "new_policy"
             )
             self.assertFalse(installed["initialized"])
             service.shutdown()
@@ -432,3 +426,54 @@ class CatalogCoverageTests(unittest.TestCase):
 
         self.assertIn("risk", PLUGIN_KINDS)
         self.assertIn("agent_policy", PLUGIN_KINDS)
+
+    def test_the_only_filtering_kinds_are_business_risk_and_agent_policy(self) -> None:
+        """No third filter category may reappear - hooks were removed for exactly this reason."""
+        from pathlib import Path
+
+        from prediction_market_agent.plugin_system.managed_config import PLUGIN_KINDS
+
+        self.assertEqual(
+            set(PLUGIN_KINDS),
+            {
+                "api",
+                "decision_provider",
+                "decision_strategy",
+                "market_discovery",
+                "research_tool",
+                "agent_policy",
+                "risk",
+            },
+        )
+        root = Path(__file__).resolve().parents[1] / "src/prediction_market_agent"
+        self.assertFalse((root / "core" / "hooks.py").exists())
+        self.assertFalse((root / "plugins" / "hooks").exists())
+
+    def test_the_dashboard_offers_exactly_the_kinds_the_backend_declares(self) -> None:
+        """A kind listed in one place and not the other makes the UI lie about what is enforced."""
+        import re
+        from pathlib import Path
+
+        from prediction_market_agent.plugin_system.managed_config import PLUGIN_KINDS
+
+        runtime = Path(__file__).resolve().parents[1] / "src/prediction_market_agent/runtime"
+        shell = (runtime / "dashboard.py").read_text(encoding="utf-8")
+        views = (runtime / "static/dashboard-views.js").read_text(encoding="utf-8")
+
+        def listed(source: str, name: str) -> set[str]:
+            match = re.search(rf"\b{name}\s*=\s*\[(.*?)\]", source, re.S)
+            self.assertIsNotNone(match, f"{name} not found")
+            return set(re.findall(r"'([a-z_]+)'", match.group(1)))
+
+        self.assertEqual(listed(shell, "KINDS"), set(PLUGIN_KINDS))
+        labels = set(re.findall(r"([a-z_]+):'", re.search(r"const LABELS=\{(.*?)\};", shell, re.S).group(1)))
+        self.assertEqual(labels, set(PLUGIN_KINDS), "every kind needs a label")
+
+        centre = listed(views, "PLUGIN_CENTER_KINDS")
+        self.assertEqual(
+            centre,
+            set(PLUGIN_KINDS) - {"decision_provider"},
+            "the plugin centre shows every kind except model services, which live under #models",
+        )
+        help_keys = set(re.findall(r"^    ([a-z_]+): \{title:", views, re.M))
+        self.assertEqual(help_keys, set(PLUGIN_KINDS), "every kind needs category help")

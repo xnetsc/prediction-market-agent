@@ -13,8 +13,8 @@ Prediction 与 Polymarket API 插件，以及 Codex、Claude、OpenAI-compatible
 
 ## 核心能力
 
-- 自动扫描 `api`、`decision_provider`、`decision_strategy`、`market_discovery`、`research_tool`、`risk`、
-  `hook` 七类插件。
+- 自动扫描 `api`、`decision_provider`、`decision_strategy`、`market_discovery`、`research_tool`、
+  `agent_policy`、`risk` 七类插件。
 - API 平台插件各自拥有定时扫描、成功间隔和失败退避，但只决定**什么时候**扫。**扫什么**由通用发现引擎
   和发现策略决定：宽扫全平台、按实测优先级排序、再由 Agent 挑出本轮真正值得分析的少数标的。扫描结果
   进入通用事件循环，再统一执行跨平台调研、Agent 决策、风控和线上动作。
@@ -40,7 +40,8 @@ Prediction 与 Polymarket API 插件，以及 Codex、Claude、OpenAI-compatible
   单独暂停某个平台。
 - 模型服务页统一管理客户端、OpenRouter / 自定义兼容 API、启用顺序与模型服务扩展；插件中心展示其余五类能力，附用途与流程
   提示；决策先显示结论与原因，技术详情按需展开。操作步骤见 [Web 控制台](docs/WEB_UI.md)。
-- quote、order、fill、cancel、redeem、transfer、Agent tool/decision 均有 before/after Hook。
+- 全系统只有两类插件会拒绝动作：`agent_policy` 管 LLM 的一切工具调用，`risk` 管一切市场 API 动作
+  （含只读）。每一类都可同时启用多个并串成一条链，任意一个拒绝或抛异常，这次动作就整体失败。
 
 ## 自我进化的策略
 
@@ -122,7 +123,7 @@ Set-Location prediction-market-agent
 需要远程助手时，向导提供 Bash/Python 或 PowerShell 的一次性命令和复制按钮；完整脚本经 SHA-256
 校验后才执行，不提供 ZIP/原生可执行文件下载，不改变系统安全策略。
 `serve` 同时承载管理界面和运行主管：至少一个 AI Provider 与一个平台插件报告可启动后，自动启动相应
-平台自己的事件循环；策略、研究、风控和 Hook 是可选增强。通用框架不检查插件字段，只读取插件
+平台自己的事件循环；策略、研究和两类过滤插件是可选增强。通用框架不检查插件字段，只读取插件
 readiness 与 runtime 启动结果；
 配置不全的平台保持停止并显示原因。配置保存、启用/禁用、刷新或暂停会立即重新评估，无需另开 Worker。
 需要从终端检查状态、测试 Provider 或显式触发一次扫描时，在仓库目录执行：
@@ -155,7 +156,7 @@ Windows 更新时将最后一条替换为 `.\start-local.ps1`。`once` 是明确
 - [插件系统与生命周期](docs/PLUGIN_SYSTEM.md)
 - [API 插件](docs/API_PLUGINS.md)
 - [Provider、策略与研究工具](docs/DECISION_PLUGINS.md)
-- [风控与 Hook](docs/RISK_AND_HOOKS.md)
+- [两类过滤插件](docs/RISK_FILTERS.md)
 - [决策台账与 HTTP 界面](docs/HTTP_AUDIT.md)
 - [管理员 Passkey、ECDH 与加密会话](docs/AUTHENTICATION.md)
 - [集成测试](docs/INTEGRATION_TESTS.md)
