@@ -118,11 +118,13 @@ def initialize_plugin(context: PluginInitializationContext) -> PluginSpec:
             "description": '机器人请求预测账户达到某个可用金额时，这里会出现待批准的划转。批准后才会从配置的资金账户划入，在此之前不会动任何钱。',
             "content": panel,
             "action_label": '批准并转账',
+            "action_fields": [{"name": "note", "label": "附言（可选）", "placeholder": '同意时可以顺带告诉机器人一句话，比如「我只剩这些了，别再要了」——它会读到。', "multiline": True}],
+            "dismiss_fields": [{"name": "note", "label": "拒绝理由", "required": True, "placeholder": '拒绝理由（会给到机器人，让它别再原样问一遍）', "multiline": True}],
             "dismiss_label": '驳回',
         }]
 
     def funding_action(key: str, name: str, payload: dict) -> dict:
-        del key, payload
+        del key
         try:
             instance = _live_instance()
         except Exception as error:
@@ -131,7 +133,7 @@ def initialize_plugin(context: PluginInitializationContext) -> PluginSpec:
         if handler is None:
             return {"ok": False, "message": f"Unknown funding action: {name}"}
         try:
-            return handler()
+            return handler(payload)
         except Exception as error:
             return {"ok": False, "message": str(error)[:300]}
 

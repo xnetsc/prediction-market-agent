@@ -301,7 +301,7 @@ class FundsSemanticsTests(unittest.TestCase):
     def test_a_dismissed_request_leaves_nothing_pending(self) -> None:
         plugin = self._binance(capital="10", spot=900.0)
         plugin.ensure_funds(100.0, "USDT")
-        plugin.reject_funding()
+        plugin.reject_funding({"note": "not this week"})
         self.assertIsNone(plugin.funding_requests.pending())
 
     def test_a_plugin_that_cannot_fund_says_so_instead_of_raising(self) -> None:
@@ -355,3 +355,80 @@ class FrameworkStaysGenericTests(unittest.TestCase):
                     if re.search(rf"\b{term}\b", text, re.I):
                         offenders.append(f"{area}/{path.name}:{term}")
         self.assertEqual(offenders, [])
+
+
+class FundingLifecycleTests(unittest.TestCase):
+    """An ask that outlives its call has to be findable again, and answerable with words."""
+
+    def _binance(self, capital="10", spot=900.0):
+        import tempfile, pathlib
+        from prediction_market_agent.plugins.api._binance.adapter import BinancePredictionApiPlugin
+        from tests._support import BINANCE_ENV
+
+        directory = tempfile.mkdtemp()
+        plugin = BinancePredictionApiPlugin({
+            **BINANCE_ENV, "BINANCE_TRADING_CAPITAL": capital,
+            "BINANCE_FUNDING_REQUEST_FILE": str(pathlib.Path(directory) / "r.json"),
+        })
+        plugin.client.spot_balances = lambda: {"USDT": {"free": spot, "locked": 0.0}}
+        plugin._write_transport.transfer = lambda d, a: None
+        return plugin
+
+    def test_a_pending_ask_can_be_found_again_by_its_id(self) -> None:
+        plugin = self._binance()
+        first = plugin.ensure_funds(100.0, "USDT", reason="one")
+        self.assertEqual(plugin.funding_status(first.request_id).state, "pending")
+
+    def test_an_unknown_id_is_reported_rather_than_guessed_at(self) -> None:
+        self.assertEqual(self._binance().funding_status("nope").state, "failed")
+
+    def test_a_superseded_ask_learns_it_will_never_complete(self) -> None:
+        """A caller still holding the old id must not wait forever on a replaced request."""
+        plugin = self._binance()
+        first = plugin.ensure_funds(50.0, "USDT", reason="one")
+        second = plugin.ensure_funds(200.0, "USDT", reason="two")
+        self.assertEqual(plugin.funding_status(first.request_id).state, "refused")
+        self.assertEqual(plugin.funding_status(second.request_id).state, "pending")
+
+    def test_a_request_past_its_deadline_is_dead_not_pending(self) -> None:
+        """Approving hours later would fund an intention that no longer exists."""
+        plugin = self._binance()
+        asked = plugin.ensure_funds(100.0, "USDT", reason="one", timeout_seconds=0)
+        import time as _time
+        _time.sleep(0.01)
+        self.assertIsNone(plugin.funding_requests.pending())
+        self.assertEqual(plugin.funding_status(asked.request_id).state, "failed")
+
+    def test_a_caller_that_cannot_wait_is_told_so_rather_than_parked(self) -> None:
+        plugin = self._binance()
+        answer = plugin.ensure_funds(100.0, "USDT", reason="one", allow_pending=False)
+        self.assertEqual(answer.state, "failed")
+        self.assertIsNone(plugin.funding_requests.pending(), "and nothing is left waiting")
+
+    def test_the_reason_the_robot_gave_reaches_the_person_approving(self) -> None:
+        plugin = self._binance()
+        plugin.ensure_funds(100.0, "USDT", reason="BTC mispriced by 8 points")
+        self.assertEqual(
+            plugin.funding_requests.pending()["reason"], "BTC mispriced by 8 points"
+        )
+
+    def test_refusing_without_a_reason_is_refused_by_the_plugin(self) -> None:
+        """A bare no would have the robot ask again identically on the next cycle."""
+        plugin = self._binance()
+        plugin.ensure_funds(100.0, "USDT", reason="one")
+        for values in ({}, {"note": "   "}):
+            with self.subTest(values=values):
+                answer = plugin.reject_funding(values)
+                self.assertFalse(answer["ok"])
+                self.assertIsNotNone(plugin.funding_requests.pending(), "the ask stays open")
+
+    def test_what_the_person_said_reaches_the_robot_either_way(self) -> None:
+        for verb, note in (("approve", "this is the last of it"), ("reject", "not this week")):
+            with self.subTest(verb=verb):
+                plugin = self._binance()
+                asked = plugin.ensure_funds(100.0, "USDT", reason="one")
+                if verb == "approve":
+                    plugin.approve_funding({"note": note})
+                else:
+                    plugin.reject_funding({"note": note})
+                self.assertEqual(plugin.funding_status(asked.request_id).operator_note, note)

@@ -22,6 +22,7 @@ from prediction_market_agent.plugin_system.contracts import (
     TopicPage,
     AccountFunds,
     FundingResult,
+    FUNDING_TIMEOUT_SECONDS,
 )
 from .write import BinancePredictionWriteTransport
 from .config import BinancePluginConfig
@@ -124,38 +125,79 @@ class BinancePredictionApiPlugin:
             detail=detail,
         )
 
-    def ensure_funds(self, amount: float, currency: str) -> FundingResult:
+    def ensure_funds(
+        self,
+        amount: float,
+        currency: str,
+        *,
+        reason: str = "",
+        allow_pending: bool = True,
+        timeout_seconds: int = FUNDING_TIMEOUT_SECONDS,
+    ) -> FundingResult:
         """Record what is needed and wait for approval; do not move money on the ask alone.
 
         The wallet can be drawn on automatically, which is exactly why it is not: an ask arrives
         mid-decision, from reasoning nobody has read yet, and money leaving on it would be a
-        transfer at a moment nobody chose. The operator sees the request and approves it.
+        transfer at a moment nobody chose. The caller gets an id to ask about later.
         """
+        funds = self.account_funds()
         if currency.upper() != "USDT":
             return FundingResult(
-                requested=amount, currency=currency, available=0.0, satisfied=False,
-                action="none", detail=f"This account settles in USDT, not {currency}",
+                request_id="", state="failed", requested=amount, currency=currency,
+                available=funds.available, action="unsupported_currency",
+                detail=f"This account settles in USDT, not {currency}",
             )
-        funds = self.account_funds()
         if funds.available >= amount:
             return FundingResult(
-                requested=amount, currency="USDT", available=funds.available, satisfied=True,
-                action="none", detail="Already available",
+                request_id="", state="satisfied", requested=amount, currency="USDT",
+                available=funds.available, action="none", detail="Already available",
             )
-        self.funding_requests.record(
+        if not allow_pending:
+            return FundingResult(
+                request_id="", state="failed", requested=amount, currency="USDT",
+                available=funds.available, action="approval_required",
+                detail=(
+                    "This account needs an operator to approve the transfer, so it cannot be "
+                    "funded within this call."
+                ),
+            )
+        request = self.funding_requests.record(
             amount=amount, currency="USDT", available=funds.available,
-            reason="requested by the trading loop",
+            reason=reason or "No reason was given",
+            timeout_seconds=timeout_seconds,
         )
         return FundingResult(
-            requested=amount, currency="USDT", available=funds.available, satisfied=False,
-            action="awaiting_operator_approval",
+            request_id=request["request_id"], state="pending", requested=amount,
+            currency="USDT", available=funds.available, action="awaiting_operator_approval",
+            expires_at=int(request["expires_at"]),
             detail=(
-                f"A transfer of {amount - funds.available:.6f} USDT into the prediction wallet is "
+                f"A transfer of {request['shortfall']:.6f} USDT into the prediction wallet is "
                 "waiting for approval in this plugin's panel. Nothing moves until it is approved."
             ),
         )
 
-    def approve_funding(self) -> dict[str, Any]:
+    def funding_status(self, request_id: str) -> FundingResult:
+        """Where an earlier request got to, by the id that request returned."""
+        request = self.funding_requests.find(request_id)
+        funds = self.account_funds()
+        if request is None:
+            return FundingResult(
+                request_id=request_id, state="failed", requested=0.0, currency="USDT",
+                available=funds.available, action="unknown_request",
+                detail="No request with that id is pending or recently settled",
+            )
+        return FundingResult(
+            request_id=request_id,
+            state=str(request.get("state", "pending")),
+            requested=float(request.get("amount", 0)),
+            currency=str(request.get("currency", "USDT")),
+            available=float(request.get("available", funds.available)),
+            action=str(request.get("state", "pending")),
+            detail=str(request.get("detail", "")),
+            operator_note=str(request.get("operator_note", "")),
+        )
+
+    def approve_funding(self, values: dict[str, Any] | None = None) -> dict[str, Any]:
         """Carry out the standing request, drawing on the configured source account."""
         request = self.funding_requests.pending()
         if request is None:
@@ -164,18 +206,45 @@ class BinancePredictionApiPlugin:
         try:
             self._write_transport.transfer("INBOUND", str(shortfall))
         except Exception as error:
-            return {"ok": False, "message": f"The transfer failed: {str(error)[:300]}"}
-        self.funding_requests.clear()
-        return {
-            "ok": True,
-            "message": (
-                f"Moved {shortfall:.6f} USDT from the {self.settings.account_type} account into "
-                "the prediction wallet"
-            ),
-        }
+            message = f"The transfer failed: {str(error)[:300]}"
+            self.funding_requests.settle(
+                operator_note=str((values or {}).get('note', '')),
+                state="failed", available=float(request["available_when_asked"]), detail=message
+            )
+            return {"ok": False, "message": message}
+        moved_to = float(request["available_when_asked"]) + shortfall
+        target = float(request["amount"])
+        # A transfer the venue accepted can still land short; report what arrived, not what was
+        # asked for, so a caller reading the outcome is not told a shortfall was covered.
+        state = "satisfied" if moved_to + 1e-9 >= target else "partial"
+        message = (
+            f"Moved {shortfall:.6f} USDT from the {self.settings.account_type} account into the "
+            "prediction wallet"
+        )
+        self.funding_requests.settle(
+            state=state, available=moved_to, detail=message,
+            operator_note=str((values or {}).get("note", "")).strip(),
+        )
+        return {"ok": True, "message": message}
 
-    def reject_funding(self) -> dict[str, Any]:
-        self.funding_requests.clear()
+    def reject_funding(self, values: dict[str, Any] | None = None) -> dict[str, Any]:
+        """Refusing needs a reason, because the reason is what gets relayed back to the robot.
+
+        A bare "no" tells it nothing it can act on, so it asks again identically on the next cycle
+        and the operator answers the same prompt forever. This plugin will not file a refusal
+        without one.
+        """
+        note = str((values or {}).get("note", "")).strip()
+        if not note:
+            return {
+                "ok": False,
+                "message": "请填写拒绝理由：机器人会读到它，没有理由它下一轮还会原样再问一次",
+            }
+        funds = self.account_funds()
+        self.funding_requests.settle(
+            operator_note=note,
+            state="refused", available=funds.available, detail="The operator declined the transfer"
+        )
         return {"ok": True, "message": "The funding request was dismissed; nothing moved"}
 
     def funding_panel(self) -> dict[str, Any]:

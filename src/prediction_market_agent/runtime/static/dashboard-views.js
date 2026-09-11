@@ -481,8 +481,15 @@ async function renderPluginNotices(card,kind,plugin){
         if(notice.error){controlNode('p','插件报告错误：'+notice.error,box).className='danger';continue}
         const body=controlNode('pre','',box);body.className='notice-content';
         body.textContent=JSON.stringify(notice.content??{},null,2);
-        const verbs=[['confirm',notice.action_label],['dismiss',notice.dismiss_label]].filter(v=>v[1]);
+        const verbs=[['confirm',notice.action_label,notice.action_fields||[]],['dismiss',notice.dismiss_label,notice.dismiss_fields||[]]].filter(v=>v[1]);
         if(!verbs.length)continue;
+        const inputs=new Map();
+        for(const [verb,,fields] of verbs)for(const f of fields){
+            if(inputs.has(f.name))continue;
+            const wrap=controlNode('label',f.label+' ',box);wrap.className='field';
+            const input=controlNode(f.multiline?'textarea':'input','',wrap);
+            input.placeholder=f.placeholder||'';inputs.set(f.name,input);
+        }
         const bar=controlNode('div','',box);bar.className='toolbar';
         const status=controlNode('span','',bar);status.className='status muted';
         const run=async(action,label)=>{
@@ -491,7 +498,8 @@ async function renderPluginNotices(card,kind,plugin){
             button.onclick=async()=>{
                 button.disabled=true;setOperationStatus(status,'处理中…','pending');
                 try{
-                    const answer=await post('/api/plugins/notices/action',{kind,name:plugin.name,key:notice.key,action,values:{}});
+                    const values={};for(const [name,input] of inputs)values[name]=input.value;
+                    const answer=await post('/api/plugins/notices/action',{kind,name:plugin.name,key:notice.key,action,values});
                     setOperationStatus(status,answer.message||(answer.ok?'完成':'未完成'),answer.ok?'':'danger');
                     if(answer.ok)renderPluginNotices(card,kind,plugin),host.remove();
                 }catch(e){setOperationStatus(status,e.message,'danger')}

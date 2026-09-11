@@ -27,6 +27,7 @@ from prediction_market_agent.plugin_system.contracts import (
     TopicPage,
     AccountFunds,
     FundingResult,
+    FUNDING_TIMEOUT_SECONDS,
 )
 from .read import PolymarketReadClient
 from .write import PolymarketWriteTransport
@@ -141,42 +142,76 @@ class PolymarketApiPlugin:
             detail={"asset_type": "COLLATERAL"},
         )
 
-    def ensure_funds(self, amount: float, currency: str) -> FundingResult:
-        """Record what is needed and name where to send it. This plugin cannot pull money in.
-
-        Collateral has to arrive from an address this client does not sign for, so the operator
-        makes the transfer and then confirms it in the plugin's panel, where the balance is checked
-        rather than taken on trust.
-        """
+    def ensure_funds(
+        self,
+        amount: float,
+        currency: str,
+        *,
+        reason: str = "",
+        allow_pending: bool = True,
+        timeout_seconds: int = FUNDING_TIMEOUT_SECONDS,
+    ) -> FundingResult:
+        """Record what is needed and name where to send it. This plugin cannot pull money in."""
         funds = self.account_funds()
         if funds.available >= amount:
             return FundingResult(
-                requested=amount, currency=funds.currency, available=funds.available,
-                satisfied=True, action="none", detail="Already available",
+                request_id="", state="satisfied", requested=amount, currency=funds.currency,
+                available=funds.available, action="none", detail="Already available",
             )
-        self.funding_requests.record(
+        if not allow_pending:
+            return FundingResult(
+                request_id="", state="failed", requested=amount, currency=funds.currency,
+                available=funds.available, action="external_transfer_required",
+                detail=(
+                    "Collateral has to arrive from outside this plugin, so it cannot be funded "
+                    "within this call."
+                ),
+            )
+        request = self.funding_requests.record(
             amount=amount, currency=funds.currency, available=funds.available,
-            reason="requested by the trading loop",
+            reason=reason or "No reason was given",
+            timeout_seconds=timeout_seconds,
         )
         try:
             target = self._write_transport.deposit_target()
             where = (
-                f" Send at least {amount - funds.available:.6f} {funds.currency} of "
+                f" Send at least {request['shortfall']:.6f} {funds.currency} of "
                 f"{target['collateral_token']} to {target['wallet_address']}, then confirm it in "
                 "this plugin's panel."
             )
         except Exception as error:
             where = f" The deposit address could not be read: {str(error)[:200]}"
         return FundingResult(
-            requested=amount, currency=funds.currency, available=funds.available,
-            satisfied=False, action="awaiting_external_transfer",
+            request_id=request["request_id"], state="pending", requested=amount,
+            currency=funds.currency, available=funds.available,
+            action="awaiting_external_transfer", expires_at=int(request["expires_at"]),
             detail=(
                 "This plugin cannot pull collateral in: it only transfers out of the wallet it "
                 "authenticates as." + where
             ),
         )
 
-    def confirm_funding(self) -> dict[str, Any]:
+    def funding_status(self, request_id: str) -> FundingResult:
+        request = self.funding_requests.find(request_id)
+        funds = self.account_funds()
+        if request is None:
+            return FundingResult(
+                request_id=request_id, state="failed", requested=0.0, currency=funds.currency,
+                available=funds.available, action="unknown_request",
+                detail="No request with that id is pending or recently settled",
+            )
+        return FundingResult(
+            request_id=request_id,
+            state=str(request.get("state", "pending")),
+            requested=float(request.get("amount", 0)),
+            currency=str(request.get("currency", funds.currency)),
+            available=float(request.get("available", funds.available)),
+            action=str(request.get("state", "pending")),
+            detail=str(request.get("detail", "")),
+            operator_note=str(request.get("operator_note", "")),
+        )
+
+    def confirm_funding(self, values: dict[str, Any] | None = None) -> dict[str, Any]:
         """Check whether the money actually arrived, instead of believing that it did."""
         request = self.funding_requests.pending()
         if request is None:
@@ -190,19 +225,48 @@ class PolymarketApiPlugin:
                     f"be checked: {funds.detail.get('error', 'no detail')}"
                 ),
             }
-        if funds.available + 1e-9 < float(request["amount"]):
-            return {"ok": False, "message": shortfall_message(request, funds.available)}
-        self.funding_requests.clear()
+        target = float(request["amount"])
+        if funds.available + 1e-9 < target:
+            message = shortfall_message(request, funds.available)
+            if funds.available > float(request["available_when_asked"]) + 1e-9:
+                # Something arrived, just not all of it. Say so rather than calling it a failure:
+                # the caller may be able to work with what is there.
+                self.funding_requests.settle(
+                    operator_note=str((values or {}).get('note', '')),
+                    state="partial", available=funds.available, detail=message
+                )
+            return {"ok": False, "message": message}
+        self.funding_requests.settle(
+            operator_note=str((values or {}).get('note', '')),
+            state="satisfied", available=funds.available,
+            detail=f"{funds.available:.6f} {funds.currency} confirmed available",
+        )
         return {
             "ok": True,
             "message": (
                 f"Confirmed: {funds.available:.6f} {funds.currency} is available, meeting the "
-                f"{float(request['amount']):.6f} requested"
+                f"{target:.6f} requested"
             ),
         }
 
-    def reject_funding(self) -> dict[str, Any]:
-        self.funding_requests.clear()
+    def reject_funding(self, values: dict[str, Any] | None = None) -> dict[str, Any]:
+        """Refusing needs a reason, because the reason is what gets relayed back to the robot.
+
+        A bare "no" tells it nothing it can act on, so it asks again identically on the next cycle
+        and the operator answers the same prompt forever. This plugin will not file a refusal
+        without one.
+        """
+        note = str((values or {}).get("note", "")).strip()
+        if not note:
+            return {
+                "ok": False,
+                "message": "请填写拒绝理由：机器人会读到它，没有理由它下一轮还会原样再问一次",
+            }
+        funds = self.account_funds()
+        self.funding_requests.settle(
+            operator_note=note,
+            state="refused", available=funds.available, detail="The operator dismissed the request"
+        )
         return {"ok": True, "message": "The funding request was dismissed"}
 
     def funding_panel(self) -> dict[str, Any]:

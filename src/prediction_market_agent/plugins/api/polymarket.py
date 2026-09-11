@@ -127,11 +127,13 @@ def initialize_plugin(context: PluginInitializationContext) -> PluginSpec:
             "description": '机器人请求达到某个可用金额时，这里会显示需要转入的金额和收款地址。你转账后点确认，插件会重新读取余额核对，不满足会说明还差多少。',
             "content": panel,
             "action_label": '我已转账，去核对',
+            "action_fields": [{"name": "note", "label": "附言（可选）", "placeholder": '确认时可以顺带告诉机器人一句话，比如「我只剩这些了，别再要了」——它会读到。', "multiline": True}],
+            "dismiss_fields": [{"name": "note", "label": "拒绝理由", "required": True, "placeholder": '拒绝理由（会给到机器人，让它别再原样问一遍）', "multiline": True}],
             "dismiss_label": '驳回',
         }]
 
     def funding_action(key: str, name: str, payload: dict) -> dict:
-        del key, payload
+        del key
         try:
             instance = _live_instance()
         except Exception as error:
@@ -140,7 +142,7 @@ def initialize_plugin(context: PluginInitializationContext) -> PluginSpec:
         if handler is None:
             return {"ok": False, "message": f"Unknown funding action: {name}"}
         try:
-            return handler()
+            return handler(payload)
         except Exception as error:
             return {"ok": False, "message": str(error)[:300]}
 
