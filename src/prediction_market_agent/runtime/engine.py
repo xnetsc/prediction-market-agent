@@ -48,6 +48,7 @@ class TradingEngine(MarketEvaluationMixin, ExecutionActionsMixin):
             provider=components.provider,
             evolution_enabled=components.strategy_evolution,
             cross_platform_search=self.search_market_candidates,
+            research_contributions=components.research_contributions,
         )
         self.decision_evolution = DecisionEvolution(
             memory=self.memory,

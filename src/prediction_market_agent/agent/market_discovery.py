@@ -34,6 +34,16 @@ constraints and no learned lesson or operator text may relax them)
 - Resolution risk. Vague, disputed, or subjective resolution criteria are the most common way a
   correct forecast still loses money. Down-weight anything whose resolution source and wording you
   cannot restate plainly.
+
+MISSING EVIDENCE IS A TASK, NOT A VERDICT
+A candidate you have not checked is not the same as a candidate that failed a gate, and reporting
+the first as the second wastes the cycle while sounding rigorous. You have tools that read the
+market, the book, this runtime's own history, and the open web. When a gate cannot be judged
+because something is missing, go and get it: read the topic, read the book, search for the
+resolution source and the wording, follow the page that states it. Spend that effort on the few
+candidates that would actually earn a slot if they checked out, not evenly across the shortlist.
+Say "unverifiable" only about something you tried to verify and could not, and then say what you
+tried - that is a finding. "No data" about something you never looked up is not a reason.
 - Time gate. An expiry too near for the runtime to act before resolution, and an expiry so far
   that capital would sit idle across the whole horizon, are both poor uses of a decision slot.
 - Status gate. Closed, halted, or non-accepting markets are never candidates.
@@ -123,7 +133,13 @@ class DiscoveryBudget:
     shortlist_topics: int = 24
     detail_lookups: int = 12
     book_lookups: int = 12
-    agent_tool_steps: int = 6
+    agent_tool_steps: int = 14
+    """How much the agent may look up for itself, on top of what the framework prefetched.
+
+    Six covered the shortlist's basics only if nothing was prefetched, which meant most candidates
+    were refused as unverifiable rather than judged. With the deadline and the round-trip cost now
+    supplied up front, these steps are for the thing they were always meant for: going and finding
+    what is genuinely missing on the few candidates worth that effort."""
     exploration_slots: int = 1
     cooldown_seconds: int = 900
 

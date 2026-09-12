@@ -3,6 +3,7 @@ from __future__ import annotations
 import tempfile
 import time
 import unittest
+from types import SimpleNamespace
 from pathlib import Path
 
 from prediction_market_agent.agent.decision import AgentRunResult
@@ -95,11 +96,13 @@ class RecordingProvider:
         self.requests: list[dict] = []
         self.instructions = ""
         self.tool_results: list[dict] = []
+        self.tool_descriptions: dict = {}
         self.tools = tools
 
     def run(self, payload, **options):
         self.requests.append(payload)
         self.instructions = options.get("instructions", "")
+        self.tool_descriptions = options.get("tool_descriptions") or {}
         executor = options.get("tool_executor")
         for name in self.tools:
             first = payload["candidates"][0]
@@ -176,14 +179,32 @@ class DiscoveryTests(unittest.TestCase):
         )
 
     def test_agent_drives_reads_through_plugin_interfaces_within_budget(self) -> None:
+        """Prefetch and the agent draw on one allowance, so the platform is read once for it."""
         plugin = FakePlugin(30)
+        budget = BuiltInMarketDiscovery().budget()
         provider = RecordingProvider(tools=("TOPIC_DETAIL", "OUTCOME_BOOK", "TOPIC_HISTORY"))
         self._engine(provider).discover(platform="fake", plugin=plugin, maximum_topics=3)
-        self.assertEqual(plugin.detail_calls, 1)
-        self.assertEqual(plugin.book_calls, 1)
-        self.assertTrue(all(result.get("ok") for result in provider.tool_results))
+        self.assertLessEqual(plugin.detail_calls, budget.detail_lookups)
+        self.assertLessEqual(plugin.book_calls, budget.book_lookups)
         self.assertIn("MARKET_DISCOVERY_STRATEGY", provider.instructions)
         self.assertIn("MISSION", provider.instructions)
+
+    def test_the_gates_can_be_judged_without_spending_the_agents_tool_steps(self) -> None:
+        """Candidates arrived without a deadline or a spread, which the gates are written about."""
+        plugin = FakePlugin(30)
+        provider = RecordingProvider()
+        self._engine(provider).discover(platform="fake", plugin=plugin, maximum_topics=3)
+        candidates = provider.requests[0]["candidates"]
+        self.assertTrue(candidates)
+        verified = [item for item in candidates if item.get("verified")]
+        self.assertTrue(verified, "no candidate was verified before the agent was asked")
+        first = verified[0]
+        for field in ("question", "description", "seconds_remaining"):
+            self.assertIn(field, first, f"the gates ask about {field}")
+        self.assertTrue(
+            any("spread" in item for item in verified),
+            "the cost gate is about the round trip, which nothing supplied",
+        )
 
     def test_missing_agent_degrades_to_prescore_and_is_recorded_as_such(self) -> None:
         plugin = FakePlugin(20)
@@ -575,3 +596,113 @@ class EvolutionSwitchTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class EveryModelCallIsRecordedTests(unittest.TestCase):
+    """A model was asked and the ledger says nothing: an operator cannot tell that from idle."""
+
+    def setUp(self) -> None:
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.memory = SessionMemory(Path(self.temp.name) / "m.sqlite3")
+
+    def _rows(self) -> list[dict]:
+        cursor = self.memory.connection.execute(
+            "SELECT platform, strategy_name, status, error, final_decision_json"
+            " FROM decision_ledger ORDER BY id"
+        )
+        return [
+            {"platform": r[0], "strategy": r[1], "status": r[2], "error": r[3], "final": r[4]}
+            for r in cursor
+        ]
+
+    def _discover(self, provider) -> None:
+        DiscoveryEngine(
+            memory=self.memory, provider=provider, strategy=BuiltInMarketDiscovery(),
+            evolution_enabled=True,
+        ).discover(platform="fake", plugin=FakePlugin(30), maximum_topics=3)
+
+    def test_a_round_that_selected_something_is_recorded(self) -> None:
+        self._discover(RecordingProvider())
+        [row] = self._rows()
+        self.assertEqual(row["status"], "OK")
+        self.assertIn("discovery", row["strategy"])
+
+    def test_a_round_that_selected_nothing_is_recorded_with_its_reason(self) -> None:
+        class Declines(RecordingProvider):
+            def run(self, payload, **options):
+                super().run(payload, **options)
+                return AgentRunResult(
+                    value={"selections": [], "skipped_reason": "nothing cleared the cost gate"},
+                    raw_output="{}", provider="declines", research_trace=[],
+                )
+
+        self._discover(Declines())
+        [row] = self._rows()
+        self.assertEqual(row["status"], "NO_ACTION")
+        self.assertIn("cost gate", row["error"])
+
+    def test_a_round_whose_model_failed_is_recorded_as_a_failure(self) -> None:
+        """Falling back to prescore order is a decision too, and it used to leave no trace."""
+        self._discover(LegacyProvider())
+        [row] = self._rows()
+        self.assertEqual(row["status"], "PROVIDER_ERROR")
+        self.assertTrue(row["error"], "the reason the model could not be used has to be kept")
+
+
+class DiscoveryCanFillItsOwnGapsTests(unittest.TestCase):
+    """Saying "no data" about something never looked up is not a finding, it is an unspent tool."""
+
+    class _Research:
+        descriptions = {
+            "SEARCH_WEB": {"purpose": "search", "arguments": {}},
+            "FETCH_URL": {"purpose": "read a page", "arguments": {}},
+        }
+
+        def create(self, context):
+            del context
+            return self
+
+        def execute(self, name, arguments):
+            return {"ok": True, "tool": name, "arguments": arguments}
+
+    def setUp(self) -> None:
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.memory = SessionMemory(Path(self.temp.name) / "m.sqlite3")
+
+    def _engine(self, provider, research):
+        return DiscoveryEngine(
+            memory=self.memory, provider=provider, strategy=BuiltInMarketDiscovery(),
+            evolution_enabled=True, research_contributions=research,
+        )
+
+    def test_the_open_web_is_offered_to_discovery_not_only_to_decisions(self) -> None:
+        provider = RecordingProvider()
+        self._engine(provider, [self._Research()]).discover(
+            platform="fake", plugin=FakePlugin(20), maximum_topics=2
+        )
+        offered = provider.tool_descriptions or {}
+        for tool in ("SEARCH_WEB", "FETCH_URL"):
+            self.assertIn(tool, offered, f"discovery cannot go and find anything without {tool}")
+
+    def test_a_research_tool_actually_runs_from_discovery(self) -> None:
+        provider = RecordingProvider(tools=("SEARCH_WEB",))
+        self._engine(provider, [self._Research()]).discover(
+            platform="fake", plugin=FakePlugin(20), maximum_topics=2
+        )
+        used = [r for r in provider.tool_results if r.get("tool") == "SEARCH_WEB"]
+        self.assertTrue(used and used[0]["ok"], f"the tool was offered but not usable: {provider.tool_results}")
+
+    def test_without_research_plugins_discovery_still_works(self) -> None:
+        provider = RecordingProvider()
+        selected = self._engine(provider, []).discover(
+            platform="fake", plugin=FakePlugin(20), maximum_topics=2
+        )
+        self.assertTrue(selected)
+        self.assertNotIn("SEARCH_WEB", provider.tool_descriptions or {})
+
+    def test_the_strategy_says_missing_evidence_is_something_to_go_and_get(self) -> None:
+        text = BuiltInMarketDiscovery().instructions
+        self.assertIn("MISSING EVIDENCE IS A TASK", text)
+        self.assertIn("is not a reason", text)

@@ -76,7 +76,7 @@ class PolymarketApiPlugin:
         realtime_order_book=True,
         candles=True,
         market_search=True,
-        settlement_status=False,
+        settlement_status=True,
         supported_order_types=("MARKET", "LIMIT"),
         write_workflows=("BUY", "SELL", "CANCEL", "REDEEM", "TRANSFER_OUT"),
         data_features=(
@@ -476,10 +476,40 @@ class PolymarketApiPlugin:
     def configuration_manifest(self) -> dict[str, Any]:
         return self.settings.manifest()
 
+    RESOLVED_PRICE = 0.99
+    """How close to certainty a settled outcome's price gets. Anything below this is still trading."""
+
     def outcome_won(
         self, detail: TopicDetail, market: Market, outcome: Outcome
     ) -> bool | None:
-        del detail, market, outcome
+        """Say whether this outcome resolved in the money, or nothing while it has not resolved.
+
+        A settled market prices its outcomes at the truth: the winner goes to one and the losers to
+        zero. That is what "resolved" looks like here - there is no separate winner field - so the
+        test is whether the price has left the trading range entirely, not merely which side is
+        ahead. A market still open at 0.97 is a market that can still be wrong, and calling it
+        settled would book a profit that has not happened.
+        """
+        event = self.client.get_event(str(detail.topic.topic_id))
+        for item in event.get("markets") or []:
+            if str(item.get("conditionId") or item.get("id", "")) != market.market_id:
+                continue
+            if not item.get("closed"):
+                return None
+            names = _json_list(item.get("outcomes"))
+            prices = _json_list(item.get("outcomePrices"))
+            for index, name in enumerate(names):
+                if str(name) != outcome.name or index >= len(prices):
+                    continue
+                try:
+                    price = float(prices[index])
+                except (TypeError, ValueError):
+                    return None
+                if price >= self.RESOLVED_PRICE:
+                    return True
+                if price <= 1 - self.RESOLVED_PRICE:
+                    return False
+                return None
         return None
 
     def close(self) -> None:

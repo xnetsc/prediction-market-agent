@@ -131,12 +131,18 @@ class DiscoveryEngine:
         provider: Any,
         evolution_enabled: bool,
         cross_platform_search: Callable[[str, int], dict[str, Any]] | None = None,
+        research_contributions: list[Any] | None = None,
     ) -> None:
         self.memory = memory
         self.strategy = strategy
         self.provider = provider
         self.evolution_enabled = evolution_enabled
         self.cross_platform_search = cross_platform_search
+        # The gates ask about resolution wording and deadlines, and a candidate that does not carry
+        # them was being rejected as unverifiable - while the tools that could have gone and found
+        # them were offered only at the decision stage. Discovery could see that something was
+        # missing and had no way to go and get it.
+        self.research_contributions = list(research_contributions or [])
 
     # ------------------------------------------------------------------ survey
 
@@ -316,6 +322,56 @@ class DiscoveryEngine:
         )
         return tuple(chosen)
 
+    def _verify(
+        self,
+        toolbox: "_DiscoveryToolbox",
+        shortlist: list[Topic],
+        now_ms: int,
+    ) -> dict[str, dict[str, Any]]:
+        """Spend part of the read allowance up front on what the gates actually ask about.
+
+        The allowance existed only as a ceiling on what the agent could request for itself, and the
+        agent's tool budget is far smaller than the shortlist - so most candidates arrived with no
+        deadline and no spread and were refused as unverifiable, which is a construction rather than
+        a judgement. Buying those facts here, through the same toolbox so the platform is read once
+        and not twice, means the gates can be applied to every candidate this reaches. A candidate
+        that could not be read says so, instead of arriving indistinguishable from one nobody looked at.
+        """
+        verified: dict[str, dict[str, Any]] = {}
+        for topic in shortlist:
+            detail = toolbox.execute("TOPIC_DETAIL", {"topic_id": topic.topic_id})
+            if not detail.get("ok"):
+                # The allowance is gone; the rest of the shortlist is honestly unexamined.
+                break
+            entry: dict[str, Any] = {"verified": True, "resolution": detail.get("resolution")}
+            end_time = detail.get("end_time_ms")
+            if end_time:
+                entry["seconds_remaining"] = max(0, (int(end_time) - now_ms) // 1000)
+            markets = detail.get("markets") or []
+            entry["markets"] = len(markets)
+            outcomes = (markets[0].get("outcomes") or []) if markets else []
+            if outcomes:
+                entry["priced_outcome"] = outcomes[0].get("name")
+                book = toolbox.execute("OUTCOME_BOOK", {
+                    "market_id": markets[0].get("market_id"),
+                    "outcome_id": outcomes[0].get("outcome_id"),
+                })
+                if book.get("ok"):
+                    entry.update({
+                        key: book[key] for key in ("best_bid", "best_ask", "spread")
+                        if key in book
+                    })
+                    bid, ask = book.get("best_bid"), book.get("best_ask")
+                    if bid and ask:
+                        mid = (float(bid) + float(ask)) / 2
+                        entry["spread_pct_of_mid"] = (
+                            round((float(ask) - float(bid)) / mid * 100, 2) if mid else None
+                        )
+                else:
+                    entry["book_error"] = book.get("error", "")
+            verified[topic.topic_id] = entry
+        return verified
+
     def _select(
         self,
         *,
@@ -335,10 +391,27 @@ class DiscoveryEngine:
             evolution_enabled=self.evolution_enabled,
             now_ms=now_ms,
         )
+        toolbox = _DiscoveryToolbox(
+            plugin=plugin,
+            memory=self.memory,
+            platform=platform,
+            budget=budget,
+            cross_platform_search=self.cross_platform_search,
+            measurements=self.measurements,
+            research=self.research_contributions,
+        )
+        verified = self._verify(toolbox, shortlist, now_ms)
         candidates = [
             {
                 "topic_id": topic.topic_id,
                 "title": topic.title,
+                # The gates ask about the resolution wording, the deadline and the round-trip cost.
+                # None of that was here, so every candidate had to be bought with a tool step, and
+                # a shortlist far larger than the tool budget meant most of it was refused as
+                # unverifiable - by construction rather than by judgement. The question and the
+                # description were already in hand and cost nothing to pass on.
+                "question": topic.question,
+                "description": topic.description[:600],
                 "category": topic.category,
                 "status": topic.status,
                 "liquidity_usdt": topic.liquidity_usdt,
@@ -348,6 +421,7 @@ class DiscoveryEngine:
                     for key, value in features_by_topic.get(topic.topic_id, {}).items()
                     if key != "buckets"
                 },
+                **verified.get(topic.topic_id, {"verified": False}),
             }
             for topic in shortlist
         ]
@@ -358,13 +432,19 @@ class DiscoveryEngine:
             "discovery_strategy": prompt_json_payload(payload),
             "candidates": candidates,
         }
-        toolbox = _DiscoveryToolbox(
-            plugin=plugin,
-            memory=self.memory,
+        # Every call to a model leaves a row, this one included. It used to leave none: a discovery
+        # round that failed, or that judged nothing worth a slot, produced no ledger entry at all,
+        # so the only visible trace was a cycle that quietly did nothing. An operator reading the
+        # ledger could not tell "the model was asked and declined" from "nothing ran".
+        decision_id = self.memory.begin_decision(
             platform=platform,
-            budget=budget,
-            cross_platform_search=self.cross_platform_search,
-            measurements=self.measurements,
+            market_topic_id="",
+            market_id="",
+            token_id="",
+            strategy_name=f"{self.strategy.name}:discovery",
+            strategy_sha256=self.strategy.sha256,
+            context={"stage": "discovery", "candidates": candidates,
+                     "maximum_selections": maximum_topics},
         )
         try:
             result = self.provider.run(
@@ -388,6 +468,13 @@ class DiscoveryEngine:
                 platform,
                 error,
             )
+            self.memory.complete_decision(
+                decision_id,
+                provider=getattr(self.provider, "name", ""),
+                model_raw_output=getattr(error, "raw_output", ""),
+                status="PROVIDER_ERROR",
+                error=str(error),
+            )
             return (
                 [
                     {
@@ -400,12 +487,18 @@ class DiscoveryEngine:
                 "mechanical",
                 "",
             )
-        selections = result.value.get("selections", [])
-        return (
-            [item for item in selections if isinstance(item, dict)],
-            "agent",
-            str(result.value.get("skipped_reason", "")),
+        selections = [item for item in result.value.get("selections", []) if isinstance(item, dict)]
+        skipped_reason = str(result.value.get("skipped_reason", ""))
+        self.memory.complete_decision(
+            decision_id,
+            provider=result.provider,
+            research=result.research_trace,
+            model_raw_output=result.raw_output,
+            final_decision={"selections": selections, "skipped_reason": skipped_reason},
+            status="OK" if selections else "NO_ACTION",
+            error="" if selections else skipped_reason,
         )
+        return selections, "agent", skipped_reason
 
     # -------------------------------------------------------------- evolution
 
@@ -554,6 +647,7 @@ class _DiscoveryToolbox:
         budget: DiscoveryBudget,
         cross_platform_search: Callable[[str, int], dict[str, Any]] | None,
         measurements: Callable[[], dict[str, Any]] | None = None,
+        research: list[Any] | None = None,
     ) -> None:
         self.measurements = measurements
         self.plugin = plugin
@@ -589,6 +683,18 @@ class _DiscoveryToolbox:
                 "purpose": "Find the same question quoted on other registered platforms.",
                 "arguments": {"query": "required string", "max_results_per_platform": "optional integer"},
             }
+        # Whatever the research plugins contribute - searching the web, reading a page - offered
+        # here as well as at the decision stage. "I could not verify the resolution wording" is a
+        # statement about what was reachable, and this is what makes it reachable.
+        self._research: dict[str, Any] = {}
+        for contribution in research or []:
+            executor = contribution.create(None)
+            for name, description in executor.descriptions.items():
+                key = str(name).strip().upper()
+                if key in self.descriptions or key in self._research:
+                    continue
+                self.descriptions[key] = description
+                self._research[key] = executor
 
     def execute(self, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
         handler = {
@@ -599,6 +705,9 @@ class _DiscoveryToolbox:
             "SEARCH_OTHER_PLATFORMS": self._search,
         }.get(name.strip().upper())
         if handler is None:
+            executor = self._research.get(name.strip().upper())
+            if executor is not None:
+                return executor.execute(name.strip().upper(), arguments)
             raise ValueError(f"Unknown discovery tool: {name}")
         return handler(arguments)
 
