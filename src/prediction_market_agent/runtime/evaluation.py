@@ -107,6 +107,7 @@ class MarketEvaluationMixin:
         market: Market,
         outcome: Outcome,
         seconds_remaining: float,
+        funding_followup: dict[str, Any] | None = None,
     ) -> None:
         if self._decisions_this_cycle >= self._max_decisions_this_cycle:
             return
@@ -146,6 +147,9 @@ class MarketEvaluationMixin:
                     if order.token_id == token_id and order.status == "OPEN"
                 ],
             },
+            # Present only when this round exists because an earlier one stopped for money. It
+            # carries the old reasoning as something to re-check, never as a conclusion to resume.
+            **({"delayed_funding_answer": funding_followup} if funding_followup else {}),
             "registered_platform_capabilities": {
                 name: item.plugin.capabilities.to_dict()
                 for name, item in self.platforms.items()
@@ -199,6 +203,18 @@ class MarketEvaluationMixin:
                 **values,
             )
 
+        # What this round is about, so a funding request made mid-way can be read back against it.
+        self._funding_context = {
+            "market_topic_id": str(market_topic_id),
+            "token_id": str(token_id),
+            "decision_id": decision_id,
+            "conclusion": {
+                "market": current.get("market"),
+                "order_book": current.get("order_book"),
+                "seconds_remaining": current.get("seconds_remaining"),
+                "portfolio": current.get("portfolio"),
+            },
+        }
         try:
             result = self.provider.decide(
                 current,
@@ -335,6 +351,8 @@ class MarketEvaluationMixin:
             status=str(execution.get("status", "COMPLETED")),
         )
 
+    _funding_context: dict[str, Any] | None = None
+
     def _execute_agent_tool(
         self,
         platform: str,
@@ -349,4 +367,36 @@ class MarketEvaluationMixin:
                 f"Agent tool blocked by risk rules: {decision.reason}"
             )
         result = toolbox.execute(name, arguments)
+        self._remember_funding_wait(platform, name, arguments, result)
         return result
+
+    def _remember_funding_wait(
+        self, platform: str, name: str, arguments: dict[str, Any], result: dict[str, Any]
+    ) -> None:
+        """File the reasoning behind a funding request that has to wait for a person.
+
+        The decision ends here - the model cannot hold a position on an answer that has not come.
+        What must not end with it is why the money was wanted, because that is the only thing the
+        eventual answer can be judged against.
+        """
+        if name.strip().upper() != "ENSURE_FUNDS" or not isinstance(result, dict):
+            return
+        if str(result.get("state")) != "pending" or not result.get("request_id"):
+            return
+        context = self._funding_context
+        if context is None:
+            return
+        try:
+            self.memory.open_funding_continuation(
+                request_id=str(result["request_id"]),
+                platform=str(result.get("platform") or platform),
+                market_topic_id=context["market_topic_id"],
+                token_id=context["token_id"],
+                decision_id=context.get("decision_id"),
+                asked_for=float(arguments.get("amount", 0) or 0),
+                currency=str(result.get("currency", "")),
+                reason=str(arguments.get("reason", "")),
+                conclusion=context["conclusion"],
+            )
+        except Exception:
+            LOGGER.exception("could not record why %s was asked for funds", platform)

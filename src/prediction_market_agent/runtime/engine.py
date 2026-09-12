@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import time
+
 import logging
 import threading
 from typing import Any
@@ -129,11 +131,97 @@ class TradingEngine(MarketEvaluationMixin, ExecutionActionsMixin):
             )
         )
 
+    def _resume_funded_decisions(self, runtime: PlatformRuntime) -> None:
+        """Pick up decisions that stopped to wait for money, once the money question is settled.
+
+        Nothing else will: the round that asked ended when it asked, and the plugin only answers
+        when asked. Telling the model "the funds arrived" on its own would be worse than useless -
+        it would be an instruction to act on a conclusion nobody has re-examined. So the market is
+        re-read and the old reasoning is handed back as something to check, not to resume from.
+        """
+        try:
+            waiting = self.memory.open_funding_continuations(runtime.plugin.name)
+        except Exception:
+            LOGGER.exception("could not read pending funding continuations")
+            return
+        for entry in waiting:
+            try:
+                answer = runtime.plugin.funding_status(str(entry["request_id"]))
+            except Exception:
+                LOGGER.exception("could not read funding status for %s", entry["request_id"])
+                continue
+            if answer.state == "pending":
+                continue
+            self.memory.close_funding_continuation(str(entry["request_id"]))
+            if self._decisions_this_cycle >= self._max_decisions_this_cycle:
+                LOGGER.info(
+                    "%s funding %s settled as %s but this cycle has no decision budget left",
+                    runtime.plugin.name, entry["request_id"], answer.state,
+                )
+                continue
+            try:
+                self._reconsider_after_funding(runtime, entry, answer)
+            except (KeyError, ValueError, RuntimeError, ExecutionError):
+                LOGGER.exception(
+                    "could not reconsider %s after funding settled", entry["market_topic_id"]
+                )
+
+    def _reconsider_after_funding(
+        self, runtime: PlatformRuntime, entry: dict[str, Any], answer: Any
+    ) -> None:
+        """Re-run the decision on fresh market data, with the funding answer as context."""
+        detail = runtime.plugin.get_topic(str(entry["market_topic_id"]))
+        market = next(
+            (
+                item
+                for item in detail.markets
+                for outcome in item.outcomes
+                if str(outcome.outcome_id) == str(entry["token_id"])
+            ),
+            None,
+        )
+        if market is None:
+            LOGGER.info(
+                "%s no longer lists %s; the funded intention has nothing to act on",
+                runtime.plugin.name, entry["token_id"],
+            )
+            return
+        outcome = next(
+            item for item in market.outcomes if str(item.outcome_id) == str(entry["token_id"])
+        )
+        self._evaluate_outcome(
+            runtime,
+            detail.topic,
+            detail,
+            market,
+            outcome,
+            max(0, int(detail.topic.end_time_ms / 1000 - time.time())),
+            funding_followup={
+                "notice": (
+                    "This is a delayed answer to a funding request you made earlier, not a fresh "
+                    "opportunity. Time has passed and the market has been re-read since."
+                ),
+                "asked_for": entry["asked_for"],
+                "currency": entry["currency"],
+                "your_reason_at_the_time": entry["reason"],
+                "what_you_saw_at_the_time": entry["conclusion"],
+                "answer": answer.to_dict(),
+                "what_to_do": (
+                    "Check whether the reasoning that justified the request still holds against "
+                    "the prices in front of you now. If it does not, say so and do not trade on a "
+                    "conclusion the market has already moved past."
+                ),
+            },
+        )
+
     def _process_platform_topics(
         self, runtime: PlatformRuntime, topics: list[Topic], maximum_decisions: int
     ) -> None:
         self._decisions_this_cycle = 0
         self._max_decisions_this_cycle = maximum_decisions
+        # Answers to funding requests come back between cycles, so this is where they are read.
+        # An unclaimed answer is the same as no answer: nobody is sitting waiting for it.
+        self._resume_funded_decisions(runtime)
         eligible = self.decision_strategy.select_topics(topics)
         LOGGER.info(
             "platform=%s scanned=%d candidates=%d provider=%s",
