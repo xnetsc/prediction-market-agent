@@ -432,3 +432,42 @@ class FundingLifecycleTests(unittest.TestCase):
                 else:
                     plugin.reject_funding({"note": note})
                 self.assertEqual(plugin.funding_status(asked.request_id).operator_note, note)
+
+
+class NothingStopsAnUnfundedBuyTests(unittest.TestCase):
+    """The framework does not check affordability, so what does has to be stated, not assumed."""
+
+    def test_an_order_with_no_cash_reaches_the_venue(self) -> None:
+        """Recorded because it is surprising: the venue refuses it, nothing here does."""
+        from prediction_market_agent.core.domain import AccountState
+        from prediction_market_agent.runtime.broker import ExecutionGateway
+
+        sent = []
+
+        class Transport:
+            def get_quote(inner, **v):
+                return {"quoteId": "q", "averagePrice": v["reference_price"],
+                        "expireAt": 4_102_444_800_000}
+            def place_order(inner, **v):
+                sent.append("order")
+                return {"orderId": "o", "status": "FILLED"}
+
+        state = AccountState(starting_capital=0.0, cash=0.0)
+        gateway = ExecutionGateway(state, platform="p", write_transport=Transport())
+        quote = gateway.get_quote(
+            token_id="t", side="BUY", price=0.5, quantity=20, fee_bps=0,
+            market_topic_id=1, market_id=2, symbol="S", direction="UP", order_type="MARKET",
+        )
+        gateway.place_order(quote)
+        self.assertEqual(sent, ["order"])
+        self.assertLess(state.cash, 0)
+
+    def test_the_built_in_strategy_tells_the_model_to_check_and_ask(self) -> None:
+        """Since nothing enforces it, the instruction is the only thing standing there."""
+        from prediction_market_agent.agent.strategy import BuiltInDecisionStrategy
+
+        text = BuiltInDecisionStrategy().instructions
+        for expected in ("ACCOUNT_FUNDS", "ENSURE_FUNDS", "FUNDING_STATUS"):
+            with self.subTest(tool=expected):
+                self.assertIn(expected, text)
+        self.assertIn("A pending request is not funding", text)
