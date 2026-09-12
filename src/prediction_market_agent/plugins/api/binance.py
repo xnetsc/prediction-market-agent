@@ -27,7 +27,7 @@ def initialize_plugin(context: PluginInitializationContext) -> PluginSpec:
             PluginConfigField("BINANCE_PREDICTION_WALLET_ADDRESS", "预测钱包地址", "string", "Binance Web3 预测市场钱包地址，用于真实下单和资产操作。", needed_to_run=True),
             PluginConfigField("BINANCE_PREDICTION_WALLET_ID", "预测钱包 ID", "string", "Binance 预测市场内部钱包 ID，用于需要 walletId 的写接口。", needed_to_run=True),
             PluginConfigField("BINANCE_PREDICTION_ACCOUNT_TYPE", "资金账户", "enum", "预测钱包转入或转出时使用的 Binance 账户类型。", required=True, options=("SPOT", "FUNDING"), default="SPOT"),
-            PluginConfigField("BINANCE_TRADING_CAPITAL", "交易账户起始资金(USDT)", "number", "预测钱包里现在有多少 USDT。之所以要你填：这个插件用的 /sapi/v1/w3w/wallet/prediction 端点里没有读预测钱包余额的接口，现货余额读得到但那不是预测账户能花的钱。所以这个数字被当作可用金额上报（source 标成 declared，不冒充平台答案），账本起点也随之而来。它不拦任何动作——填多了不会被挡，只会在真下单时被平台拒。转账进出由插件自己按你批准的诉求执行，执行后这里要手工跟上。", default=0),
+            PluginConfigField("BINANCE_TRADING_CAPITAL", "预测钱包当前余额(USDT)·转账后需手工更新", "number", "预测钱包里现在有多少 USDT。之所以要你填：这个插件用的 /sapi/v1/w3w/wallet/prediction 端点里没有读预测钱包余额的接口，现货余额读得到但那不是预测账户能花的钱。所以这个数字被当作可用金额上报（source 标成 declared，不冒充平台答案），账本起点也随之而来。它不拦任何动作——填多了不会被挡，只会在真下单时被平台拒。转账进出由插件自己按你批准的诉求执行，执行后这里要手工跟上。", default=0),
             PluginConfigField("BINANCE_PREDICTION_SLIPPAGE_BPS", "最大滑点(bps)", "integer", "市价请求允许的滑点基点数，100 bps 等于 1%。", default=100, required=True),
             PluginConfigField("BINANCE_HTTP_PROXY", "代理使用方式", "string", "默认 INHERIT，使用程序设置里的统一代理。也可单独填 DIRECT、HOST、ENVIRONMENT、SYSTEM（仅原生 macOS）或完整 http(s) URL。", required=True, default="INHERIT"),
             PluginConfigField("BINANCE_SCAN_INTERVAL_SECONDS", "扫描间隔（秒）", "integer", "Binance 完成一个市场扫描与决策周期后等待到下一周期的秒数。", default=60),

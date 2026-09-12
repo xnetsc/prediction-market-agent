@@ -133,10 +133,9 @@ class CredentialHonestyTests(unittest.TestCase):
                 "BINANCE_API_KEY", "BINANCE_API_SECRET",
                 "BINANCE_PREDICTION_WALLET_ADDRESS", "BINANCE_PREDICTION_WALLET_ID",
             },
-            "polymarket": {
-                "POLYMARKET_PRIVATE_KEY", "POLYMARKET_API_KEY", "POLYMARKET_API_SECRET",
-                "POLYMARKET_API_PASSPHRASE", "POLYMARKET_FUNDER_ADDRESS",
-            },
+            # The CLOB credentials and the funder address are consequences of the signing key,
+            # so the plugin derives them and must not be asking for them as well.
+            "polymarket": {"POLYMARKET_PRIVATE_KEY"},
         }
         catalog = self._catalog()
         for name, names in expected.items():

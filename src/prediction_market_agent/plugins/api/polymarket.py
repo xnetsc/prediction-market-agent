@@ -28,11 +28,11 @@ def initialize_plugin(context: PluginInitializationContext) -> PluginSpec:
         PluginConfigField("POLYMARKET_RELAYER_URL", "Relayer URL", "string", "Polymarket gasless 交易、赎回和转账 relayer 的 HTTPS 根地址。", required=True, default=PRODUCTION.relayer_url),
         PluginConfigField("POLYMARKET_RPC_URL", "Polygon RPC URL", "string", "执行或确认 EVM 链上操作使用的 HTTPS JSON-RPC 地址。", required=True, default=PRODUCTION.rpc_url),
         PluginConfigField("POLYMARKET_CHAIN_ID", "Chain ID", "integer", "Polymarket 插件执行链上请求时使用的 EVM chain ID。", required=True, default=PRODUCTION.chain_id),
-        PluginConfigField("POLYMARKET_PRIVATE_KEY", "钱包私钥", "secret", "签署 Polymarket CLOB 与链上交易的钱包私钥；只在本机插件内使用。", needed_to_run=True),
-        PluginConfigField("POLYMARKET_API_KEY", "CLOB API Key", "secret", "Polymarket CLOB 二级认证的 API Key。", needed_to_run=True),
-        PluginConfigField("POLYMARKET_API_SECRET", "CLOB API Secret", "secret", "Polymarket CLOB 二级认证的 API Secret。", needed_to_run=True),
-        PluginConfigField("POLYMARKET_API_PASSPHRASE", "CLOB Passphrase", "secret", "Polymarket CLOB 二级认证的 Passphrase。", needed_to_run=True),
-        PluginConfigField("POLYMARKET_FUNDER_ADDRESS", "Funder 地址", "string", "实际持有资金和头寸的 Polymarket proxy/deposit wallet 地址。", needed_to_run=True),
+        PluginConfigField("POLYMARKET_PRIVATE_KEY", "钱包私钥", "secret", "签署 Polymarket CLOB 与链上交易的钱包私钥；只在本机插件内使用，不外传。你可以粘贴自己已有的钱包私钥；如果还没有，下方「钱包」面板里有一个「生成一个新钱包」按钮，点了才会生成——插件不会自作主张替你决定用哪种方式。生成的钱包一开始是空的，要你自己往里转钱。", needed_to_run=True),
+        PluginConfigField("POLYMARKET_API_KEY", "CLOB API Key", "secret", "Polymarket CLOB 二级认证的 API Key。留空即可——这三项能由私钥派生，插件会在连线时自己办。想用你自己已有的那套凭据就填进来，填了就以你填的为准。", ),
+        PluginConfigField("POLYMARKET_API_SECRET", "CLOB API Secret", "secret", "Polymarket CLOB 二级认证的 API Secret。留空由私钥派生；三项要么都填，要么都留空。", ),
+        PluginConfigField("POLYMARKET_API_PASSPHRASE", "CLOB Passphrase", "secret", "Polymarket CLOB 二级认证的 Passphrase。留空由私钥派生；三项要么都填，要么都留空。", ),
+        PluginConfigField("POLYMARKET_FUNDER_ADDRESS", "Funder 地址", "string", "实际持有资金和头寸的 Polymarket proxy/deposit wallet 地址。留空则由私钥推出来，下方「钱包」面板会显示推出来的是哪个地址和哪种钱包类型。只有当你要用一个跟签名私钥不同的代理钱包时才需要填。", ),
         PluginConfigField("POLYMARKET_BUILDER_CODE", "Builder Code", "string", "订单归因使用的 Polymarket Builder Code；不使用时可留空。"),
         PluginConfigField("POLYMARKET_RELAYER_API_KEY", "Relayer API Key", "secret", "调用 Polymarket relayer 的用户 API Key。"),
         PluginConfigField("POLYMARKET_RELAYER_API_KEY_ADDRESS", "Relayer Key 地址", "string", "与用户 relayer API Key 关联的链上地址。"),
@@ -40,7 +40,6 @@ def initialize_plugin(context: PluginInitializationContext) -> PluginSpec:
         PluginConfigField("POLYMARKET_BUILDER_API_SECRET", "Builder API Secret", "secret", "使用 Builder relayer 身份时的 API Secret。"),
         PluginConfigField("POLYMARKET_BUILDER_API_PASSPHRASE", "Builder Passphrase", "secret", "使用 Builder relayer 身份时的 API Passphrase。"),
         PluginConfigField("POLYMARKET_TRANSFER_RECIPIENT", "转出地址", "string", "TRANSFER_OUT 操作默认接收 pUSD 的 EVM 地址。"),
-        PluginConfigField("POLYMARKET_TRADING_CAPITAL", "交易账户起始资金(USDT)", "number", "读不到平台余额时才用的备用数字，正常情况下用不上。这个插件每次都直接问平台抵押品余额（COLLATERAL），可用金额和账本起点都以那个读数为准；只有该请求失败时，才退回这里填的数，并在 source 上标成 declared 而不是冒充平台答案。所以这里通常留 0。", default=0),
         PluginConfigField("POLYMARKET_HTTP_PROXY", "代理使用方式", "string", "默认 INHERIT，使用程序设置里的统一代理。也可单独填 DIRECT、HOST、ENVIRONMENT、SYSTEM（仅原生 macOS）或完整 http(s) URL。", required=True, default="INHERIT"),
         PluginConfigField("POLYMARKET_SCAN_INTERVAL_SECONDS", "扫描间隔（秒）", "integer", "Polymarket 完成一个市场扫描与决策周期后等待到下一周期的秒数。", default=60),
         PluginConfigField("POLYMARKET_ERROR_BACKOFF_SECONDS", "失败退避初值（秒）", "integer", "Polymarket 周期失败后的首次重试等待秒数；连续失败时指数增长。", default=30),
@@ -51,7 +50,7 @@ def initialize_plugin(context: PluginInitializationContext) -> PluginSpec:
     )
     configuration = PluginConfiguration(
         fields, load, save, delete, storage,
-        retired_fields=("POLYMARKET_NETWORK_RULES_JSON",),
+        retired_fields=("POLYMARKET_NETWORK_RULES_JSON", "POLYMARKET_TRADING_CAPITAL"),
     )
 
     instances = []
@@ -133,6 +132,71 @@ def initialize_plugin(context: PluginInitializationContext) -> PluginSpec:
             "dismiss_label": '驳回',
         }]
 
+    def wallet_notices() -> list:
+        """Offer every shortcut this plugin can take, and take none of them unasked.
+
+        Most of what this plugin used to demand is a consequence of the signing key, so an operator
+        who has one should not be hunting for an address or a credential that the SDK can state.
+        But which way to get a key is theirs: pasting one they already control and letting the bot
+        make one are different decisions about who holds the money, and a plugin that picked for
+        them would be answering a question it was never asked.
+        """
+        values = configuration.load()
+        if not str(values.get("POLYMARKET_PRIVATE_KEY", "")).strip():
+            return [{
+                "key": "wallet",
+                "title": '钱包',
+                "kind": "confirm",
+                "description": '这个插件用一个 EVM 钱包签名和持仓。你可以在上面的「钱包私钥」里粘贴自己已有的钱包，也可以让插件替你生成一个新的——两条路都行，插件不会替你选。',
+                "content": {"state": "还没有钱包", "note": '生成的钱包由这台机器保管私钥，里面一开始没有钱，要你自己往里转。如果你更希望自己掌握私钥，就直接填上面那个字段，别点这个按钮。'},
+                "action_label": '替我生成一个新钱包',
+                "dismiss_label": '不用，我自己填',
+            }]
+        panel = _live_instance_panel()
+        return [{
+            "key": "wallet",
+            "title": '钱包',
+            "kind": "confirm",
+            "description": '这是插件根据你的私钥连上去之后实际拿到的身份。地址、钱包类型和 CLOB 凭据都是私钥推出来的，不用你填；下面两个按钮是可选的便利，不点也能跑。',
+            "content": panel,
+            "action_label": '创建一个 Builder API Key',
+            "dismiss_label": '办理交易授权（上链、花 gas）',
+        }]
+
+    def _live_instance_panel() -> dict:
+        try:
+            return _live_instance().wallet_panel()
+        except Exception as error:
+            return {"error": str(error)[:300]}
+
+    def wallet_action(key: str, name: str, payload: dict) -> dict:
+        del key
+        if name == "dismiss" and not str(configuration.load().get("POLYMARKET_PRIVATE_KEY", "")).strip():
+            return {"ok": True, "message": '好，等你自己填上私钥。'}
+        if not str(configuration.load().get("POLYMARKET_PRIVATE_KEY", "")).strip():
+            from eth_account import Account
+
+            account = Account.create()
+            saved = dict(configuration.load())
+            saved["POLYMARKET_PRIVATE_KEY"] = account.key.hex()
+            configuration.save(saved)
+            return {
+                "ok": True,
+                "message": f'已生成钱包 {account.address}。私钥保存在这台机器的插件配置里。'
+                           '它现在是空的——往这个地址转 USDC 之后才能交易。',
+            }
+        try:
+            instance = _live_instance()
+        except Exception as error:
+            return {"ok": False, "message": str(error)[:300]}
+        handler = {"confirm": instance.create_builder_key, "dismiss": instance.approve_trading}.get(name)
+        if handler is None:
+            return {"ok": False, "message": f"Unknown wallet action: {name}"}
+        try:
+            return handler(payload)
+        except Exception as error:
+            return {"ok": False, "message": str(error)[:300]}
+
     def funding_action(key: str, name: str, payload: dict) -> dict:
         del key
         try:
@@ -163,8 +227,12 @@ def initialize_plugin(context: PluginInitializationContext) -> PluginSpec:
             ),
         ),
         teardown=lambda: close_plugin_instances(instances),
-        notices_callback=funding_notices,
-        notice_action_callback=funding_action,
+        notices_callback=lambda: [*wallet_notices(), *funding_notices()],
+        notice_action_callback=lambda key, name, payload: (
+            wallet_action(key, name, payload)
+            if key == "wallet"
+            else funding_action(key, name, payload)
+        ),
         readiness_callback=readiness,
         runtime=PluginRuntime(event_loop.start, event_loop.stop, event_loop.status),
     )

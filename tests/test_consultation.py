@@ -458,3 +458,65 @@ class ThroughTheRealLoopTests(unittest.TestCase):
             hold_decision(),
         ], self._plugin(store))
         self.assertFalse(consultation.open)
+
+
+class DerivableConfigurationTests(unittest.TestCase):
+    """Asking for something the plugin can work out is asking the operator to do its job."""
+
+    def _fields(self, plugin: str) -> dict:
+        from prediction_market_agent.plugin_system.discovery import load_plugin_catalog
+        from prediction_market_agent.core.config import Config as _Config
+
+        catalog = load_plugin_catalog(_Config(state_file=Path("/tmp/derivable-state.json")))
+        self.addCleanup(catalog.shutdown)
+        return {f.name: f for f in catalog.get("api", plugin).configuration.fields}
+
+    def test_the_signing_key_is_the_only_thing_polymarket_cannot_work_out(self) -> None:
+        fields = self._fields("polymarket")
+        self.assertTrue(fields["POLYMARKET_PRIVATE_KEY"].needed_to_run)
+        for derivable in (
+            "POLYMARKET_API_KEY", "POLYMARKET_API_SECRET", "POLYMARKET_API_PASSPHRASE",
+            "POLYMARKET_FUNDER_ADDRESS",
+        ):
+            with self.subTest(field=derivable):
+                self.assertFalse(
+                    fields[derivable].needed_to_run,
+                    f"{derivable} follows from the private key and must not be demanded",
+                )
+
+    def test_a_half_filled_credential_set_is_refused_as_configuration_not_as_auth(self) -> None:
+        """Two of three silently ignored would surface later as a login error nobody could place."""
+        from prediction_market_agent.plugins.api._polymarket.write import PolymarketWriteTransport
+
+        transport = PolymarketWriteTransport.__new__(PolymarketWriteTransport)
+        transport._client = None
+        transport.settings = SimpleNamespace(
+            api_key="only-the-key", api_secret="", api_passphrase="",
+            private_key="0x" + "11" * 32, funder_address="",
+            chain_id=137, gamma_url="https://g", clob_url="https://c", data_url="https://d",
+            relayer_url="https://r", rpc_url="https://rpc",
+        )
+        with self.assertRaises(ValueError) as caught:
+            transport._require_client()
+        self.assertIn("三项", str(caught.exception))
+
+    def test_leaving_all_three_blank_derives_them_over_the_plugins_own_transport(self) -> None:
+        """Deriving over the SDK's construction-time transport would bypass the configured proxy."""
+        import inspect
+        from prediction_market_agent.plugins.api._polymarket import write
+
+        derive = inspect.getsource(write.PolymarketWriteTransport.derive_credentials)
+        self.assertIn("self._http_client(", derive, "the transport must be the plugin's own")
+        require = inspect.getsource(write.PolymarketWriteTransport._require_client)
+        self.assertIn("self.derive_credentials(environment)", require)
+
+    def test_generating_a_wallet_is_offered_and_never_taken_unasked(self) -> None:
+        """Who holds the key is the operator's decision, so it waits for them to make it."""
+        import inspect
+        from prediction_market_agent.plugins.api import polymarket as plugin
+
+        source = inspect.getsource(plugin)
+        self.assertIn("Account.create()", source, "the plugin can make a wallet")
+        offer = source[source.index("def wallet_notices"):source.index("def wallet_action")]
+        self.assertIn("action_label", offer, "and only offers it as something to press")
+        self.assertNotIn("Account.create()", offer, "never inside the listing itself")

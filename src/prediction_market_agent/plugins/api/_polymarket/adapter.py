@@ -123,19 +123,22 @@ class PolymarketApiPlugin:
     def account_funds(self) -> AccountFunds:
         """Ask the platform what the wallet's collateral actually is, and say when that failed.
 
-        Falling back to the configured figure is fine; passing it off as the platform's answer is
-        not, so `source` records which one this is.
+        Nothing is assumed when it will not say, and there is no configured figure to assume from.
+        A number typed once is right until the first trade or transfer and stale forever after, and
+        a stale figure read as spendable is how a caller comes to believe it holds money it does
+        not. Zero with the error attached is worse to look at and better to act on: nothing gets
+        sized from it, and the reason is on the record rather than hidden behind a plausible number.
         """
         try:
             balance = self._write_transport.collateral_balance()
         except Exception as error:
             return AccountFunds(
-                available=float(self.settings.trading_capital),
+                available=0.0,
                 currency="pUSD",
                 source="declared",
                 detail={
-                    "why": "the platform balance could not be read; this is "
-                    "POLYMARKET_TRADING_CAPITAL as configured",
+                    "why": "the platform balance could not be read, and nothing is assumed in its "
+                    "place; treat this account as empty until the read works",
                     "error": str(error)[:300],
                 },
             )
@@ -300,6 +303,29 @@ class PolymarketApiPlugin:
         except Exception as error:
             panel["deposit_target_error"] = str(error)[:300]
         return panel
+
+    def wallet_panel(self) -> dict[str, Any]:
+        """What this key turns out to be, and what is still missing before it can trade."""
+        panel: dict[str, Any] = {}
+        try:
+            panel.update(self._write_transport.wallet_facts())
+        except Exception as error:
+            panel["error"] = str(error)[:300]
+        try:
+            panel["builder_api_keys"] = self._write_transport.builder_api_keys()
+        except Exception as error:
+            panel["builder_api_keys_error"] = str(error)[:300]
+        return panel
+
+    def create_builder_key(self, values: dict[str, Any]) -> dict[str, Any]:
+        del values
+        created = self._write_transport.create_builder_api_key()
+        return {"ok": True, "message": "已创建一个 Builder API Key。", "created": created}
+
+    def approve_trading(self, values: dict[str, Any]) -> dict[str, Any]:
+        del values
+        self._write_transport.setup_trading_approvals()
+        return {"ok": True, "message": "交易授权已提交。"}
 
     def topic_page_size(self) -> int:
         return self.settings.topic_page_size

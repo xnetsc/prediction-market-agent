@@ -6,7 +6,11 @@ from dataclasses import replace
 from typing import Any
 
 import httpx
+from eth_account import Account
 from polymarket import BuilderApiKey, PRODUCTION, RelayerApiKey, SecureClient
+from polymarket._internal.actions import auth as _auth_actions
+from polymarket._internal.l1_auth import sign_api_key_auth
+from polymarket.clients._transport import SyncTransport
 from polymarket.models import ApiKeyCreds
 
 from .config import PolymarketPluginConfig
@@ -68,6 +72,28 @@ class PolymarketWriteTransport:
             )
         return None
 
+    def derive_credentials(self, environment: Any) -> ApiKeyCreds:
+        """Get the CLOB credentials the signing key is entitled to, without leaving the plugin's network.
+
+        The SDK will do this itself when none are supplied, but over a transport it builds during
+        construction - before this plugin can install its proxy settings on anything. Doing it here
+        means the same derivation runs under the same policy as every other call, so an operator who
+        left these blank is not silently making one request by a route they did not configure.
+        """
+        transport = SyncTransport(
+            base_url=environment.clob_url, client=self._http_client(environment.clob_url)
+        )
+        try:
+            signature = sign_api_key_auth(
+                Account.from_key(self.settings.private_key),
+                chain_id=environment.chain_id,
+                timestamp=int(time.time()),
+                nonce=0,
+            )
+            return _auth_actions.create_or_derive_api_key_sync(transport, signature)
+        finally:
+            transport.close()
+
     def _http_client(self, base_url: str) -> httpx.Client:
         return httpx.Client(
             base_url=base_url,
@@ -110,17 +136,32 @@ class PolymarketWriteTransport:
             relayer_url=self.settings.relayer_url,
             rpc_url=self.settings.rpc_url,
         )
-        credentials = ApiKeyCreds(
-            key=self.settings.api_key,
-            secret=self.settings.api_secret,
-            passphrase=self.settings.api_passphrase,
+        # Supplied only when the operator supplied all three. The SDK derives its own from the
+        # signing key when none are given, so demanding them was asking for something it already
+        # knew; a partial set is neither, and would fail as an authentication error rather than as
+        # the configuration mistake it is.
+        parts = (self.settings.api_key, self.settings.api_secret, self.settings.api_passphrase)
+        given = [part for part in parts if str(part).strip()]
+        if given and len(given) != 3:
+            raise ValueError(
+                "CLOB API Key、Secret、Passphrase 要么三项都填，要么三项都留空由私钥派生；"
+                "现在只填了其中一部分。"
+            )
+        credentials = (
+            ApiKeyCreds(
+                key=self.settings.api_key,
+                secret=self.settings.api_secret,
+                passphrase=self.settings.api_passphrase,
+            )
+            if given
+            else self.derive_credentials(environment)
         )
         # Public create() performs requests during construction before an application can
         # inject transport policy. Version 0.3.x exposes this constructor path; credentials
         # are supplied, validation is deferred, and all transports are replaced before use.
         client = SecureClient._create(
             private_key=self.settings.private_key,
-            wallet=self.settings.funder_address,
+            wallet=self.settings.funder_address.strip() or None,
             environment=environment,
             credentials=credentials,
             api_key=self._api_key(),
@@ -232,6 +273,40 @@ class PolymarketWriteTransport:
             "collateral_token": str(client.environment.collateral_token),
             "self_funding_possible": str(client.wallet).lower() == str(client.signer).lower(),
         }
+
+    def wallet_facts(self) -> dict[str, Any]:
+        """What the signing key already implies, so none of it has to be asked for.
+
+        The address, its wallet type and the credentials in force are all consequences of the key;
+        reporting them is how an operator checks the plugin reached the account they meant rather
+        than taking it on trust.
+        """
+        client = self._require_client()
+        credentials = client.credentials
+        return {
+            "wallet": str(client.wallet),
+            "wallet_type": str(client.wallet_type),
+            "credentials_source": "你填的" if str(self.settings.api_key).strip() else "由私钥派生",
+            "clob_api_key": getattr(credentials, "key", ""),
+            "gasless_ready": client.is_gasless_ready(),
+        }
+
+    def builder_api_keys(self) -> list[dict[str, Any]]:
+        """Builder keys this account already has, for choosing between rather than re-creating."""
+        return [_jsonable(item) for item in self._require_client().fetch_builder_api_keys()]
+
+    def create_builder_api_key(self) -> dict[str, Any]:
+        return _jsonable(self._require_client().create_builder_api_key())
+
+    def setup_trading_approvals(self) -> dict[str, Any]:
+        """Grant the allowances a fresh wallet needs before it can trade.
+
+        On-chain and irreversible in the sense that it spends gas, which is why nothing here does
+        it on its own: it happens when an operator asks for it and not as a side effect of
+        connecting.
+        """
+        handle = self._require_client().setup_trading_approvals()
+        return _jsonable(handle)
 
     def collateral_balance(self) -> float:
         """Spendable pUSD as the platform reports it, in whole units rather than base units."""
