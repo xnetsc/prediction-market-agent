@@ -132,6 +132,32 @@ class TradingEngine(MarketEvaluationMixin, ExecutionActionsMixin):
             )
         )
 
+    def _settle_open_positions(self, runtime: PlatformRuntime) -> None:
+        """Go and settle what is held, rather than waiting for discovery to bring it back.
+
+        Settlement only ever ran on a topic that arrived through discovery and turned out to have
+        expired - and a venue that lists open markets does not list the one that just closed, which
+        is precisely the one holding an unrealised result. So a position could be opened and never
+        resolve: bought, expired, and left sitting at its last mark forever, with the ledger showing
+        an outcome that had in fact already happened.
+
+        Held positions are few, and a topic that has not expired costs one read and returns.
+        """
+        for position in list(runtime.state.positions.values()):
+            try:
+                detail = runtime.plugin.get_topic(str(position.market_topic_id))
+            except Exception as error:
+                LOGGER.warning(
+                    "could not check %s for settlement: %s", position.market_topic_id, error
+                )
+                continue
+            if detail.end_time_ms and detail.end_time_ms > int(time.time() * 1000):
+                continue
+            try:
+                self._settle_if_possible(runtime, detail)
+            except Exception:
+                LOGGER.exception("settling %s failed", position.market_topic_id)
+
     def _resume_funded_decisions(self, runtime: PlatformRuntime) -> None:
         """Pick up decisions that stopped to wait for money, once the money question is settled.
 
@@ -261,6 +287,7 @@ class TradingEngine(MarketEvaluationMixin, ExecutionActionsMixin):
         # Answers to funding requests come back between cycles, so this is where they are read.
         # An unclaimed answer is the same as no answer: nobody is sitting waiting for it.
         self._resume_funded_decisions(runtime)
+        self._settle_open_positions(runtime)
         eligible = self.decision_strategy.select_topics(topics)
         LOGGER.info(
             "platform=%s scanned=%d candidates=%d provider=%s",

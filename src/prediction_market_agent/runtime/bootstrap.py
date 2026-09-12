@@ -18,6 +18,7 @@ from ..plugin_system.discovery import PluginCatalog, load_plugin_catalog
 from ..plugin_system.registry import ApiPluginRegistry, load_api_plugins
 from .broker import ExecutionGateway
 from .market_guard import GuardedMarketApi
+from .paper_trading import PaperMarketApi
 
 
 LOGGER = logging.getLogger(__name__)
@@ -105,7 +106,20 @@ def bootstrap_engine(
         # Business risk applies to what the platform is asked to do, so the guard sits on the
         # plugin itself rather than inside the Agent path: reads, writes, settlement sweeps and
         # manually triggered cycles all go through the same door.
-        for plugin in [GuardedMarketApi(item, risk) for item in plugins]:
+        # Paper trading wraps the plugin before the guard, so the guard still sees every call and
+        # the filter plugins behave exactly as they would on a live run. What changes is only what
+        # happens at the far end of a write.
+        prepared = [
+            PaperMarketApi(item, config.paper_trading_funds) if config.paper_trading else item
+            for item in plugins
+        ]
+        if config.paper_trading:
+            LOGGER.warning(
+                "paper trading is on: orders are filled locally at quoted prices and no money "
+                "moves; the account is told it holds %s",
+                config.paper_trading_funds,
+            )
+        for plugin in [GuardedMarketApi(item, risk) for item in prepared]:
             state_path = platform_state_path(config.state_file, plugin.name, multiple)
             store = StateStore(state_path, _reported_funds(plugin))
             state = store.load()

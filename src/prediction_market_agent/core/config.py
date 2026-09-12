@@ -100,6 +100,21 @@ APPLICATION_FIELDS = (
         "从 Passkey 登录时刻计算的绝对上限，到期后无论是否持续操作都必须重新登录。", 168, 1, 720,
     ),
     ApplicationConfigField(
+        "paper_trading", "纸面交易模式", "enum",
+        "开启后，除了真正的买卖，一切都按真实情况走：真实平台、真实价格、真实模型、真实结算判定。"
+        "订单不会发到平台，而是按平台当时报出的价格和费率在本地成交，持仓、现金和已实现盈亏照常记账，"
+        "标的揭晓后按平台给出的真实胜负结算，所以你能看到「如果当初真买了，现在赚赔多少」。"
+        "账户可用金额用下面填的模拟金额，界面和给 AI 的数据都会标成 simulated。确认效果满意后关掉它，"
+        "才会真正花钱。",
+        "off", options=("off", "on"),
+    ),
+    ApplicationConfigField(
+        "paper_trading_funds", "纸面交易模拟金额", "integer",
+        "纸面交易模式下假装账户里有多少钱（不是真钱）。填 0 等于没钱，机器人会正确地什么都不做，"
+        "那样也就看不出效果，所以给它一个够下几单的数。仅在纸面交易模式开启时生效。",
+        1000, 0, 100000000,
+    ),
+    ApplicationConfigField(
         "agent_max_tool_steps", "Agent 工具步骤上限", "integer",
         "每次最终决策前允许 Agent 自主调用研究工具的最大次数。", 4, 0, 12,
     ),
@@ -263,6 +278,13 @@ def _runtime_path(value: str, base: Path | None = None) -> Path:
 class Config:
     working_directory: Path = Path(".")
     decision_providers: tuple[str, ...] = ()
+
+    paper_trading: bool = False
+    """Whether orders stop at the door and are filled locally instead of at the venue."""
+
+    paper_trading_funds: float = 0.0
+    """What the account is told it holds while paper trading. Meaningless when that is off."""
+
     agent_max_tool_steps: int = 4
     agent_tool_result_chars: int = 12_000
     context_window_chars: int = 60_000
@@ -301,6 +323,8 @@ class Config:
         cfg = cls(
             working_directory=working_directory,
             decision_providers=managed.selected("decision_provider", ()),
+            paper_trading=str(values["paper_trading"]) == "on",
+            paper_trading_funds=float(values["paper_trading_funds"]),
             agent_max_tool_steps=int(values["agent_max_tool_steps"]),
             agent_tool_result_chars=int(values["agent_tool_result_chars"]),
             context_window_chars=int(values["context_window_chars"]),
