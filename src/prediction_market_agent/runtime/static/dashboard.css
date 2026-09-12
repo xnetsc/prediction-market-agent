@@ -70,3 +70,9 @@ dialog{background:var(--surface)!important;color:var(--ink)!important;border:1px
 .attention-list{list-style:none;margin:.5rem 0 0;padding:0;display:flex;flex-direction:column;gap:.35rem}
 .attention-list li{display:flex;gap:.75rem;align-items:baseline;justify-content:space-between;flex-wrap:wrap}
 .attention-go{white-space:nowrap;font-weight:600}
+
+/* Removing a ledger entry, on the entry. Quiet until the row is under the pointer: it is a
+   destructive control sitting on every row, and one that advertises itself invites the mistake. */
+.decision-forget{margin-left:auto;border:none;background:none;color:var(--muted,#888);font-size:1.1rem;line-height:1;padding:0 .35rem;cursor:pointer;opacity:.35;transition:opacity .15s,color .15s}
+.decision-entry:hover .decision-forget,.decision-forget:focus-visible{opacity:1}
+.decision-forget:hover{color:var(--danger,#c0392b);opacity:1}

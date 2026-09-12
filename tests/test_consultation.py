@@ -979,3 +979,27 @@ class SilentEmptyRoundTests(unittest.TestCase):
         source = inspect.getsource(market_discovery.DiscoveryEngine.discover)
         self.assertIn("selected nothing from", source)
         self.assertIn("skipped_reason or", source, "silence must not be reported as a blank")
+
+
+class LedgerDeleteControlTests(unittest.TestCase):
+    """Judging a record to be junk does not require reading it again, so the control is on the row."""
+
+    def _script(self) -> str:
+        return Path("src/prediction_market_agent/runtime/static/dashboard-views.js").read_text()
+
+    def test_the_control_sits_on_the_row_not_inside_it(self) -> None:
+        script = self._script()
+        entry = script[script.index("class=\"decision-entry\""):]
+        summary = entry[: entry.index("</summary>")]
+        self.assertIn("forgetDecision(event,", summary)
+        body = entry[entry.index("</summary>"): entry.index("</details>")]
+        self.assertNotIn("forgetDecision", body, "it must not also be buried inside the panel")
+
+    def test_the_click_does_not_open_the_entry_it_is_deleting(self) -> None:
+        """A click inside a summary toggles the panel, which would spring open over the prompt."""
+        script = self._script()
+        handler = script[script.index("async function forgetDecision"):]
+        handler = handler[: handler.index("\n}")]
+        self.assertIn("event.preventDefault()", handler)
+        self.assertIn("event.stopPropagation()", handler)
+        self.assertIn("confirm(", handler, "a destructive control on every row needs a check")
