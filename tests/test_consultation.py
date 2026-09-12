@@ -1,4 +1,5 @@
 from ._support import *
+import json
 
 from prediction_market_agent.plugin_system.contracts import AccountFunds, FundingResult
 from prediction_market_agent.agent.consultation import (
@@ -547,3 +548,47 @@ class NoticesReachThePageTests(unittest.TestCase):
             "has_notices", manifest,
             "the page reads this key, so the payload has to be the thing that carries it",
         )
+
+
+class WalletCustodyTests(unittest.TestCase):
+    """A machine that can spend money its owner cannot reach is the failure to avoid."""
+
+    def _spec(self):
+        import importlib.util
+        import sys
+        from prediction_market_agent.plugin_system.discovery import PluginInitializationContext
+
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        path = Path("src/prediction_market_agent/plugins/api/polymarket.py").resolve()
+        spec_mod = importlib.util.spec_from_file_location("polymarket_custody_probe", path)
+        module = importlib.util.module_from_spec(spec_mod)
+        sys.modules["polymarket_custody_probe"] = module
+        self.addCleanup(sys.modules.pop, "polymarket_custody_probe", None)
+        spec_mod.loader.exec_module(module)
+        return module.initialize_plugin(
+            PluginInitializationContext(
+                kind="api", module_path=path, working_directory=Path(temp.name)
+            )
+        )
+
+    def test_a_generated_key_can_be_taken_back_out(self) -> None:
+        spec = self._spec()
+        self.assertTrue(spec.notice_action_callback("wallet", "confirm", {})["ok"])
+        stored = spec.configuration.load()["POLYMARKET_PRIVATE_KEY"]
+        exported = spec.notice_action_callback("wallet_backup", "confirm", {})
+        self.assertTrue(exported["ok"])
+        self.assertIn(stored, exported["message"], "the key itself has to come back, not a hint")
+
+    def test_the_key_is_never_in_the_configuration_manifest(self) -> None:
+        """Export is a deliberate act; leaking it into every page render is not."""
+        spec = self._spec()
+        spec.notice_action_callback("wallet", "confirm", {})
+        stored = spec.configuration.load()["POLYMARKET_PRIVATE_KEY"]
+        self.assertNotIn(stored, json.dumps(spec.configuration.manifest()))
+
+    def test_nothing_to_export_says_so_rather_than_returning_nothing(self) -> None:
+        spec = self._spec()
+        answer = spec.notice_action_callback("wallet_backup", "confirm", {})
+        self.assertFalse(answer["ok"])
+        self.assertIn("还没有私钥", answer["message"])

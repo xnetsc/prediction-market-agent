@@ -154,6 +154,18 @@ def initialize_plugin(context: PluginInitializationContext) -> PluginSpec:
             }]
         panel = _live_instance_panel()
         return [{
+            # Whoever holds this key holds the money. When the operator pasted their own they have
+            # it already; when this machine generated one, this is the only copy in existence, and
+            # a bot that can spend funds its owner cannot reach is a worse failure than any of the
+            # ones the rest of this plugin guards against. So it comes back out on request.
+            "key": "wallet_backup",
+            "title": '备份钱包私钥',
+            "kind": "confirm",
+            "description": '这个钱包的私钥就是它的钱。导出来自己存一份——如果这台机器坏了、或者你想换个工具管这些钱，没有它就再也拿不回来。导出的内容只显示在这一页上。',
+            "content": {"wallet": panel.get("wallet", ""), "note": '按下按钮后私钥会显示在这里，请复制到你自己的密码管理器或离线备份，然后离开本页。'},
+            "action_label": '显示私钥，我要备份',
+            "dismiss_label": '不用，我已经有备份了',
+        }, {
             "key": "wallet",
             "title": '钱包',
             "kind": "confirm",
@@ -170,7 +182,16 @@ def initialize_plugin(context: PluginInitializationContext) -> PluginSpec:
             return {"error": str(error)[:300]}
 
     def wallet_action(key: str, name: str, payload: dict) -> dict:
-        del key
+        if key == "wallet_backup":
+            if name != "confirm":
+                return {"ok": True, "message": '好，那就不显示了。'}
+            stored = str(configuration.load().get("POLYMARKET_PRIVATE_KEY", "")).strip()
+            if not stored:
+                return {"ok": False, "message": '还没有私钥可以导出。'}
+            return {
+                "ok": True,
+                "message": f'私钥：{stored}\n\n复制它，存到你自己的地方。任何拿到这串字符的人都能动这个钱包里的钱。',
+            }
         if name == "dismiss" and not str(configuration.load().get("POLYMARKET_PRIVATE_KEY", "")).strip():
             return {"ok": True, "message": '好，等你自己填上私钥。'}
         if not str(configuration.load().get("POLYMARKET_PRIVATE_KEY", "")).strip():
@@ -193,9 +214,21 @@ def initialize_plugin(context: PluginInitializationContext) -> PluginSpec:
         if handler is None:
             return {"ok": False, "message": f"Unknown wallet action: {name}"}
         try:
-            return handler(payload)
+            answer = handler(payload)
         except Exception as error:
             return {"ok": False, "message": str(error)[:300]}
+        created = answer.pop("created", None)
+        if created:
+            saved = dict(configuration.load())
+            saved["POLYMARKET_BUILDER_API_KEY"] = created["key"]
+            saved["POLYMARKET_BUILDER_API_SECRET"] = created["secret"]
+            saved["POLYMARKET_BUILDER_API_PASSPHRASE"] = created["passphrase"]
+            configuration.save(saved)
+            answer["message"] = (
+                f'已创建并保存 Builder API Key {created["key"][:8]}…。'
+                '有了它，钱包首次上链部署和后续免 gas 交易才能进行。'
+            )
+        return answer
 
     def funding_action(key: str, name: str, payload: dict) -> dict:
         del key
@@ -230,7 +263,7 @@ def initialize_plugin(context: PluginInitializationContext) -> PluginSpec:
         notices_callback=lambda: [*wallet_notices(), *funding_notices()],
         notice_action_callback=lambda key, name, payload: (
             wallet_action(key, name, payload)
-            if key == "wallet"
+            if key.startswith("wallet")
             else funding_action(key, name, payload)
         ),
         readiness_callback=readiness,

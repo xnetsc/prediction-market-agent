@@ -318,9 +318,13 @@ class PolymarketApiPlugin:
         return panel
 
     def create_builder_key(self, values: dict[str, Any]) -> dict[str, Any]:
+        """Make the key and hand it back to be stored, because a key nobody kept is worse than none.
+
+        Polymarket issues it once. Creating one and not saving it leaves a key on the account that
+        nothing here can use and the operator cannot see, and the next attempt makes another.
+        """
         del values
-        created = self._write_transport.create_builder_api_key()
-        return {"ok": True, "message": "已创建一个 Builder API Key。", "created": created}
+        return {"ok": True, "created": self._write_transport.create_builder_api_key()}
 
     def approve_trading(self, values: dict[str, Any]) -> dict[str, Any]:
         del values

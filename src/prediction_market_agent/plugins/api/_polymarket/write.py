@@ -123,8 +123,14 @@ class PolymarketWriteTransport:
             transport._client = self._http_client(base_url)
             transport._owns_client = True
 
-    def _require_client(self) -> SecureClient:
-        if self._client is not None:
+    def _require_client(self, *, for_trading: bool = True) -> SecureClient:
+        """Connect. With `for_trading` false the wallet is not deployed on the way in.
+
+        Everything that trades needs a wallet that exists on chain; everything that sets the
+        account up runs before one does. Caching only the trading client keeps the difference
+        honest - a setup client is short-lived and never stands in for the real one.
+        """
+        if for_trading and self._client is not None:
             return self._client
         environment = replace(
             PRODUCTION,
@@ -169,7 +175,15 @@ class PolymarketWriteTransport:
         )
         try:
             self._install_network_policy(client)
-            self._client = client._ensure_wallet_ready()
+            if for_trading:
+                # Deploying the deposit wallet is a gasless relayer transaction, so it needs a
+                # builder or relayer key. Setup runs before there is one - that is what setup is
+                # for - and doing this unconditionally made the account impossible to finish: the
+                # button that creates the key could not run without the key it was there to create.
+                client = client._ensure_wallet_ready()
+            else:
+                return client
+            self._client = client
         except BaseException:
             client.close()
             raise
@@ -281,7 +295,7 @@ class PolymarketWriteTransport:
         reporting them is how an operator checks the plugin reached the account they meant rather
         than taking it on trust.
         """
-        client = self._require_client()
+        client = self._require_client(for_trading=False)
         credentials = client.credentials
         return {
             "wallet": str(client.wallet),
@@ -293,10 +307,16 @@ class PolymarketWriteTransport:
 
     def builder_api_keys(self) -> list[dict[str, Any]]:
         """Builder keys this account already has, for choosing between rather than re-creating."""
-        return [_jsonable(item) for item in self._require_client().fetch_builder_api_keys()]
+        client = self._require_client(for_trading=False)
+        return [_jsonable(item) for item in client.fetch_builder_api_keys()]
 
     def create_builder_api_key(self) -> dict[str, Any]:
-        return _jsonable(self._require_client().create_builder_api_key())
+        created = self._require_client(for_trading=False).create_builder_api_key()
+        return {
+            "key": str(created.key),
+            "secret": str(created.secret),
+            "passphrase": str(created.passphrase),
+        }
 
     def setup_trading_approvals(self) -> dict[str, Any]:
         """Grant the allowances a fresh wallet needs before it can trade.
