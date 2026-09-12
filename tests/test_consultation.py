@@ -520,3 +520,30 @@ class DerivableConfigurationTests(unittest.TestCase):
         offer = source[source.index("def wallet_notices"):source.index("def wallet_action")]
         self.assertIn("action_label", offer, "and only offers it as something to press")
         self.assertNotIn("Account.create()", offer, "never inside the listing itself")
+
+
+class NoticesReachThePageTests(unittest.TestCase):
+    """A control the operator never sees is a control that does not exist."""
+
+    def test_the_page_gates_notices_on_the_field_the_payload_carries(self) -> None:
+        """It gated on `notices`, which no summary ever contained, so none were ever drawn."""
+        from prediction_market_agent.plugin_system.discovery import PluginSpec
+
+        script = Path("src/prediction_market_agent/runtime/static/dashboard-views.js").read_text()
+        gate = [
+            line for line in script.split("\n")
+            if "renderPluginNotices(card" in line and "p.enabled" in line
+        ]
+        self.assertEqual(len(gate), 1, "one place decides whether a plugin's notices are drawn")
+        self.assertIn("p.has_notices", gate[0])
+        self.assertNotIn("p.notices", gate[0])
+
+        manifest = PluginSpec(
+            kind="api", name="probe", description="a plugin that has something to say",
+            origin="o", factory=lambda config: None, teardown=lambda: None,
+            notices_callback=lambda: [],
+        ).manifest()
+        self.assertIn(
+            "has_notices", manifest,
+            "the page reads this key, so the payload has to be the thing that carries it",
+        )
