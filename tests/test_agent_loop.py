@@ -153,3 +153,103 @@ class AgentLoopTests(unittest.TestCase):
         )
         self.assertEqual(len(prompts), 2)
         self.assertTrue(all("UNIQUE_STRATEGY_SENTINEL" in prompt for prompt in prompts))
+
+
+from prediction_market_agent.agent.strategy import BuiltInDecisionStrategy
+
+
+class FundingConversationTests(unittest.TestCase):
+    """If a model does follow the funding instruction, the loop has to carry it through.
+
+    This does not test the model's judgement - only a real model can be asked that. It tests the
+    machinery around it: that the funding tools are offered, that their answers come back, and that
+    a request still waiting for a person does not turn into a trade.
+    """
+
+    def _provider(self, script):
+        from prediction_market_agent.agent.decision import AgentDecisionProvider
+
+        backend = FakeBackend("fake", script)
+        return backend, AgentDecisionProvider(backend, config(Path("/tmp/state.json")))
+
+    def _payload(self):
+        return {
+            "market": {"title": "t", "outcome": "YES", "status": "OPEN"},
+            "order_book": {"best_bid": 0.40, "best_ask": 0.42},
+            "portfolio": {"platform": "p", "cash": 0.0, "equity": 0.0},
+        }
+
+    def test_the_funding_tools_are_offered_to_the_model(self) -> None:
+        from prediction_market_agent.runtime.market_tools import DESCRIPTIONS
+
+        for tool in ("ACCOUNT_FUNDS", "ENSURE_FUNDS", "FUNDING_STATUS"):
+            with self.subTest(tool=tool):
+                self.assertIn(tool, DESCRIPTIONS)
+
+    def test_a_model_that_checks_and_asks_gets_both_answers_back(self) -> None:
+        from prediction_market_agent.runtime.market_tools import DESCRIPTIONS
+
+        seen = []
+
+        def tools(name, arguments):
+            seen.append((name, arguments))
+            if name == "ACCOUNT_FUNDS":
+                return {"available": 0.0, "currency": "USDT", "source": "platform"}
+            return {"state": "pending", "request_id": "req-1", "available": 0.0}
+
+        _, provider = self._provider([
+            {"next_action": "ACCOUNT_FUNDS", "arguments_json": "{}", "reason": "check funds"},
+            {"next_action": "ENSURE_FUNDS", "arguments_json": '{"amount": 50, "reason": "mispriced"}', "reason": "need funds"},
+            {"next_action": "DECIDE", "arguments_json": "{}", "reason": "ready"},
+            hold_decision(),
+        ])
+        result = provider.decide(
+            self._payload(), tool_executor=tools, tool_descriptions=DESCRIPTIONS,
+            instructions=BuiltInDecisionStrategy().instructions,
+        )
+        self.assertEqual([name for name, _ in seen], ["ACCOUNT_FUNDS", "ENSURE_FUNDS"])
+        self.assertEqual(seen[1][1]["reason"], "mispriced", "the reason reaches the plugin")
+        self.assertEqual(result.decision.action, "HOLD")
+
+    def test_the_tool_results_are_carried_into_the_next_turn(self) -> None:
+        """A model that asked and was answered must be able to see the answer it got."""
+        from prediction_market_agent.runtime.market_tools import DESCRIPTIONS
+
+        backend, provider = self._provider([
+            {"next_action": "ACCOUNT_FUNDS", "arguments_json": "{}", "reason": "check funds"},
+            {"next_action": "DECIDE", "arguments_json": "{}", "reason": "ready"},
+            hold_decision(),
+        ])
+        captured = []
+        original = backend.complete
+
+        def recording(prompt, schema, schema_name):
+            captured.append(prompt)
+            return original(prompt, schema, schema_name)
+
+        backend.complete = recording
+        provider.decide(
+            self._payload(),
+            tool_executor=lambda n, a: {"available": 0.0, "source": "platform"},
+            tool_descriptions=DESCRIPTIONS,
+            instructions=BuiltInDecisionStrategy().instructions,
+        )
+        self.assertTrue(
+            any('"available": 0.0' in text or "'available': 0.0" in text for text in captured[1:]),
+            "the funding answer has to be visible when the model decides",
+        )
+
+    def test_the_instruction_reaches_the_model_with_the_tools(self) -> None:
+        from prediction_market_agent.runtime.market_tools import DESCRIPTIONS
+
+        backend, provider = self._provider([{"next_action": "DECIDE", "arguments_json": "{}", "reason": "ready"}, hold_decision()])
+        captured = []
+        original = backend.complete
+        backend.complete = lambda p, s, n: (captured.append(p), original(p, s, n))[1]
+        provider.decide(
+            self._payload(), tool_executor=lambda n, a: {},
+            tool_descriptions=DESCRIPTIONS,
+            instructions=BuiltInDecisionStrategy().instructions,
+        )
+        self.assertIn("ENSURE_FUNDS", captured[0])
+        self.assertIn("A pending request is not funding", captured[0])
