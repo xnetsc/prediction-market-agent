@@ -520,7 +520,9 @@ async function forgetDecision(event,id){
     if(!confirm('删除决策 #'+id+'？\n\n这条记录参与 provider 排名与策略校准，删掉之后这些统计会变。已经在平台上发生过的动作不会被删除。'))return;
     try{
         const answer=await post('/api/decisions/forget',{decision_ids:[id]});
-        if(!answer.decisions&&answer.kept_executed)
+        if(!answer.decisions&&answer.kept_in_progress)
+            showOperationFeedback('没有删除：这条决策还在进行中，运行中的代码正等着把结论写回这一行。等它结束后再删。','danger',true);
+        else if(!answer.decisions&&answer.kept_executed)
             showOperationFeedback('没有删除：这次决策已经产生 '+answer.kept_executed+' 条真实平台动作，删掉记录会让账本与余额对不上。','danger',true);
         else
             showOperationFeedback('已删除决策 '+answer.decisions+' 条、模型往返 '+answer.provider_turns+' 条、工具步骤 '+answer.agent_steps+' 条。');

@@ -790,6 +790,15 @@ class SessionMemory:
                 continue
         return results
 
+    IN_PROGRESS = "STARTED"
+    """The status a decision carries while the code that opened it is still running.
+
+    Something is holding that id and will come back to complete it. Removing the row makes that
+    completion an update of nothing - silently, because an UPDATE that matches no row is not an
+    error - so the reasoning and the outcome are simply lost and the operator is left believing
+    they tidied up a stuck entry.
+    """
+
     def forget_decisions(
         self,
         *,
@@ -805,6 +814,9 @@ class SessionMemory:
         not merely look untidy, it goes on shaping behaviour with evidence that was never about
         the thing it is now counted against.
 
+        A decision still in progress is not removed either: the code that opened it is still
+        running and will come back to complete it.
+
         What actually happened at a venue is not removed with it. The account's cash and positions
         are kept as their own state rather than derived from these rows, so deleting an executed
         action would take away the record while leaving its effect - a ledger that disagrees with
@@ -812,7 +824,24 @@ class SessionMemory:
         """
         selected = self._decisions_to_forget(decision_ids, status, platform)
         if not selected:
-            return {"decisions": 0, "provider_turns": 0, "agent_steps": 0, "kept_executed": 0}
+            return {
+                "decisions": 0, "provider_turns": 0, "agent_steps": 0,
+                "kept_executed": 0, "kept_in_progress": 0,
+            }
+        marks = ",".join("?" for _ in selected)
+        running = {
+            int(row[0])
+            for row in self.connection.execute(
+                f"SELECT id FROM decision_ledger WHERE id IN ({marks}) AND status = ?",
+                [*selected, self.IN_PROGRESS],
+            )
+        }
+        selected = [item for item in selected if item not in running]
+        if not selected:
+            return {
+                "decisions": 0, "provider_turns": 0, "agent_steps": 0,
+                "kept_executed": 0, "kept_in_progress": len(running),
+            }
         marks = ",".join("?" for _ in selected)
         executed = self.connection.execute(
             f"SELECT COUNT(*) FROM execution_actions WHERE decision_id IN ({marks})",
@@ -829,7 +858,7 @@ class SessionMemory:
         if not removable:
             return {
                 "decisions": 0, "provider_turns": 0, "agent_steps": 0,
-                "kept_executed": int(executed),
+                "kept_executed": int(executed), "kept_in_progress": len(running),
             }
         marks = ",".join("?" for _ in removable)
         turns = self.connection.execute(
@@ -847,6 +876,7 @@ class SessionMemory:
             "provider_turns": int(turns),
             "agent_steps": int(steps),
             "kept_executed": int(executed),
+            "kept_in_progress": len(running),
         }
 
     def _decisions_to_forget(

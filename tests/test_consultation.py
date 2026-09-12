@@ -1003,3 +1003,53 @@ class LedgerDeleteControlTests(unittest.TestCase):
         self.assertIn("event.preventDefault()", handler)
         self.assertIn("event.stopPropagation()", handler)
         self.assertIn("confirm(", handler, "a destructive control on every row needs a check")
+
+
+class RunningDecisionsAreProtectedTests(unittest.TestCase):
+    """Something is holding that id and will come back to write the conclusion into it."""
+
+    def setUp(self) -> None:
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        self.memory = SessionMemory(Path(temp.name) / "m.sqlite3")
+
+    def _open(self, token="o-1") -> int:
+        return self.memory.begin_decision(
+            platform="venue", market_topic_id="t-1", market_id="m-1", token_id=token,
+            strategy_name="s", strategy_sha256="x", context={},
+        )
+
+    def test_a_decision_still_running_is_refused(self) -> None:
+        decision_id = self._open()
+        answer = self.memory.forget_decisions(decision_ids=[decision_id])
+        self.assertEqual(answer["decisions"], 0)
+        self.assertEqual(answer["kept_in_progress"], 1)
+
+    def test_the_conclusion_still_lands_after_a_refused_delete(self) -> None:
+        """An UPDATE matching no row is not an error, so the loss would have been silent."""
+        decision_id = self._open()
+        self.memory.forget_decisions(decision_ids=[decision_id])
+        self.memory.complete_decision(
+            decision_id, provider="p", model_raw_output="", status="NO_ACTION",
+        )
+        [status] = self.memory.connection.execute(
+            "SELECT status FROM decision_ledger WHERE id = ?", (decision_id,)
+        ).fetchone()
+        self.assertEqual(status, "NO_ACTION")
+
+    def test_a_bulk_delete_skips_the_running_one_and_takes_the_rest(self) -> None:
+        finished = self._open(token="o-done")
+        self.memory.complete_decision(finished, provider="p", status="PROVIDER_ERROR")
+        running = self._open(token="o-running")
+        answer = self.memory.forget_decisions(platform="venue")
+        self.assertEqual(answer["decisions"], 1)
+        self.assertEqual(answer["kept_in_progress"], 1)
+        remaining = [
+            row[0] for row in self.memory.connection.execute("SELECT id FROM decision_ledger")
+        ]
+        self.assertEqual(remaining, [running])
+
+    def test_the_page_says_why_nothing_was_deleted(self) -> None:
+        script = Path("src/prediction_market_agent/runtime/static/dashboard-views.js").read_text()
+        self.assertIn("answer.kept_in_progress", script)
+        self.assertIn("还在进行中", script)
