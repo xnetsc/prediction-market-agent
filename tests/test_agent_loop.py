@@ -299,7 +299,71 @@ class FundingContinuationTests(unittest.TestCase):
         [entry] = self.memory.open_funding_continuations("binance")
         self.assertEqual(entry["asked_for"], 250.0)
 
-    def test_the_strategy_warns_against_resuming_a_stale_conclusion(self) -> None:
+    def test_the_strategy_treats_the_answer_as_a_reminder_not_a_resumption(self) -> None:
+        """The model has no memory of asking and has looked at other markets since."""
         text = BuiltInDecisionStrategy().instructions
         self.assertIn("delayed_funding_answer", text)
-        self.assertIn("Acting on a conclusion the", text)
+        self.assertIn("how_long_ago", text)
+        self.assertIn("would not open today", text)
+
+    def test_elapsed_time_is_phrased_for_a_reader_not_a_clock(self) -> None:
+        from prediction_market_agent.runtime.engine import TradingEngine
+
+        cases = {30_000: "30 seconds", 600_000: "10 minutes",
+                 7_200_000: "2 hours", 259_200_000: "3 days"}
+        for milliseconds, expected in cases.items():
+            with self.subTest(ms=milliseconds):
+                self.assertEqual(TradingEngine._elapsed_phrase(milliseconds), expected)
+
+    def test_a_negative_gap_does_not_become_a_nonsense_duration(self) -> None:
+        from prediction_market_agent.runtime.engine import TradingEngine
+
+        self.assertEqual(TradingEngine._elapsed_phrase(-5000), "0 seconds")
+
+    def test_the_reminder_carries_everything_a_forgetful_reader_needs(self) -> None:
+        """It is read by an agent with no memory of asking, so nothing may be left implicit."""
+        import time as _time
+        from types import SimpleNamespace
+        from prediction_market_agent.runtime.engine import TradingEngine
+        from prediction_market_agent.plugin_system.contracts import FundingResult
+
+        now = int(_time.time() * 1000)
+        entry = {
+            "asked_at": now - 3 * 3600 * 1000, "asked_for": 120.0, "currency": "USDT",
+            "reason": "YES at 0.42 against my 0.60",
+            "conclusion": {"order_book": {"best_ask": 0.42}},
+        }
+        answer = FundingResult(
+            request_id="r", state="satisfied", requested=120.0, currency="USDT",
+            available=120.0, action="transfer_inbound", operator_note="last of it",
+        )
+        detail = SimpleNamespace(topic=SimpleNamespace(
+            title="BTC above 100k", end_time_ms=int((_time.time() + 86400) * 1000)))
+        note = TradingEngine._funding_reminder(
+            TradingEngine, entry, answer, detail, None, SimpleNamespace(name="YES"),
+        )
+        self.assertIn("reminder", note["notice"])
+        self.assertEqual(note["how_long_ago"], "3 hours")
+        self.assertEqual(note["what_you_were_looking_at"]["market"], "BTC above 100k")
+        self.assertEqual(note["what_you_were_looking_at"]["outcome"], "YES")
+        self.assertEqual(note["what_you_asked_for"]["your_reason"], "YES at 0.42 against my 0.60")
+        self.assertEqual(note["the_answer"]["operator_note"], "last of it")
+        self.assertIn("still worth doing", note["what_to_decide"])
+
+    def test_the_reminder_says_how_much_of_the_market_is_left(self) -> None:
+        """A market about to settle is a different proposition from one with months to run."""
+        import time as _time
+        from types import SimpleNamespace
+        from prediction_market_agent.runtime.engine import TradingEngine
+        from prediction_market_agent.plugin_system.contracts import FundingResult
+
+        answer = FundingResult(request_id="r", state="refused", requested=1.0, currency="USDT",
+                               available=0.0, action="refused")
+        detail = SimpleNamespace(topic=SimpleNamespace(
+            title="t", end_time_ms=int((_time.time() + 1830) * 1000)))
+        note = TradingEngine._funding_reminder(
+            TradingEngine, {"asked_at": 0, "asked_for": 1.0, "currency": "USDT",
+                            "reason": "r", "conclusion": {}},
+            answer, detail, None, SimpleNamespace(name="YES"),
+        )
+        self.assertEqual(note["how_long_this_market_still_has"], "30 minutes")

@@ -196,23 +196,61 @@ class TradingEngine(MarketEvaluationMixin, ExecutionActionsMixin):
             market,
             outcome,
             max(0, int(detail.topic.end_time_ms / 1000 - time.time())),
-            funding_followup={
-                "notice": (
-                    "This is a delayed answer to a funding request you made earlier, not a fresh "
-                    "opportunity. Time has passed and the market has been re-read since."
-                ),
-                "asked_for": entry["asked_for"],
-                "currency": entry["currency"],
-                "your_reason_at_the_time": entry["reason"],
-                "what_you_saw_at_the_time": entry["conclusion"],
-                "answer": answer.to_dict(),
-                "what_to_do": (
-                    "Check whether the reasoning that justified the request still holds against "
-                    "the prices in front of you now. If it does not, say so and do not trade on a "
-                    "conclusion the market has already moved past."
-                ),
-            },
+            funding_followup=self._funding_reminder(entry, answer, detail, market, outcome),
         )
+
+    @staticmethod
+    def _elapsed_phrase(milliseconds: int) -> str:
+        seconds = max(0, int(milliseconds / 1000))
+        if seconds < 90:
+            return f"{seconds} seconds"
+        if seconds < 5400:
+            return f"{seconds // 60} minutes"
+        if seconds < 172800:
+            return f"{seconds // 3600} hours"
+        return f"{seconds // 86400} days"
+
+    def _funding_reminder(
+        self, entry: dict[str, Any], answer: Any, detail: Any, market: Any, outcome: Any
+    ) -> dict[str, Any]:
+        """A note to someone who walked away, not a conversation being picked up mid-sentence.
+
+        Nothing carried over from the round that asked: each decision is a fresh call, and between
+        then and now this agent has looked at other markets and reached other conclusions. It does
+        not remember asking. So the note has to say what was going on, what was asked for and why,
+        how long ago that was, and what the answer turned out to be - and then ask whether the
+        thing is still worth doing, rather than assuming it is.
+        """
+        waited_ms = max(0, int(time.time() * 1000) - int(entry.get("asked_at", 0) or 0))
+        remaining = max(0, int(detail.topic.end_time_ms / 1000 - time.time()))
+        return {
+            "notice": (
+                "A reminder, not a new opportunity. Earlier you stopped short on this market and "
+                "asked for funds. You have looked at other things since and do not remember this; "
+                "everything you need is below."
+            ),
+            "what_you_were_looking_at": {
+                "market": getattr(detail.topic, "title", ""),
+                "outcome": getattr(outcome, "name", ""),
+                **(entry.get("conclusion") or {}),
+            },
+            "what_you_asked_for": {
+                "amount": entry["asked_for"],
+                "currency": entry["currency"],
+                "your_reason": entry["reason"],
+            },
+            "how_long_ago": self._elapsed_phrase(waited_ms),
+            "how_long_this_market_still_has": self._elapsed_phrase(remaining * 1000),
+            "the_answer": answer.to_dict(),
+            "what_to_decide": (
+                "Given how long that took and what the answer turned out to be, is the thing you "
+                "wanted to do still worth doing? Compare your reason against the prices in front "
+                "of you now, which have been re-read since you asked. A long wait is itself "
+                "evidence: an edge that depended on acting quickly is probably gone. If it no "
+                "longer holds, say so and HOLD rather than completing a trade you would not open "
+                "today."
+            ),
+        }
 
     def _process_platform_topics(
         self, runtime: PlatformRuntime, topics: list[Topic], maximum_decisions: int
