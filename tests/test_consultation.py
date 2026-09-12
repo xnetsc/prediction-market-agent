@@ -959,3 +959,23 @@ class BuilderKeyChoiceTests(unittest.TestCase):
         self.assertIn('panel.get("builder_api_keys")', offer)
         for field in ("existing_key", "existing_secret", "existing_passphrase"):
             self.assertIn(field, offer, "the operator must be able to supply one they hold")
+
+
+class SilentEmptyRoundTests(unittest.TestCase):
+    """A round that picked nothing should say why; the model was asked and the answer was dropped."""
+
+    def test_the_schema_asks_for_a_reason_and_the_code_now_reads_it(self) -> None:
+        import inspect
+        from prediction_market_agent.runtime import market_discovery
+
+        self.assertIn("skipped_reason", market_discovery.DISCOVERY_SCHEMA["required"])
+        select = inspect.getsource(market_discovery.DiscoveryEngine._select)
+        self.assertIn('result.value.get("skipped_reason"', select)
+
+    def test_an_empty_round_is_logged_with_what_the_model_said(self) -> None:
+        import inspect
+        from prediction_market_agent.runtime import market_discovery
+
+        source = inspect.getsource(market_discovery.DiscoveryEngine.discover)
+        self.assertIn("selected nothing from", source)
+        self.assertIn("skipped_reason or", source, "silence must not be reported as a blank")

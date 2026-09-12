@@ -267,7 +267,7 @@ class DiscoveryEngine:
         shortlist = ranked[: max(1, budget.shortlist_topics)]
         by_id = {topic.topic_id: topic for topic in surveyed}
 
-        selections, mode = self._select(
+        selections, mode, skipped_reason = self._select(
             platform=platform,
             plugin=plugin,
             shortlist=shortlist,
@@ -295,6 +295,16 @@ class DiscoveryEngine:
             chosen.append(topic)
             if len(chosen) >= maximum_topics:
                 break
+        if not chosen:
+            # The model is asked for this and was handing it back all along; dropping it turned a
+            # stated judgement into a silent zero, which reads as a broken cycle rather than as a
+            # round where nothing was worth a decision slot.
+            LOGGER.info(
+                "platform=%s selected nothing from %d shortlisted: %s",
+                platform,
+                len(shortlist),
+                skipped_reason or "no reason was given",
+            )
         LOGGER.info(
             "platform=%s surveyed=%d shortlist=%d selected=%d strategy=%s evolution=%s",
             platform,
@@ -316,7 +326,7 @@ class DiscoveryEngine:
         budget: DiscoveryBudget,
         maximum_topics: int,
         now_ms: int,
-    ) -> tuple[list[dict[str, Any]], str]:
+    ) -> tuple[list[dict[str, Any]], str, str]:
         payload = compose_discovery_payload(
             self.strategy,
             priors=self._priors(),
@@ -388,9 +398,14 @@ class DiscoveryEngine:
                     for topic in shortlist[:maximum_topics]
                 ],
                 "mechanical",
+                "",
             )
         selections = result.value.get("selections", [])
-        return [item for item in selections if isinstance(item, dict)], "agent"
+        return (
+            [item for item in selections if isinstance(item, dict)],
+            "agent",
+            str(result.value.get("skipped_reason", "")),
+        )
 
     # -------------------------------------------------------------- evolution
 
