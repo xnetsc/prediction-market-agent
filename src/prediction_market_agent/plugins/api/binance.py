@@ -156,5 +156,8 @@ def initialize_plugin(context: PluginInitializationContext) -> PluginSpec:
         notices_callback=funding_notices,
         notice_action_callback=funding_action,
         readiness_callback=readiness,
-        runtime=PluginRuntime(event_loop.start, event_loop.stop, event_loop.status),
+        runtime=PluginRuntime(
+            event_loop.start, event_loop.stop, event_loop.status,
+            notify_callback=event_loop.notify,
+        ),
     )

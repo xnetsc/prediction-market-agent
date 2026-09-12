@@ -28,7 +28,15 @@ class BinanceEventLoop:
             "last_finished_at": None,
             "last_error": "",
             "next_delay_seconds": None,
+            "holding": False,
+            "holding_because": "",
         }
+        # Scanning exists to feed a decision. While nothing can make one, a cycle would spend this
+        # venue's rate budget to build a prompt that gets discarded at the last step, so this
+        # plugin stands down and waits to be told otherwise. The framework only states the fact;
+        # standing down is this plugin's own call.
+        self._may_decide = threading.Event()
+        self._may_decide.set()
 
     def start(self, services: dict[str, object]) -> None:
         callback = services.get("submit_scan")
@@ -84,15 +92,39 @@ class BinanceEventLoop:
                     self._status["next_delay_seconds"] = delay
                 if self._stop.wait(delay):
                     break
+                self._wait_until_decisions_are_possible()
         finally:
             with self._lock:
                 self._status["running"] = False
                 self._status["next_delay_seconds"] = None
 
+    def _wait_until_decisions_are_possible(self) -> None:
+        while not self._stop.is_set() and not self._may_decide.is_set():
+            self._may_decide.wait(1.0)
+
+    def notify(self, message: dict[str, object]) -> None:
+        """Take the framework's word on whether a decision is reachable, and schedule accordingly."""
+        if str(message.get("kind", "")) != "decision_capacity":
+            return
+        available = bool(message.get("available"))
+        waiting = message.get("waiting") or {}
+        with self._lock:
+            self._status["holding"] = not available
+            self._status["holding_because"] = (
+                "" if available else "没有可用的 AI 模型服务：" + "；".join(
+                    f"{name}（{reason}）" for name, reason in dict(waiting).items()
+                )
+            )
+        if available:
+            self._may_decide.set()
+        else:
+            self._may_decide.clear()
+
     def stop(self) -> None:
         with self._lock:
             thread = self._thread
             self._stop.set()
+        self._may_decide.set()
         if thread is not None and thread is not threading.current_thread():
             thread.join()
         with self._lock:

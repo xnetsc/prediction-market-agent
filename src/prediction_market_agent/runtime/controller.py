@@ -9,6 +9,7 @@ from typing import Any
 from ..core.config import Config
 from ..plugin_system.discovery import PluginCatalog, PluginReadiness, load_plugin_catalog
 from ..plugin_system.managed_config import ManagedRuntimeConfig
+from .decision_capacity import DecisionCapacityWatch
 from .engine import TradingEngine
 from .events import PlatformDiscoveryEvent, PlatformScanEvent, RobotEventLoop
 
@@ -25,6 +26,7 @@ class RobotRuntimeManager:
         self._catalog: PluginCatalog | None = None
         self._engine: TradingEngine | None = None
         self._events: RobotEventLoop | None = None
+        self._capacity: DecisionCapacityWatch | None = None
         self._status: dict[str, Any] = {
             "running": False,
             "global_ready": False,
@@ -42,6 +44,9 @@ class RobotRuntimeManager:
 
     def _stop_locked(self) -> None:
         catalog, engine, events = self._catalog, self._engine, self._events
+        capacity, self._capacity = self._capacity, None
+        if capacity is not None:
+            capacity.stop()
         self._catalog = None
         self._engine = None
         self._events = None
@@ -259,6 +264,27 @@ class RobotRuntimeManager:
                         engine.close()
                         self._engine = None
                         return self.status()
+                if start_runtimes and started_platforms:
+                    # The one loop that has to keep running when nothing can answer, because it is
+                    # what tells the plugins standing down that they may start again. It watches
+                    # the robot; it must never be the reason the robot did not start, so a failure
+                    # here is reported and the run continues without it.
+                    try:
+                        self._capacity = DecisionCapacityWatch(
+                            engine.provider,
+                            lambda: [
+                                (name, catalog.get("api", name).runtime.notify)
+                                for name in started_platforms
+                                if catalog.get("api", name).runtime is not None
+                            ],
+                        )
+                        self._capacity.start()
+                    except Exception as error:
+                        self._capacity = None
+                        LOGGER.exception("decision capacity watch could not start")
+                        self._status["global_reasons"].append(
+                            f"AI 可用性监控未启动，平台不会在模型不可用时自动停扫：{error}"
+                        )
                 self._status["running"] = bool(start_runtimes)
                 return self.status()
             except Exception as error:
@@ -315,6 +341,8 @@ class RobotRuntimeManager:
                     for name, value in self._status.get("platforms", {}).items()
                 },
             }
+            if self._capacity is not None:
+                result["decision_capacity"] = self._capacity.state()
             if engine is not None:
                 try:
                     result["decision_provider_health"] = engine.provider_quality.manifest()

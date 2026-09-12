@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib
 import importlib.util
+import logging
 import re
 from dataclasses import dataclass
 from pathlib import Path
@@ -12,6 +13,8 @@ from .managed_config import ManagedRuntimeConfig, PLUGIN_KINDS
 from .config import PluginDirectoryConfig
 from .config_io import resolve_proxy_settings
 from .network_diagnostics import DiagnosticNetworkRoute
+
+LOGGER = logging.getLogger(__name__)
 
 
 FIELD_TYPES = frozenset({"string", "integer", "number", "boolean", "enum", "secret"})
@@ -320,7 +323,26 @@ class PluginRuntime:
     stop_callback: Callable[[], None]
     status_callback: Callable[[], dict[str, Any]]
 
+    notify_callback: Callable[[dict[str, Any]], None] | None = None
+    """Told when something outside this plugin changed that its schedule may depend on.
+
+    The framework states the fact and stops there. Whether it means anything - whether to keep
+    scanning, hold off, or carry on regardless - is the plugin's, because only the plugin knows
+    what its cycle is for. A plugin that does not care leaves this out and is simply not told.
+    """
+
+    def notify(self, message: dict[str, Any]) -> None:
+        """Pass it on, and never let a plugin's reaction take down the thing that told it."""
+        if self.notify_callback is None:
+            return
+        try:
+            self.notify_callback(dict(message))
+        except Exception:
+            LOGGER.exception("a plugin failed while being told about %s", sorted(message))
+
     def __post_init__(self) -> None:
+        if self.notify_callback is not None and not callable(self.notify_callback):
+            raise ValueError("Plugin runtime notify_callback must be callable")
         if not all(
             callable(callback)
             for callback in (

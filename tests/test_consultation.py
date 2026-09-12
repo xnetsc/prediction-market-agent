@@ -682,3 +682,127 @@ class ClaudeTurnBudgetTests(unittest.TestCase):
         with self.assertRaises(DecisionProviderError) as caught:
             self._complete(backend, fake_run)
         self.assertIn("error_max_turns", str(caught.exception))
+
+
+class DecisionCapacityTests(unittest.TestCase):
+    """Every cycle exists to reach a decision. With nothing able to answer, the rest is waste."""
+
+    def _watch(self, *, names=("codex", "claude"), unavailable=None):
+        from prediction_market_agent.agent.provider_health import ProviderHealthRegistry
+        from prediction_market_agent.runtime.decision_capacity import DecisionCapacityWatch
+
+        health = ProviderHealthRegistry(names)
+        provider = SimpleNamespace(
+            available_names=names, health=health, unavailable=unavailable or {}
+        )
+        self.told: list[dict] = []
+        watch = DecisionCapacityWatch(
+            provider, lambda: [("a-platform", self.told.append)]
+        )
+        return watch, health
+
+    def test_a_provider_in_backoff_is_not_capacity(self) -> None:
+        watch, health = self._watch()
+        self.assertTrue(watch.check()["available"])
+        health.record_failure("codex", "You've hit your usage limit")
+        self.assertTrue(watch.check()["available"], "one left is still enough")
+        health.record_failure("claude", "You've hit your usage limit")
+        reading = watch.check()
+        self.assertFalse(reading["available"])
+        self.assertEqual(set(reading["waiting"]), {"codex", "claude"})
+
+    def test_the_platforms_are_told_only_when_the_answer_turns_over(self) -> None:
+        watch, health = self._watch()
+        watch.check()
+        health.record_failure("codex", "usage limit")
+        health.record_failure("claude", "usage limit")
+        watch.check()
+        watch.check()
+        self.assertEqual(len(self.told), 1, "the same fact twice is not news")
+        self.assertFalse(self.told[0]["available"])
+        health.record_success("claude", latency_seconds=0.5)
+        watch.check()
+        self.assertEqual(len(self.told), 2)
+        self.assertTrue(self.told[1]["available"])
+
+    def test_why_each_one_cannot_answer_travels_with_the_fact(self) -> None:
+        """A platform that stood down should be able to say what it is waiting for."""
+        watch, health = self._watch(unavailable={"openai_compatible": "请填写 API Key"})
+        health.record_failure("codex", "usage limit")
+        health.record_failure("claude", "not logged in")
+        reading = watch.check()
+        self.assertEqual(reading["waiting"]["codex"], "rate_limit")
+        self.assertIn("openai_compatible", reading["waiting"])
+
+    def test_a_platform_that_breaks_on_the_news_does_not_stop_the_others(self) -> None:
+        from prediction_market_agent.agent.provider_health import ProviderHealthRegistry
+        from prediction_market_agent.runtime.decision_capacity import DecisionCapacityWatch
+
+        health = ProviderHealthRegistry(("codex",))
+        reached: list[dict] = []
+
+        def explode(message):
+            raise RuntimeError("this plugin is broken")
+
+        watch = DecisionCapacityWatch(
+            SimpleNamespace(available_names=("codex",), health=health, unavailable={}),
+            lambda: [("broken", explode), ("fine", reached.append)],
+        )
+        watch.check()
+        health.record_failure("codex", "usage limit")
+        watch.check()
+        self.assertEqual(len(reached), 1)
+
+
+class PlatformStandsDownTests(unittest.TestCase):
+    """The framework states the fact; the plugin decides its own schedule."""
+
+    def _loops(self):
+        from prediction_market_agent.plugins.api._binance.runtime import BinanceEventLoop
+        from prediction_market_agent.plugins.api._polymarket.runtime import PolymarketEventLoop
+
+        return {"binance": BinanceEventLoop, "polymarket": PolymarketEventLoop}
+
+    def test_both_platforms_hold_when_nothing_can_answer_and_resume_when_it_can(self) -> None:
+        for name, factory in self._loops().items():
+            with self.subTest(platform=name):
+                loop = factory.__new__(factory)
+                loop._lock = threading.RLock()
+                loop._stop = threading.Event()
+                loop._may_decide = threading.Event()
+                loop._may_decide.set()
+                loop._status = {}
+                loop.notify({"kind": "decision_capacity", "available": False,
+                             "waiting": {"codex": "rate_limit"}})
+                self.assertFalse(loop._may_decide.is_set())
+                self.assertTrue(loop.status()["holding"])
+                self.assertIn("rate_limit", loop.status()["holding_because"])
+                loop.notify({"kind": "decision_capacity", "available": True, "waiting": {}})
+                self.assertTrue(loop._may_decide.is_set())
+                self.assertFalse(loop.status()["holding"])
+
+    def test_a_message_about_something_else_changes_nothing(self) -> None:
+        from prediction_market_agent.plugins.api._polymarket.runtime import PolymarketEventLoop
+
+        loop = PolymarketEventLoop.__new__(PolymarketEventLoop)
+        loop._lock = threading.RLock()
+        loop._stop = threading.Event()
+        loop._may_decide = threading.Event()
+        loop._may_decide.set()
+        loop._status = {}
+        loop.notify({"kind": "something_else", "available": False})
+        self.assertTrue(loop._may_decide.is_set())
+
+    def test_stopping_releases_a_held_loop(self) -> None:
+        """A loop parked waiting for a model must not keep the process from shutting down."""
+        from prediction_market_agent.plugins.api._polymarket.runtime import PolymarketEventLoop
+
+        loop = PolymarketEventLoop.__new__(PolymarketEventLoop)
+        loop._lock = threading.RLock()
+        loop._stop = threading.Event()
+        loop._may_decide = threading.Event()
+        loop._thread = None
+        loop._status = {}
+        loop.notify({"kind": "decision_capacity", "available": False, "waiting": {}})
+        loop.stop()
+        self.assertTrue(loop._may_decide.is_set())

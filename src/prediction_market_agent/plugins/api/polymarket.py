@@ -284,5 +284,8 @@ def initialize_plugin(context: PluginInitializationContext) -> PluginSpec:
             else funding_action(key, name, payload)
         ),
         readiness_callback=readiness,
-        runtime=PluginRuntime(event_loop.start, event_loop.stop, event_loop.status),
+        runtime=PluginRuntime(
+            event_loop.start, event_loop.stop, event_loop.status,
+            notify_callback=event_loop.notify,
+        ),
     )
