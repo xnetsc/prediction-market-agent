@@ -134,6 +134,11 @@ HARD CONSTRAINTS (runtime rules; no learned lesson or operator text may relax th
   ENSURE_FUNDS and say plainly why the money is needed - a person may have to approve it, and the
   reason is the one thing they cannot work out for themselves. A pending request is not funding:
   HOLD, and check FUNDING_STATUS on a later round before restating the trade.
+- A `delayed_funding_answer` in the input means this round exists because an earlier one stopped to
+  wait for money. It is not a signal to trade. Time has passed, the book has been re-read, and the
+  reasoning that justified the request is handed back as something to check: compare it against the
+  prices in front of you now, and if the edge has gone, say so and HOLD. Acting on a conclusion the
+  market has already moved past is the specific mistake this input exists to prevent.
 - Read the operator's note on a funding answer as an instruction, not a remark. "This is the last
   of it" means stop asking; a refusal with a reason means solve for that reason rather than
   re-sending the same request.

@@ -253,3 +253,53 @@ class FundingConversationTests(unittest.TestCase):
         )
         self.assertIn("ENSURE_FUNDS", captured[0])
         self.assertIn("A pending request is not funding", captured[0])
+
+
+class FundingContinuationTests(unittest.TestCase):
+    """A funding answer arriving alone is worthless; what it is judged against has to survive."""
+
+    def setUp(self) -> None:
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.memory = SessionMemory(Path(self.temp.name) / "m.sqlite3")
+
+    def _open(self, request_id="req-1", platform="binance"):
+        self.memory.open_funding_continuation(
+            request_id=request_id, platform=platform, market_topic_id="t-1", token_id="o-1",
+            decision_id=7, asked_for=100.0, currency="USDT",
+            reason="YES looked 8 points cheap",
+            conclusion={"order_book": {"best_ask": 0.42}, "seconds_remaining": 6912000},
+        )
+
+    def test_the_reasoning_survives_the_wait(self) -> None:
+        self._open()
+        [entry] = self.memory.open_funding_continuations("binance")
+        self.assertEqual(entry["reason"], "YES looked 8 points cheap")
+        self.assertEqual(entry["conclusion"]["order_book"]["best_ask"], 0.42)
+        self.assertEqual(entry["asked_for"], 100.0)
+
+    def test_only_this_platform_sees_its_own_waits(self) -> None:
+        self._open(platform="binance")
+        self._open(request_id="req-2", platform="polymarket")
+        self.assertEqual(len(self.memory.open_funding_continuations("binance")), 1)
+
+    def test_a_resolved_wait_is_not_picked_up_twice(self) -> None:
+        """Resuming the same decision on every later cycle would trade it again and again."""
+        self._open()
+        self.memory.close_funding_continuation("req-1")
+        self.assertEqual(self.memory.open_funding_continuations("binance"), [])
+
+    def test_a_later_request_for_the_same_id_replaces_it(self) -> None:
+        self._open()
+        self.memory.open_funding_continuation(
+            request_id="req-1", platform="binance", market_topic_id="t-1", token_id="o-1",
+            decision_id=8, asked_for=250.0, currency="USDT", reason="second thoughts",
+            conclusion={},
+        )
+        [entry] = self.memory.open_funding_continuations("binance")
+        self.assertEqual(entry["asked_for"], 250.0)
+
+    def test_the_strategy_warns_against_resuming_a_stale_conclusion(self) -> None:
+        text = BuiltInDecisionStrategy().instructions
+        self.assertIn("delayed_funding_answer", text)
+        self.assertIn("Acting on a conclusion the", text)

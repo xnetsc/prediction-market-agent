@@ -126,6 +126,22 @@ class SessionMemory:
         )
         self.connection.executescript(
             """
+            CREATE TABLE IF NOT EXISTS funding_continuations (
+                request_id TEXT PRIMARY KEY,
+                created_at INTEGER NOT NULL,
+                platform TEXT NOT NULL,
+                market_topic_id TEXT NOT NULL,
+                token_id TEXT NOT NULL,
+                decision_id INTEGER,
+                asked_for REAL NOT NULL,
+                currency TEXT NOT NULL,
+                reason TEXT NOT NULL,
+                conclusion_json TEXT NOT NULL,
+                resolved_at INTEGER
+            );
+            CREATE INDEX IF NOT EXISTS idx_funding_open
+                ON funding_continuations(resolved_at);
+
             CREATE TABLE IF NOT EXISTS topic_observations (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 observed_at INTEGER NOT NULL,
@@ -201,6 +217,68 @@ class SessionMemory:
     @staticmethod
     def _json(value: Any) -> str:
         return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+
+    def open_funding_continuation(
+        self,
+        *,
+        request_id: str,
+        platform: str,
+        market_topic_id: str,
+        token_id: str,
+        decision_id: int | None,
+        asked_for: float,
+        currency: str,
+        reason: str,
+        conclusion: dict[str, Any],
+    ) -> None:
+        """Remember why money was wanted, so the answer can be read against it later.
+
+        A funding answer that arrives on its own is worthless: "the money is here" says nothing
+        about whether the trade that needed it is still worth making. What has to survive the wait
+        is the reasoning, the market it was about, and the price it was judged against.
+        """
+        self.connection.execute(
+            """
+            INSERT OR REPLACE INTO funding_continuations
+            (request_id, created_at, platform, market_topic_id, token_id, decision_id,
+             asked_for, currency, reason, conclusion_json, resolved_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)
+            """,
+            (
+                request_id, int(time.time() * 1000), platform, str(market_topic_id),
+                str(token_id), decision_id, float(asked_for), currency, reason,
+                self._json(conclusion),
+            ),
+        )
+        self.connection.commit()
+
+    def open_funding_continuations(self, platform: str) -> list[dict[str, Any]]:
+        rows = self.connection.execute(
+            """
+            SELECT request_id, created_at, market_topic_id, token_id, decision_id,
+                   asked_for, currency, reason, conclusion_json
+            FROM funding_continuations
+            WHERE platform = ? AND resolved_at IS NULL
+            ORDER BY created_at
+            """,
+            (platform,),
+        ).fetchall()
+        return [
+            {
+                "request_id": row[0], "asked_at": row[1], "market_topic_id": row[2],
+                "token_id": row[3], "decision_id": row[4], "asked_for": row[5],
+                "currency": row[6], "reason": row[7],
+                "conclusion": json.loads(row[8]) if row[8] else {},
+            }
+            for row in rows
+        ]
+
+    def close_funding_continuation(self, request_id: str) -> None:
+        self.connection.execute(
+            "UPDATE funding_continuations SET resolved_at = ? WHERE request_id = ?",
+            (int(time.time() * 1000), request_id),
+        )
+        self.connection.commit()
 
     def record_turn(
         self,
