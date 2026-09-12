@@ -106,7 +106,9 @@ DESCRIPTIONS: dict[str, Any] = {
             "happen. Say why you need it: a person may have to approve the transfer, and the "
             "reason is the one thing they cannot work out for themselves. Set allow_pending "
             "false if you cannot wait, and a platform that cannot finish immediately will say so "
-            "instead of parking the request."
+            "instead of parking the request. If an earlier ask of yours is still waiting for "
+            "someone to approve it, the platform may put a question back to you before recording "
+            "this one, because only one request can be waiting at a time."
         ),
         "arguments": {
             "amount": "required number",
@@ -202,9 +204,12 @@ class MarketToolset:
     def __init__(self, platforms: dict[str, Any], current_platform: str):
         self._platforms = platforms
         self._current = current_platform
+        self._consultation: Any = None
 
     def create(self, context: Any) -> "MarketToolset":
-        del context
+        # Taken from the standard tool context rather than wired in specially: asking the asker is
+        # something any tool plugin may need, so it arrives the same way for all of them.
+        self._consultation = getattr(context, "consultation", None)
         return self
 
     def _runtime(self, arguments: dict[str, Any]) -> Any:
@@ -238,6 +243,7 @@ class MarketToolset:
             reason=str(arguments.get("reason", "")),
             allow_pending=bool(arguments.get("allow_pending", True)),
             timeout_seconds=FUNDING_TIMEOUT_SECONDS,
+            consult=self._consultation,
         )
         return {"platform": runtime.plugin.name, **result.to_dict()}
 

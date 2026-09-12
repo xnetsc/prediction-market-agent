@@ -8,8 +8,10 @@ from typing import Any
 
 from pathlib import Path
 
+from prediction_market_agent.agent.consultation import AgentConsult
 from prediction_market_agent.plugins.api._funding import (
     FundingRequests,
+    resolve_conflict,
     shortfall_message,
 )
 from prediction_market_agent.runtime.broker import ExecutionGateway
@@ -150,6 +152,7 @@ class PolymarketApiPlugin:
         reason: str = "",
         allow_pending: bool = True,
         timeout_seconds: int = FUNDING_TIMEOUT_SECONDS,
+        consult: AgentConsult | None = None,
     ) -> FundingResult:
         """Record what is needed and name where to send it. This plugin cannot pull money in."""
         funds = self.account_funds()
@@ -167,9 +170,22 @@ class PolymarketApiPlugin:
                     "within this call."
                 ),
             )
+        # Two asks cannot both be in front of the operator. Which one should be is the asker's
+        # call, not this plugin's, so it is asked before anything is written.
+        resolution = resolve_conflict(
+            self.funding_requests,
+            amount=amount, currency=funds.currency, reason=reason or "No reason was given",
+            consult=consult,
+        )
+        if not resolution.proceed:
+            return FundingResult(
+                request_id="", state="refused" if resolution.settled_by_asker else "failed",
+                requested=amount, currency=funds.currency, available=funds.available,
+                action="request_already_waiting", detail=resolution.detail,
+            )
         request = self.funding_requests.record(
-            amount=amount, currency=funds.currency, available=funds.available,
-            reason=reason or "No reason was given",
+            amount=resolution.amount, currency=funds.currency, available=funds.available,
+            reason=resolution.reason,
             timeout_seconds=timeout_seconds,
         )
         try:

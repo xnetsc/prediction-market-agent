@@ -4,6 +4,7 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Protocol
 
+from ..agent.consultation import AgentConsult, ConsultAnswer, ConsultOption
 from ..runtime.broker import ExecutionGateway
 from ..core.domain import AccountState
 
@@ -243,8 +244,16 @@ class PredictionMarketApiPlugin(Protocol):
         reason: str = "",
         allow_pending: bool = True,
         timeout_seconds: int = FUNDING_TIMEOUT_SECONDS,
+        consult: AgentConsult | None = None,
     ) -> FundingResult: ...
-    """Make `amount` spendable here, within the terms the caller sets.
+    """Make `amount` spendable on this prediction market, by whatever means the venue needs.
+
+    The caller is stating a target for `account_funds().available`, not requesting a transfer of
+    that size: a venue already holding enough does nothing and reports satisfied. How the gap gets
+    closed - a transfer, an approval, an on-chain deposit, or nothing the plugin can do on its own
+    - is the plugin's business. One that cannot close it says so in the result rather than raising,
+    because "I could not, and here is what you would have to do" is an answer the caller can act on
+    and an exception in the middle of a decision is not.
 
     Whether an answer may be deferred, and for how long, is the caller's to decide rather than the
     plugin's: only the caller knows whether anything is still waiting on it. With `allow_pending`
@@ -256,22 +265,14 @@ class PredictionMarketApiPlugin(Protocol):
     `reason` is why the money is wanted, in the caller's own words, to be shown to whoever is asked
     to approve it. Being asked to move money with no reason given is being asked to approve on
     trust, and it is the one piece of context the person deciding cannot reconstruct.
-    """
-    """Make `amount` spendable on this prediction market, by whatever means the venue needs.
 
-    The caller is stating a target for `account_funds().available`, not requesting a transfer of
-    that size: a venue already holding enough does nothing and reports satisfied. How the gap gets
-    closed - a transfer, an approval, an on-chain deposit, or nothing the plugin can do on its own
-    - is the plugin's business. One that cannot close it says so in the result rather than raising,
-    because "I could not, and here is what you would have to do" is an answer the caller can act on
-    and an exception in the middle of a decision is not.
-    """
-    """Ask the platform to make `amount` available, and do whatever that takes internally.
-
-    Whether that means a transfer, an approval, or nothing at all is the plugin's business; the
-    framework states a need and reads back what actually happened. A plugin that cannot add funds
-    says so in the result rather than raising, because "I could not" is an answer the caller can
-    act on and an exception in the middle of a decision is not.
+    `consult` is a way back to whoever is asking, for the forks that are theirs and not the
+    plugin's. An ask arriving while an earlier one is still unanswered is the standing example:
+    only one request can be outstanding, and which of the two should be the one is a statement
+    about intent that the plugin can only guess at. The plugin decides when to use it, what to ask,
+    and what each answer means; the framework only guarantees that the reply is one of the options
+    offered or an explained failure. It is absent whenever there is nobody to ask - a panel action,
+    a settlement sweep, a test - and a plugin must still be able to answer without it.
     """
 
     def funding_status(self, request_id: str) -> FundingResult: ...

@@ -6,7 +6,8 @@ from typing import Any
 
 from pathlib import Path
 
-from prediction_market_agent.plugins.api._funding import FundingRequests
+from prediction_market_agent.agent.consultation import AgentConsult
+from prediction_market_agent.plugins.api._funding import FundingRequests, resolve_conflict
 from prediction_market_agent.runtime.broker import ExecutionGateway
 from prediction_market_agent.core.domain import AccountState
 from prediction_market_agent.plugin_system.contracts import (
@@ -133,6 +134,7 @@ class BinancePredictionApiPlugin:
         reason: str = "",
         allow_pending: bool = True,
         timeout_seconds: int = FUNDING_TIMEOUT_SECONDS,
+        consult: AgentConsult | None = None,
     ) -> FundingResult:
         """Record what is needed and wait for approval; do not move money on the ask alone.
 
@@ -161,9 +163,22 @@ class BinancePredictionApiPlugin:
                     "funded within this call."
                 ),
             )
+        # Two asks cannot both be in front of the operator. Which one should be is the asker's
+        # call, not this plugin's, so it is asked before anything is written.
+        resolution = resolve_conflict(
+            self.funding_requests,
+            amount=amount, currency="USDT", reason=reason or "No reason was given",
+            consult=consult,
+        )
+        if not resolution.proceed:
+            return FundingResult(
+                request_id="", state="refused" if resolution.settled_by_asker else "failed",
+                requested=amount, currency="USDT", available=funds.available,
+                action="request_already_waiting", detail=resolution.detail,
+            )
         request = self.funding_requests.record(
-            amount=amount, currency="USDT", available=funds.available,
-            reason=reason or "No reason was given",
+            amount=resolution.amount, currency="USDT", available=funds.available,
+            reason=resolution.reason,
             timeout_seconds=timeout_seconds,
         )
         return FundingResult(

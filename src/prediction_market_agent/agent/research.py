@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Callable, Protocol
 
+from .consultation import AgentConsultation
 from ..runtime.memory import SessionMemory
 from ..plugin_system.contracts import PredictionMarketApiPlugin
 
@@ -22,6 +23,19 @@ class ResearchToolContext:
     symbol: str
     history_limit: int
     market_search: Callable[[str, int], dict[str, Any]] | None = None
+
+    consultation: AgentConsultation | None = None
+    """The way back to whoever is asking, for any tool plugin that hits a fork it cannot settle.
+
+    Tools normally answer questions; occasionally one has to ask one. A plugin holding two
+    instructions that contradict each other, or an argument that only the asker can disambiguate,
+    can either pick a rule and be quietly wrong sometimes or ask and be right. This is how it asks,
+    and it carries the round's own market, trace and strategy text with it, so the question is
+    answered in the situation that produced it rather than in isolation.
+
+    Absent whenever nothing is driving a model - a panel action, a settlement sweep, a test - so a
+    plugin must always have an answer it can give without it.
+    """
 
 
 class ResearchToolExecutor(Protocol):

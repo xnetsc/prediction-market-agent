@@ -7,6 +7,7 @@ from dataclasses import asdict, dataclass
 from typing import Any, Callable, Protocol
 
 from ..core.config import Config
+from .consultation import AgentConsultation
 from .evolution import render_overlay_block
 from .provider_health import ProviderHealthRegistry
 
@@ -227,6 +228,7 @@ class AgentDecisionProvider:
         tool_executor: Callable[[str, dict[str, Any]], dict[str, Any]] | None = None,
         step_recorder: Callable[..., None] | None = None,
         tool_descriptions: dict[str, Any] | None = None,
+        consultation: AgentConsultation | None = None,
     ) -> AgentRunResult:
         """Drive one multi-step tool loop and return a value matching the supplied schema."""
         trace: list[dict[str, Any]] = []
@@ -235,35 +237,94 @@ class AgentDecisionProvider:
         steps = self.max_tool_steps if max_tool_steps is None else max(0, int(max_tool_steps))
         if tool_executor is not None:
             tools = tool_descriptions or {}
-            for index in range(steps):
-                final_index = index + 1
-                prompt = _control_prompt(payload, trace, tools, control_mission, instructions)
-                step_input = {"prompt": prompt, "trace": trace}
-                try:
-                    response = self.backend.complete(
-                        prompt, control_schema(tools), "agent_control"
-                    )
-                except DecisionProviderError as error:
-                    self._record(
-                        step_recorder,
-                        step_index=index,
-                        input_payload=step_input,
-                        raw_output=error.raw_output,
-                        control=None,
-                        status="ERROR",
-                        error=str(error),
-                    )
-                    raise
-                control = response.value
-                raw_outputs.append({"step": index, "raw": response.raw_output})
-                action = str(control.get("next_action", ""))
-                try:
-                    arguments = json.loads(str(control.get("arguments_json", "{}")) or "{}")
-                    if not isinstance(arguments, dict):
-                        raise TypeError("arguments_json must decode to an object")
-                except (json.JSONDecodeError, TypeError) as error:
-                    arguments = {}
-                    tool_result = {"ok": False, "error": str(error)}
+            if consultation is not None:
+                # Bound here because only this scope holds all of a session at once: the backend
+                # serving this attempt, the trace as it grows, and the same preamble and strategy
+                # text the rest of the round is reading. A question asked without them reaches the
+                # model as a fragment, and that answer is worth less than not having asked.
+                consultation.bind(
+                    backend=self.backend,
+                    payload=payload,
+                    trace=trace,
+                    preamble=SYSTEM_INSTRUCTIONS,
+                    instructions=(
+                        _strategy_instructions(payload) if instructions is None else instructions
+                    ),
+                    recorder=(
+                        None
+                        if step_recorder is None
+                        else lambda **values: self._record(step_recorder, **values)
+                    ),
+                    provider=self.name,
+                )
+            try:
+                for index in range(steps):
+                    final_index = index + 1
+                    prompt = _control_prompt(payload, trace, tools, control_mission, instructions)
+                    step_input = {"prompt": prompt, "trace": trace}
+                    try:
+                        response = self.backend.complete(
+                            prompt, control_schema(tools), "agent_control"
+                        )
+                    except DecisionProviderError as error:
+                        self._record(
+                            step_recorder,
+                            step_index=index,
+                            input_payload=step_input,
+                            raw_output=error.raw_output,
+                            control=None,
+                            status="ERROR",
+                            error=str(error),
+                        )
+                        raise
+                    control = response.value
+                    raw_outputs.append({"step": index, "raw": response.raw_output})
+                    action = str(control.get("next_action", ""))
+                    try:
+                        arguments = json.loads(str(control.get("arguments_json", "{}")) or "{}")
+                        if not isinstance(arguments, dict):
+                            raise TypeError("arguments_json must decode to an object")
+                    except (json.JSONDecodeError, TypeError) as error:
+                        arguments = {}
+                        tool_result = {"ok": False, "error": str(error)}
+                        self._record(
+                            step_recorder,
+                            step_index=index,
+                            input_payload=step_input,
+                            raw_output=response.raw_output,
+                            control=control,
+                            tool_name=action,
+                            arguments=arguments,
+                            result=tool_result,
+                            status="TOOL_ERROR",
+                            error=str(error),
+                        )
+                        trace.append({"tool": action, "arguments": arguments, "result": tool_result})
+                        continue
+                    if action == "DECIDE":
+                        self._record(
+                            step_recorder,
+                            step_index=index,
+                            input_payload=step_input,
+                            raw_output=response.raw_output,
+                            control=control,
+                            status="DECIDE",
+                        )
+                        break
+                    if consultation is not None:
+                        consultation.entering(action, arguments)
+                    try:
+                        tool_result = tool_executor(action, arguments)
+                        status, error_text = "TOOL_OK", ""
+                    except Exception as error:
+                        tool_result = {"ok": False, "error": str(error)}
+                        status, error_text = "TOOL_ERROR", str(error)
+                    finally:
+                        if consultation is not None:
+                            consultation.left()
+                    encoded = json.dumps(tool_result, ensure_ascii=False, sort_keys=True)
+                    if len(encoded) > self.tool_result_chars:
+                        tool_result = {"truncated": True, "content": encoded[: self.tool_result_chars]}
                     self._record(
                         step_recorder,
                         step_index=index,
@@ -273,50 +334,20 @@ class AgentDecisionProvider:
                         tool_name=action,
                         arguments=arguments,
                         result=tool_result,
-                        status="TOOL_ERROR",
-                        error=str(error),
+                        status=status,
+                        error=error_text,
                     )
-                    trace.append({"tool": action, "arguments": arguments, "result": tool_result})
-                    continue
-                if action == "DECIDE":
-                    self._record(
-                        step_recorder,
-                        step_index=index,
-                        input_payload=step_input,
-                        raw_output=response.raw_output,
-                        control=control,
-                        status="DECIDE",
+                    trace.append(
+                        {
+                            "tool": action,
+                            "arguments": arguments,
+                            "reason": control.get("reason"),
+                            "result": tool_result,
+                        }
                     )
-                    break
-                try:
-                    tool_result = tool_executor(action, arguments)
-                    status, error_text = "TOOL_OK", ""
-                except Exception as error:
-                    tool_result = {"ok": False, "error": str(error)}
-                    status, error_text = "TOOL_ERROR", str(error)
-                encoded = json.dumps(tool_result, ensure_ascii=False, sort_keys=True)
-                if len(encoded) > self.tool_result_chars:
-                    tool_result = {"truncated": True, "content": encoded[: self.tool_result_chars]}
-                self._record(
-                    step_recorder,
-                    step_index=index,
-                    input_payload=step_input,
-                    raw_output=response.raw_output,
-                    control=control,
-                    tool_name=action,
-                    arguments=arguments,
-                    result=tool_result,
-                    status=status,
-                    error=error_text,
-                )
-                trace.append(
-                    {
-                        "tool": action,
-                        "arguments": arguments,
-                        "reason": control.get("reason"),
-                        "result": tool_result,
-                    }
-                )
+            finally:
+                if consultation is not None:
+                    consultation.release()
 
         final_input = {
             "market_context": payload,
@@ -365,6 +396,7 @@ class AgentDecisionProvider:
         step_recorder: Callable[..., None] | None = None,
         tool_descriptions: dict[str, Any] | None = None,
         instructions: str | None = None,
+        consultation: AgentConsultation | None = None,
     ) -> ProviderResult:
         result = self.run(
             payload,
@@ -376,6 +408,7 @@ class AgentDecisionProvider:
             tool_executor=tool_executor,
             step_recorder=step_recorder,
             tool_descriptions=tool_descriptions,
+            consultation=consultation,
         )
         return ProviderResult(
             decision=Decision.from_mapping(result.value),
@@ -445,6 +478,7 @@ class FallbackDecisionProvider:
         step_recorder: Callable[..., None] | None = None,
         tool_descriptions: dict[str, Any] | None = None,
         instructions: str | None = None,
+        consultation: AgentConsultation | None = None,
     ) -> ProviderResult:
         return self._attempt(
             lambda provider: provider.decide(
@@ -453,6 +487,7 @@ class FallbackDecisionProvider:
                 step_recorder=step_recorder,
                 tool_descriptions=tool_descriptions,
                 instructions=instructions,
+                consultation=consultation,
             )
         )
 

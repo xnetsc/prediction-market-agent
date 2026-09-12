@@ -6,6 +6,7 @@ import time
 from dataclasses import asdict, replace
 from typing import Any
 
+from ..agent.consultation import AgentConsultation
 from ..agent.decision import DecisionProviderError
 from ..agent.evolution import prompt_json_payload, render_overlay_block
 from ..agent.research import ResearchToolContext, ResearchToolbox
@@ -176,6 +177,10 @@ class MarketEvaluationMixin:
             context=current,
         )
 
+        # One handle for this round, given to the tools now and bound to a backend by the provider
+        # below. A plugin reached through a tool can put a question back to the model this way, and
+        # it arrives carrying the same market, trace and strategy text the round is working from.
+        consultation = AgentConsultation()
         toolbox = ResearchToolbox(
             # The market contract and the account book are always present. A model asked to
             # apply a stop from its strategy text cannot apply it while blind to its own balance,
@@ -191,6 +196,7 @@ class MarketEvaluationMixin:
                 symbol=detail.reference_symbol,
                 history_limit=self.config.history_per_market,
                 market_search=self.search_market_candidates,
+                consultation=consultation,
             ),
         )
 
@@ -226,6 +232,7 @@ class MarketEvaluationMixin:
                 instructions=render_overlay_block(
                     strategy_payload, "CONFIGURED_DECISION_STRATEGY"
                 ),
+                consultation=consultation,
             )
         except DecisionProviderError as error:
             self.memory.record_turn(
