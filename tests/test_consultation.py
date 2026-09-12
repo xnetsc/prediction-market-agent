@@ -806,3 +806,156 @@ class PlatformStandsDownTests(unittest.TestCase):
         loop.notify({"kind": "decision_capacity", "available": False, "waiting": {}})
         loop.stop()
         self.assertTrue(loop._may_decide.is_set())
+
+
+class ForgettingDecisionsTests(unittest.TestCase):
+    """A wrong entry does not sit there looking untidy; it goes on shaping what happens next."""
+
+    def setUp(self) -> None:
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        self.memory = SessionMemory(Path(temp.name) / "m.sqlite3")
+
+    def _decision(self, *, platform="venue", status="OK", token="o-1"):
+        decision_id = self.memory.begin_decision(
+            platform=platform, market_topic_id="t-1", market_id="m-1", token_id=token,
+            strategy_name="s", strategy_sha256="x", context={},
+        )
+        self.memory.record_turn(
+            platform=platform, provider="p", market_topic_id="t-1", token_id=token,
+            input_payload={}, raw_output="", decision=None, status=status,
+            decision_id=decision_id,
+        )
+        self.memory.record_agent_step(
+            platform=platform, provider="p", market_topic_id="t-1", token_id=token,
+            step_index=0, input_payload={}, raw_output="", control=None, status=status,
+            decision_id=decision_id,
+        )
+        self.memory.complete_decision(
+            decision_id, provider="p", model_raw_output="", status=status,
+        )
+        return decision_id
+
+    def _counts(self):
+        return {
+            table: self.memory.connection.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+            for table in ("decision_ledger", "provider_turns", "agent_steps")
+        }
+
+    def test_a_run_that_failed_for_a_fixed_reason_can_be_taken_out(self) -> None:
+        self._decision(status="OK")
+        self._decision(status="PROVIDER_ERROR")
+        self._decision(status="PROVIDER_ERROR")
+        removed = self.memory.forget_decisions(status="PROVIDER_ERROR")
+        self.assertEqual(removed["decisions"], 2)
+        self.assertEqual(self._counts(), {"decision_ledger": 1, "provider_turns": 1, "agent_steps": 1})
+
+    def test_the_reasoning_goes_with_the_decision(self) -> None:
+        """Leaving turns and steps behind would keep feeding the measurements they belong to."""
+        decision_id = self._decision(status="PROVIDER_ERROR")
+        self.memory.forget_decisions(decision_ids=[decision_id])
+        self.assertEqual(self._counts(), {"decision_ledger": 0, "provider_turns": 0, "agent_steps": 0})
+
+    def test_what_the_venue_actually_did_is_never_removed_with_it(self) -> None:
+        """The balance is its own state, so deleting the record would leave only the effect."""
+        decision_id = self._decision(status="OK")
+        self.memory.record_action(
+            platform="venue", market_topic_id="t-1", token_id="o-1", action="BUY",
+            request={}, result={}, decision_id=decision_id,
+        )
+        removed = self.memory.forget_decisions(decision_ids=[decision_id])
+        self.assertEqual(removed["decisions"], 0)
+        self.assertEqual(removed["kept_executed"], 1)
+        self.assertEqual(self._counts()["decision_ledger"], 1)
+
+    def test_one_platforms_ledger_can_be_cleared_without_touching_another(self) -> None:
+        self._decision(platform="venue")
+        self._decision(platform="other")
+        self.memory.forget_decisions(platform="venue")
+        rows = self.memory.connection.execute(
+            "SELECT platform FROM decision_ledger"
+        ).fetchall()
+        self.assertEqual([row[0] for row in rows], ["other"])
+
+    def test_naming_nothing_is_refused_rather_than_meaning_everything(self) -> None:
+        self._decision()
+        with self.assertRaises(ValueError) as caught:
+            self.memory.forget_decisions()
+        self.assertIn("entire ledger", str(caught.exception))
+        self.assertEqual(self._counts()["decision_ledger"], 1)
+
+    def test_the_measurements_stop_counting_what_was_removed(self) -> None:
+        """The point of allowing this: a provider is ranked on evidence that is still true."""
+        self._decision(status="PROVIDER_ERROR")
+        self._decision(status="PROVIDER_ERROR")
+        before = self.memory.provider_delivery()
+        self.memory.forget_decisions(status="PROVIDER_ERROR")
+        after = self.memory.provider_delivery()
+        self.assertNotEqual(before, after)
+        self.assertEqual(after, {})
+
+
+class BuilderKeyChoiceTests(unittest.TestCase):
+    """Polymarket issues the secret once, so a create button that is the only option makes litter."""
+
+    def _spec_with(self, existing):
+        import importlib.util
+        import sys
+        from prediction_market_agent.plugin_system.discovery import PluginInitializationContext
+
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        path = Path("src/prediction_market_agent/plugins/api/polymarket.py").resolve()
+        loader = importlib.util.spec_from_file_location("polymarket_builder_probe", path)
+        module = importlib.util.module_from_spec(loader)
+        sys.modules["polymarket_builder_probe"] = module
+        self.addCleanup(sys.modules.pop, "polymarket_builder_probe", None)
+        loader.loader.exec_module(module)
+        spec = module.initialize_plugin(
+            PluginInitializationContext(kind="api", module_path=path,
+                                        working_directory=Path(temp.name))
+        )
+        spec.notice_action_callback("wallet", "confirm", {})  # generate a wallet
+        self.created: list[str] = []
+
+        class Instance:
+            def create_builder_key(_self, values):
+                self.created.append("created")
+                return {"ok": True, "created": {"key": "made", "secret": "s", "passphrase": "p"}}
+
+            def approve_trading(_self, values):
+                return {"ok": True}
+
+            def wallet_panel(_self):
+                return {"builder_api_keys": existing}
+
+        module._live_instance = lambda: Instance()
+        return spec
+
+    def test_an_existing_key_can_be_used_instead_of_making_another(self) -> None:
+        spec = self._spec_with([{"key": "already-there"}])
+        answer = spec.notice_action_callback("wallet", "confirm", {
+            "existing_key": "already-there", "existing_secret": "s", "existing_passphrase": "p",
+        })
+        self.assertTrue(answer["ok"])
+        self.assertEqual(self.created, [], "nothing new should have been made")
+        self.assertEqual(spec.configuration.load()["POLYMARKET_BUILDER_API_KEY"], "already-there")
+
+    def test_a_half_given_key_is_refused_rather_than_half_saved(self) -> None:
+        spec = self._spec_with([])
+        answer = spec.notice_action_callback("wallet", "confirm", {"existing_key": "only-the-id"})
+        self.assertFalse(answer["ok"])
+        self.assertEqual(self.created, [])
+        self.assertEqual(spec.configuration.load().get("POLYMARKET_BUILDER_API_KEY", ""), "")
+
+    def test_the_offer_says_whether_one_already_exists(self) -> None:
+        """Creating another is a different act from creating the first, and should read as one."""
+        import inspect
+        from prediction_market_agent.plugins.api import polymarket as plugin
+
+        offer = inspect.getsource(plugin)
+        offer = offer[offer.index("def wallet_notices"):offer.index("def _live_instance_panel")]
+        self.assertIn("再创建一个 Builder API Key", offer)
+        self.assertIn('panel.get("builder_api_keys")', offer)
+        for field in ("existing_key", "existing_secret", "existing_passphrase"):
+            self.assertIn(field, offer, "the operator must be able to supply one they hold")

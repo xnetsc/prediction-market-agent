@@ -171,7 +171,27 @@ def initialize_plugin(context: PluginInitializationContext) -> PluginSpec:
             "kind": "confirm",
             "description": '这是插件根据你的私钥连上去之后实际拿到的身份。地址、钱包类型和 CLOB 凭据都是私钥推出来的，不用你填；下面两个按钮是可选的便利，不点也能跑。',
             "content": panel,
-            "action_label": '创建一个 Builder API Key',
+            # Creating unconditionally left keys nobody could reach: Polymarket issues the secret
+            # once, so every press of a "create" button that did not store it added another one
+            # visible in the account and usable by nothing. What exists is listed above; this makes
+            # one only when asked, and the one it makes is kept.
+            "action_label": (
+                '再创建一个 Builder API Key'
+                if panel.get("builder_api_keys")
+                else '创建一个 Builder API Key'
+            ),
+            "action_fields": [{
+                "name": "existing_key",
+                "label": "或者改用已有的 Key",
+                "placeholder": (
+                    '填上面列出的某个 key，并在下面两栏填它的 secret 和 passphrase，'
+                    '就直接用那一把，不再新建。留空则新建一把。'
+                ),
+            }, {
+                "name": "existing_secret", "label": "该 Key 的 Secret", "placeholder": 'Polymarket 只在创建时给过一次',
+            }, {
+                "name": "existing_passphrase", "label": "该 Key 的 Passphrase", "placeholder": '',
+            }],
             "dismiss_label": '办理交易授权（上链、花 gas）',
         }]
 
@@ -230,19 +250,34 @@ def initialize_plugin(context: PluginInitializationContext) -> PluginSpec:
         handler = {"confirm": instance.create_builder_key, "dismiss": instance.approve_trading}.get(name)
         if handler is None:
             return {"ok": False, "message": f"Unknown wallet action: {name}"}
-        try:
-            answer = handler(payload)
-        except Exception as error:
-            return {"ok": False, "message": str(error)[:300]}
-        created = answer.pop("created", None)
+        chosen = {
+            key: str(payload.get(f"existing_{key}", "")).strip()
+            for key in ("key", "secret", "passphrase")
+        }
+        answer: dict = {"ok": True}
+        if name == "confirm" and any(chosen.values()):
+            if not all(chosen.values()):
+                return {
+                    "ok": False,
+                    "message": '要改用已有的 Key，三栏（key、secret、passphrase）都得填；'
+                               'Polymarket 只在创建那一刻给过 secret 和 passphrase。',
+                }
+            created = chosen
+        else:
+            try:
+                answer = handler(payload)
+            except Exception as error:
+                return {"ok": False, "message": str(error)[:300]}
+            created = answer.pop("created", None)
         if created:
             saved = dict(configuration.load())
             saved["POLYMARKET_BUILDER_API_KEY"] = created["key"]
             saved["POLYMARKET_BUILDER_API_SECRET"] = created["secret"]
             saved["POLYMARKET_BUILDER_API_PASSPHRASE"] = created["passphrase"]
             configuration.save(saved)
+            answer["ok"] = True
             answer["message"] = (
-                f'已创建并保存 Builder API Key {created["key"][:8]}…。'
+                f'已保存 Builder API Key {created["key"][:8]}…。'
                 '有了它，钱包首次上链部署和后续免 gas 交易才能进行。'
             )
         return answer

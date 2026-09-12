@@ -790,6 +790,92 @@ class SessionMemory:
                 continue
         return results
 
+    def forget_decisions(
+        self,
+        *,
+        decision_ids: list[int] | None = None,
+        status: str = "",
+        platform: str = "",
+    ) -> dict[str, Any]:
+        """Remove decisions and the reasoning behind them, once an operator says they are junk.
+
+        This is not housekeeping. Everything here is read back to decide what happens next -
+        calibration against settled outcomes, the ranking that picks which provider to ask first,
+        and the history handed to the model - so a run that failed for a reason since fixed does
+        not merely look untidy, it goes on shaping behaviour with evidence that was never about
+        the thing it is now counted against.
+
+        What actually happened at a venue is not removed with it. The account's cash and positions
+        are kept as their own state rather than derived from these rows, so deleting an executed
+        action would take away the record while leaving its effect - a ledger that disagrees with
+        the balance is worse than an untidy one. Those rows are reported and left alone.
+        """
+        selected = self._decisions_to_forget(decision_ids, status, platform)
+        if not selected:
+            return {"decisions": 0, "provider_turns": 0, "agent_steps": 0, "kept_executed": 0}
+        marks = ",".join("?" for _ in selected)
+        executed = self.connection.execute(
+            f"SELECT COUNT(*) FROM execution_actions WHERE decision_id IN ({marks})",
+            selected,
+        ).fetchone()[0]
+        keep = [
+            row[0]
+            for row in self.connection.execute(
+                f"SELECT DISTINCT decision_id FROM execution_actions WHERE decision_id IN ({marks})",
+                selected,
+            )
+        ]
+        removable = [item for item in selected if item not in set(keep)]
+        if not removable:
+            return {
+                "decisions": 0, "provider_turns": 0, "agent_steps": 0,
+                "kept_executed": int(executed),
+            }
+        marks = ",".join("?" for _ in removable)
+        turns = self.connection.execute(
+            f"DELETE FROM provider_turns WHERE decision_id IN ({marks})", removable
+        ).rowcount
+        steps = self.connection.execute(
+            f"DELETE FROM agent_steps WHERE decision_id IN ({marks})", removable
+        ).rowcount
+        decisions = self.connection.execute(
+            f"DELETE FROM decision_ledger WHERE id IN ({marks})", removable
+        ).rowcount
+        self.connection.commit()
+        return {
+            "decisions": int(decisions),
+            "provider_turns": int(turns),
+            "agent_steps": int(steps),
+            "kept_executed": int(executed),
+        }
+
+    def _decisions_to_forget(
+        self, decision_ids: list[int] | None, status: str, platform: str
+    ) -> list[int]:
+        """Resolve what was asked for into ids, refusing a request that names nothing.
+
+        An empty filter would match the whole ledger. Deleting everything is a thing someone may
+        genuinely want, but it is not a thing they should get by leaving a box blank.
+        """
+        if decision_ids:
+            return [int(item) for item in decision_ids]
+        clauses, values = [], []
+        if status:
+            clauses.append("status = ?")
+            values.append(str(status))
+        if platform:
+            clauses.append("platform = ?")
+            values.append(str(platform))
+        if not clauses:
+            raise ValueError(
+                "Name which decisions to forget: ids, a status, or a platform. "
+                "An unfiltered request would delete the entire ledger."
+            )
+        rows = self.connection.execute(
+            f"SELECT id FROM decision_ledger WHERE {' AND '.join(clauses)}", values
+        ).fetchall()
+        return [int(row[0]) for row in rows]
+
     def settled_decisions(self, *, limit: int = 5000) -> list[dict[str, Any]]:
         """Decisions whose outcome token was later redeemed, so the truth is known.
 

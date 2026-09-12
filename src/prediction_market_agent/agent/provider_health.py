@@ -13,6 +13,10 @@ RATE_LIMIT_PATTERNS = (
     r"too many requests",
     r"quota",
     r"usage limit",
+    # "session limit" is the same fact under another name, and classifying it as unknown gave it a
+    # minute of cooldown instead of the hours it actually needs - so the provider was retried all
+    # the way through an outage it had already stated the end time of.
+    r"session limit",
     r"capacity",
     r"overloaded",
     r"try again later",

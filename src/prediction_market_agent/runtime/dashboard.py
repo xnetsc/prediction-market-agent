@@ -301,6 +301,22 @@ class AuditData:
             items.append(item)
         return {"kind": kind, "limit": limit, "offset": offset, "items": items}
 
+    def forget_decisions(
+        self, decision_ids: list[int], status: str, platform: str
+    ) -> dict[str, Any]:
+        """Drop decisions the operator has judged to be evidence of nothing.
+
+        The measurements that rank providers and calibrate the strategy are read off these rows, so
+        a run that failed for a reason since fixed keeps arguing its case until it is removed.
+        """
+        memory = SessionMemory(self.config.session_db)
+        try:
+            return memory.forget_decisions(
+                decision_ids=decision_ids or None, status=status, platform=platform
+            )
+        finally:
+            memory.connection.close()
+
     def decisions(
         self,
         limit: int,
@@ -610,6 +626,15 @@ def create_app(config: Config, *, start_robot: bool = True) -> FastAPI:
         if path == "/api/settings/reset":
             return application_settings.reset(
                 payload.get("names") if "names" in payload else None
+            )
+        if path == "/api/decisions/forget":
+            ids = payload.get("decision_ids") or []
+            if not isinstance(ids, list):
+                raise ValueError("decision_ids must be a list")
+            return data.forget_decisions(
+                [int(item) for item in ids],
+                str(payload.get("status", "")),
+                str(payload.get("platform", "")),
             )
         if path == "/api/decisions":
             return data.decisions(

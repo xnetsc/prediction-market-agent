@@ -504,7 +504,25 @@ function renderDecisionLedger(rows){
         ['模型如何判断',reason(r.proposed_decision),{decision:r.proposed_decision,model_output:r.model_raw_output}],
         ['规则检查后',r.risk_decision?reason(r.risk_decision):'没有记录规则检查结果',{risk:r.risk_decision,final:r.final_decision}],
         ['实际执行与后续',r.error?String(r.error):r.execution?'已记录执行处理结果，请查看详情；这可能是跳过操作的记录，不代表已向平台下单':'未记录平台执行结果',{execution:r.execution,subsequent_observation:r.subsequent_observation}]
-    ];return '<details class="decision-entry" data-id="'+esc(r.id)+'" '+(opened.has(String(r.id))?'open':'')+'><summary><span class="decision-meta">'+esc(new Date(r.created_at).toLocaleString())+' · '+esc(r.platform)+' · #'+esc(r.id)+'</span><span class="decision-title">'+esc(r.context?.market?.title||r.market_topic_id||'未记录市场')+'</span><span class="decision-outcome"><span class="badge">'+esc((r.final_decision?'最终：':'建议：')+actionTitle(d.action))+'</span><span>'+esc(decisionStatusTitle(r.status))+'</span></span><span class="decision-reason">'+esc(reason(d))+'</span><span class="text-link">查看决策过程</span></summary><p class="description">模型服务：'+esc(serviceTitle(r.provider))+' · 策略：'+esc(r.strategy_name||'未记录')+'。模型建议不等于成交，后续观察也不自动等于已实现盈亏。</p><ol class="decision-timeline">'+stages.map(([title,summary,raw])=>'<li><h4>'+title+'</h4><p>'+esc(summary)+'</p>'+detail(raw)+'</li>').join('')+'</ol></details>'}).join('');
+    ];return '<details class="decision-entry" data-id="'+esc(r.id)+'" '+(opened.has(String(r.id))?'open':'')+'><summary><span class="decision-meta">'+esc(new Date(r.created_at).toLocaleString())+' · '+esc(r.platform)+' · #'+esc(r.id)+'</span><span class="decision-title">'+esc(r.context?.market?.title||r.market_topic_id||'未记录市场')+'</span><span class="decision-outcome"><span class="badge">'+esc((r.final_decision?'最终：':'建议：')+actionTitle(d.action))+'</span><span>'+esc(decisionStatusTitle(r.status))+'</span></span><span class="decision-reason">'+esc(reason(d))+'</span><span class="text-link">查看决策过程</span></summary><p class="description">模型服务：'+esc(serviceTitle(r.provider))+' · 策略：'+esc(r.strategy_name||'未记录')+'。模型建议不等于成交，后续观察也不自动等于已实现盈亏。</p><ol class="decision-timeline">'+stages.map(([title,summary,raw])=>'<li><h4>'+title+'</h4><p>'+esc(summary)+'</p>'+detail(raw)+'</li>').join('')+'</ol>'
+        /* Measurements are read off these rows - which provider gets asked first, how the strategy
+           calibrates - so an entry that records a fault since fixed keeps arguing its case until
+           someone removes it. What the venue actually did is refused separately and stays. */
+        +'<div class="toolbar"><button class="danger" onclick="forgetDecision('+esc(r.id)+')">删除这条记录</button>'
+        +'<span class="muted">它会连同这次的模型往返与工具步骤一起删除；如果这次决策产生过真实平台动作，则拒绝删除并说明。</span></div>'
+        +'</details>'}).join('');
+}
+
+async function forgetDecision(id){
+    if(!confirm('删除决策 #'+id+'？\n\n这条记录参与 provider 排名与策略校准，删掉之后这些统计会变。已经在平台上发生过的动作不会被删除。'))return;
+    try{
+        const answer=await post('/api/decisions/forget',{decision_ids:[id]});
+        if(!answer.decisions&&answer.kept_executed)
+            showOperationFeedback('没有删除：这次决策已经产生 '+answer.kept_executed+' 条真实平台动作，删掉记录会让账本与余额对不上。','danger',true);
+        else
+            showOperationFeedback('已删除决策 '+answer.decisions+' 条、模型往返 '+answer.provider_turns+' 条、工具步骤 '+answer.agent_steps+' 条。');
+        refreshAudit();
+    }catch(e){showOperationFeedback('删除失败：'+e.message,'danger',true)}
 }
 
 
