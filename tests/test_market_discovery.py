@@ -706,3 +706,52 @@ class DiscoveryCanFillItsOwnGapsTests(unittest.TestCase):
         text = BuiltInMarketDiscovery().instructions
         self.assertIn("MISSING EVIDENCE IS A TASK", text)
         self.assertIn("is not a reason", text)
+
+
+class OneBadCandidateDoesNotEndTheRoundTests(unittest.TestCase):
+    """A venue that will not describe one market is not a reason to abandon twenty-three others."""
+
+    def setUp(self) -> None:
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.memory = SessionMemory(Path(self.temp.name) / "m.sqlite3")
+
+    def _plugin_that_refuses(self, failing: str):
+        plugin = FakePlugin(20)
+        real_book = plugin.get_order_book
+        real_detail = plugin.get_topic
+
+        def book(market_id, outcome_id):
+            if failing == "book":
+                raise RuntimeError('Polymarket read HTTP 404: no orderbook for this token')
+            return real_book(market_id, outcome_id)
+
+        def detail(topic_id):
+            if failing == "detail":
+                raise RuntimeError("Polymarket read HTTP 500")
+            return real_detail(topic_id)
+
+        plugin.get_order_book = book
+        plugin.get_topic = detail
+        return plugin
+
+    def _discover(self, plugin):
+        provider = RecordingProvider()
+        selected = DiscoveryEngine(
+            memory=self.memory, provider=provider, strategy=BuiltInMarketDiscovery(),
+            evolution_enabled=True,
+        ).discover(platform="fake", plugin=plugin, maximum_topics=3)
+        return selected, provider
+
+    def test_a_market_with_no_order_book_still_leaves_a_round(self) -> None:
+        selected, provider = self._discover(self._plugin_that_refuses("book"))
+        self.assertTrue(selected, "the whole cycle was abandoned over one unreadable book")
+        candidates = provider.requests[0]["candidates"]
+        self.assertTrue(any("book_error" in item for item in candidates))
+
+    def test_a_topic_that_cannot_be_read_is_marked_unverified_not_fatal(self) -> None:
+        selected, provider = self._discover(self._plugin_that_refuses("detail"))
+        self.assertTrue(selected)
+        candidates = provider.requests[0]["candidates"]
+        self.assertTrue(all(not item.get("verified") for item in candidates))
+        self.assertTrue(any("lookup_error" in item for item in candidates))

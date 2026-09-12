@@ -339,7 +339,17 @@ class DiscoveryEngine:
         """
         verified: dict[str, dict[str, Any]] = {}
         for topic in shortlist:
-            detail = toolbox.execute("TOPIC_DETAIL", {"topic_id": topic.topic_id})
+            # A candidate the venue will not describe is one candidate the agent has to judge
+            # without help. It is not a reason to abandon the round - which is exactly what it
+            # became when one topic on a shortlist of twenty-four had no order book and the 404
+            # took the whole cycle down with it.
+            try:
+                detail = toolbox.execute("TOPIC_DETAIL", {"topic_id": topic.topic_id})
+            except Exception as error:
+                verified[topic.topic_id] = {
+                    "verified": False, "lookup_error": str(error)[:200]
+                }
+                continue
             if not detail.get("ok"):
                 # The allowance is gone; the rest of the shortlist is honestly unexamined.
                 break
@@ -352,10 +362,13 @@ class DiscoveryEngine:
             outcomes = (markets[0].get("outcomes") or []) if markets else []
             if outcomes:
                 entry["priced_outcome"] = outcomes[0].get("name")
-                book = toolbox.execute("OUTCOME_BOOK", {
-                    "market_id": markets[0].get("market_id"),
-                    "outcome_id": outcomes[0].get("outcome_id"),
-                })
+                try:
+                    book = toolbox.execute("OUTCOME_BOOK", {
+                        "market_id": markets[0].get("market_id"),
+                        "outcome_id": outcomes[0].get("outcome_id"),
+                    })
+                except Exception as error:
+                    book = {"ok": False, "error": str(error)[:200]}
                 if book.get("ok"):
                     entry.update({
                         key: book[key] for key in ("best_bid", "best_ask", "spread")
