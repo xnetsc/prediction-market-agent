@@ -56,3 +56,17 @@ dialog{background:var(--surface)!important;color:var(--ink)!important;border:1px
 .usage-windows li{display:flex;flex-wrap:wrap;gap:8px;align-items:baseline;font-size:12px}
 .usage-windows b{font-weight:600}
 .usage-windows small{color:var(--muted)}
+
+/* A value a plugin handed back for the operator to keep. It has to survive being looked at:
+   selectable, wrapping rather than truncating, and not styled like a transient status line. */
+.notice-reveal{display:flex;gap:.5rem;align-items:flex-start;margin-top:.5rem}
+.notice-reveal pre{flex:1;margin:0;user-select:all;white-space:pre-wrap;word-break:break-all}
+
+/* Outstanding plugin business, on every page. It sits above the view because the operator is
+   usually somewhere else when a plugin needs them, and a message only visible on the page you
+   would have to already be on is not a message. */
+.attention{border:1px solid var(--warn-border,#e0a800);background:var(--warn-bg,#fff8e1);border-radius:.5rem;padding:.75rem 1rem;margin:0 0 1rem}
+.attention-head{display:flex;gap:.5rem;align-items:baseline;flex-wrap:wrap}
+.attention-list{list-style:none;margin:.5rem 0 0;padding:0;display:flex;flex-direction:column;gap:.35rem}
+.attention-list li{display:flex;gap:.75rem;align-items:baseline;justify-content:space-between;flex-wrap:wrap}
+.attention-go{white-space:nowrap;font-weight:600}

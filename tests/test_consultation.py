@@ -1,5 +1,6 @@
 from ._support import *
 import json
+import threading
 
 from prediction_market_agent.plugin_system.contracts import AccountFunds, FundingResult
 from prediction_market_agent.agent.consultation import (
@@ -578,7 +579,7 @@ class WalletCustodyTests(unittest.TestCase):
         stored = spec.configuration.load()["POLYMARKET_PRIVATE_KEY"]
         exported = spec.notice_action_callback("wallet_backup", "confirm", {})
         self.assertTrue(exported["ok"])
-        self.assertIn(stored, exported["message"], "the key itself has to come back, not a hint")
+        self.assertIn(stored, exported["reveal"], "the key itself has to come back, not a hint")
 
     def test_the_key_is_never_in_the_configuration_manifest(self) -> None:
         """Export is a deliberate act; leaking it into every page render is not."""
@@ -592,3 +593,92 @@ class WalletCustodyTests(unittest.TestCase):
         answer = spec.notice_action_callback("wallet_backup", "confirm", {})
         self.assertFalse(answer["ok"])
         self.assertIn("还没有私钥", answer["message"])
+
+
+class MemoryAcrossThreadsTests(unittest.TestCase):
+    """The loop and the console are different threads; a store only one can reach is no store."""
+
+    def _memory(self):
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        return SessionMemory(Path(temp.name) / "m.sqlite3")
+
+    def _in_thread(self, work):
+        outcome: list = []
+        thread = threading.Thread(target=lambda: outcome.append(self._call(work)))
+        thread.start()
+        thread.join()
+        return outcome[0]
+
+    @staticmethod
+    def _call(work):
+        try:
+            return ("ok", work())
+        except Exception as error:
+            return ("error", error)
+
+    def test_another_thread_can_read(self) -> None:
+        memory = self._memory()
+        memory.settled_decisions()
+        state, value = self._in_thread(memory.settled_decisions)
+        self.assertEqual(state, "ok", f"a reader thread was refused: {value}")
+
+    def test_another_thread_can_write_and_the_first_sees_it(self) -> None:
+        """A cycle that records from its own thread is worthless if the page cannot read it back."""
+        memory = self._memory()
+        state, value = self._in_thread(
+            lambda: memory.open_funding_continuation(
+                request_id="r-1", platform="venue", market_topic_id="t", token_id="o",
+                decision_id=1, asked_for=10.0, currency="USDT", reason="because",
+                conclusion={},
+            )
+        )
+        self.assertEqual(state, "ok", f"a writer thread was refused: {value}")
+        self.assertEqual(len(memory.open_funding_continuations("venue")), 1)
+
+
+class ClaudeTurnBudgetTests(unittest.TestCase):
+    """One turn was not enough to answer, and the failure said nothing about why."""
+
+    def _backend(self, returncode: int, stdout: str):
+        from prediction_market_agent.plugins.providers.claude import ClaudeCliBackend
+
+        backend = ClaudeCliBackend.__new__(ClaudeCliBackend)
+        backend.executable = "/bin/claude"
+        backend.model = ""
+        backend.effort = ""
+        backend.proxy = ""
+        backend.timeout = 60
+        backend.control = None
+        self.commands: list[list[str]] = []
+
+        def fake_run(command, **options):
+            self.commands.append(command)
+            return SimpleNamespace(returncode=returncode, stdout=stdout, stderr="")
+
+        return backend, fake_run
+
+    def _complete(self, backend, fake_run):
+        import prediction_market_agent.plugins.providers.claude as module
+
+        with patch.object(module.subprocess, "run", fake_run):
+            return backend.complete("prompt", {"type": "object"}, "probe")
+
+    def test_the_budget_covers_thinking_before_answering(self) -> None:
+        backend, fake_run = self._backend(0, json.dumps({"structured_output": {"ok": True}}))
+        self._complete(backend, fake_run)
+        [command] = self.commands
+        turns = int(command[command.index("--max-turns") + 1])
+        self.assertGreater(turns, 1, "a single turn is spent thinking and never reaches an answer")
+
+    def test_a_failure_says_which_way_it_failed(self) -> None:
+        """Empty stderr plus a bare message is a provider that looks broken for no stated reason."""
+        from prediction_market_agent.agent.decision import DecisionProviderError
+
+        backend, fake_run = self._backend(
+            1, json.dumps({"is_error": True, "subtype": "error_max_turns",
+                           "terminal_reason": "max_turns"})
+        )
+        with self.assertRaises(DecisionProviderError) as caught:
+            self._complete(backend, fake_run)
+        self.assertIn("error_max_turns", str(caught.exception))

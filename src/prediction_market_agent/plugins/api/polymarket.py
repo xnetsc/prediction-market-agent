@@ -162,7 +162,7 @@ def initialize_plugin(context: PluginInitializationContext) -> PluginSpec:
             "title": '备份钱包私钥',
             "kind": "confirm",
             "description": '这个钱包的私钥就是它的钱。导出来自己存一份——如果这台机器坏了、或者你想换个工具管这些钱，没有它就再也拿不回来。导出的内容只显示在这一页上。',
-            "content": {"wallet": panel.get("wallet", ""), "note": '按下按钮后私钥会显示在这里，请复制到你自己的密码管理器或离线备份，然后离开本页。'},
+            "content": {"wallet": panel.get("wallet", ""), "note": '按下按钮后，私钥、派生出的 CLOB 凭据和 Builder Key 会一起显示在这里，复制到你自己的密码管理器或离线备份，然后离开本页。'},
             "action_label": '显示私钥，我要备份',
             "dismiss_label": '不用，我已经有备份了',
         }, {
@@ -188,9 +188,26 @@ def initialize_plugin(context: PluginInitializationContext) -> PluginSpec:
             stored = str(configuration.load().get("POLYMARKET_PRIVATE_KEY", "")).strip()
             if not stored:
                 return {"ok": False, "message": '还没有私钥可以导出。'}
+            lines = [f"钱包私钥（最重要，丢了钱就拿不回来）\n{stored}"]
+            values = configuration.load()
+            try:
+                derived = _live_instance().exportable_secrets()
+            except Exception as error:
+                derived = {"CLOB 凭据": f"读取失败：{str(error)[:200]}"}
+            lines.append("\n从这把私钥派生出来的 CLOB 凭据（配置框里留空就是用这一套）：")
+            lines += [f"{label}\n{value}" for label, value in derived.items()]
+            builder = str(values.get("POLYMARKET_BUILDER_API_KEY", "")).strip()
+            if builder:
+                lines.append(
+                    "\nBuilder API Key（Polymarket 只发一次，这里是保存下来的那把）："
+                    f"\n{builder}"
+                    f"\nSecret\n{values.get('POLYMARKET_BUILDER_API_SECRET', '')}"
+                    f"\nPassphrase\n{values.get('POLYMARKET_BUILDER_API_PASSPHRASE', '')}"
+                )
             return {
                 "ok": True,
-                "message": f'私钥：{stored}\n\n复制它，存到你自己的地方。任何拿到这串字符的人都能动这个钱包里的钱。',
+                "message": '下面是这个账户的全部关键信息。复制走，存到你自己的地方——任何拿到私钥的人都能动这个钱包里的钱。',
+                "reveal": "\n\n".join(lines),
             }
         if name == "dismiss" and not str(configuration.load().get("POLYMARKET_PRIVATE_KEY", "")).strip():
             return {"ok": True, "message": '好，等你自己填上私钥。'}

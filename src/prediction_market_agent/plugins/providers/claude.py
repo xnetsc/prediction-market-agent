@@ -41,9 +41,31 @@ class ClaudeCliBackend:
         """Free signal the client provides about its own session; None when unavailable."""
         return self.control.authenticated() if self.control else None
 
+    STRUCTURED_ANSWER_TURNS = "6"
+    """Turns this client may take to produce the one answer being asked of it.
+
+    The framework runs its own tool loop, one invocation per step, so it wants a single structured
+    reply here and nothing else. But this CLI counts the model's own internal steps as turns, and a
+    prompt worth answering is usually thought about before it is answered. At 1 that thinking was
+    the whole budget: the run ended `error_max_turns` with no output, exited non-zero, and reported
+    an empty stderr, so every decision this provider was asked for died silently and looked like a
+    broken client. The number only has to cover getting to an answer, not to allow wandering.
+    """
+
+    @staticmethod
+    def _why_it_stopped(stdout: str) -> str:
+        try:
+            envelope = json.loads(stdout or "{}")
+        except json.JSONDecodeError:
+            return ""
+        if not isinstance(envelope, dict):
+            return ""
+        parts = [str(envelope.get(key, "")) for key in ("subtype", "terminal_reason", "result")]
+        return " / ".join(part for part in parts if part)[:1000]
+
     def complete(self, prompt: str, schema: dict[str, Any], schema_name: str) -> StructuredResult:
         del schema_name
-        command = [self.control.executable() if self.control else self.executable, "-p", "--no-session-persistence", "--permission-mode", "plan", "--max-turns", "1", "--output-format", "json", "--json-schema", json.dumps(schema, separators=(",", ":"))]
+        command = [self.control.executable() if self.control else self.executable, "-p", "--no-session-persistence", "--permission-mode", "plan", "--max-turns", self.STRUCTURED_ANSWER_TURNS, "--output-format", "json", "--json-schema", json.dumps(schema, separators=(",", ":"))]
         if self.model:
             command.extend(["--model", self.model])
         if self.effort:
@@ -57,7 +79,13 @@ class ClaudeCliBackend:
         if completed.returncode != 0:
             if self.control:
                 self.control.record_auth_failure(completed.stderr + completed.stdout)
-            raise DecisionProviderError(f"Claude failed: {completed.stderr[-1000:]}", raw)
+            # This client reports why it stopped in its JSON envelope and leaves stderr empty, so
+            # taking stderr alone produced "Claude failed:" and nothing else - a message that says
+            # a provider is broken while withholding the one word that says how.
+            raise DecisionProviderError(
+                f"Claude failed: {self._why_it_stopped(completed.stdout) or completed.stderr[-1000:]}",
+                raw,
+            )
         try:
             envelope = json.loads(completed.stdout)
             if envelope.get("is_error"):

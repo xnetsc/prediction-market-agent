@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import threading
 import time
 from pathlib import Path
 from typing import Any
@@ -13,9 +14,7 @@ class SessionMemory:
     def __init__(self, path: Path):
         self.path = path
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        self.connection = sqlite3.connect(path)
-        self.connection.execute("PRAGMA journal_mode=WAL")
-        self.connection.execute("PRAGMA synchronous=FULL")
+        self._local = threading.local()
         tables = {
             row[0]
             for row in self.connection.execute(
@@ -279,6 +278,27 @@ class SessionMemory:
             (int(time.time() * 1000), request_id),
         )
         self.connection.commit()
+
+    @property
+    def connection(self) -> sqlite3.Connection:
+        """One connection per thread, all onto the same file.
+
+        A single shared connection refuses every call from a thread other than the one that made
+        it, and this runs in several: each platform's loop, and the console serving pages. The
+        refusal was not loud - the cycle logged it and carried on with "stored measurements" - so
+        the robot reported itself as running while every review and every decision died on the way
+        in. WAL lets the readers proceed alongside the writer, and the busy timeout absorbs the
+        moment two of them want to write at once.
+        """
+        existing = getattr(self._local, "connection", None)
+        if existing is not None:
+            return existing
+        connection = sqlite3.connect(self.path, timeout=30)
+        connection.execute("PRAGMA journal_mode=WAL")
+        connection.execute("PRAGMA synchronous=FULL")
+        connection.execute("PRAGMA busy_timeout=30000")
+        self._local.connection = connection
+        return connection
 
     def record_turn(
         self,

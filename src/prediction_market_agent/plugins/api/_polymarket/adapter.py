@@ -317,6 +317,12 @@ class PolymarketApiPlugin:
             panel["builder_api_keys_error"] = str(error)[:300]
         return panel
 
+    def exportable_secrets(self) -> dict[str, str]:
+        try:
+            return self._write_transport.exportable_credentials()
+        except Exception as error:
+            return {"CLOB 凭据": f"读取失败：{str(error)[:200]}"}
+
     def create_builder_key(self, values: dict[str, Any]) -> dict[str, Any]:
         """Make the key and hand it back to be stored, because a key nobody kept is worse than none.
 

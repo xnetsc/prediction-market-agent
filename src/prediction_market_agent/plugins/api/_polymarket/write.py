@@ -297,12 +297,31 @@ class PolymarketWriteTransport:
         """
         client = self._require_client(for_trading=False)
         credentials = client.credentials
+        supplied = bool(str(self.settings.api_key).strip())
         return {
-            "wallet": str(client.wallet),
-            "wallet_type": str(client.wallet_type),
-            "credentials_source": "你填的" if str(self.settings.api_key).strip() else "由私钥派生",
-            "clob_api_key": getattr(credentials, "key", ""),
-            "gasless_ready": client.is_gasless_ready(),
+            "说明": "以下都是这个插件已经拿到的值。配置表单里对应的输入框是空的，那不是缺失——留空就是让插件自己算，算出来的就是这里显示的。",
+            "Funder 地址（即钱包地址）": str(client.wallet),
+            "钱包类型": str(client.wallet_type),
+            "CLOB API Key": str(getattr(credentials, "key", "")),
+            "CLOB API Secret": self._masked(getattr(credentials, "secret", "")),
+            "CLOB Passphrase": self._masked(getattr(credentials, "passphrase", "")),
+            "这些凭据从哪来": "你在配置里填的" if supplied else "由钱包私钥派生，每次连线都算得出同样的一套",
+            "免 gas 交易已就绪": client.is_gasless_ready(),
+        }
+
+    @staticmethod
+    def _masked(value: Any) -> str:
+        """Enough to recognise it by, not enough to use. The backup panel hands over the whole thing."""
+        text = str(value or "")
+        return f"{text[:6]}…{text[-4:]}（共 {len(text)} 位，完整值见「备份」）" if len(text) > 12 else ("（无）" if not text else "已设置")
+
+    def exportable_credentials(self) -> dict[str, str]:
+        """Everything derived, in full, for an operator who wants it outside this machine."""
+        credentials = self._require_client(for_trading=False).credentials
+        return {
+            "CLOB API Key": str(getattr(credentials, "key", "")),
+            "CLOB API Secret": str(getattr(credentials, "secret", "")),
+            "CLOB Passphrase": str(getattr(credentials, "passphrase", "")),
         }
 
     def builder_api_keys(self) -> list[dict[str, Any]]:

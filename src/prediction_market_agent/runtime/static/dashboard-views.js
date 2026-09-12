@@ -76,6 +76,47 @@ function configurationFieldsHtml(kind,name,fields){
     return primaryHtml+(advanced.length?'<details class="client-advanced-settings"><summary>客户端文件、登录与升级高级设置 · '+advanced.length+' 项</summary><div class="config-fields">'+advanced.map(f=>fieldHtml(kind,name,f)).join('')+'</div></details>':'');
 }
 
+/* Something a plugin needs a person for is worthless if the person is on another page.
+   Every plugin that can speak is asked directly - the framework has no idea what any of it
+   means and does not cache a judgement about it - and whatever comes back is listed here with
+   a link straight to the card that raised it. The banner is outside the per-view sections, so
+   it is on screen whichever page the operator is looking at. */
+async function refreshAttention(m){
+    const host=document.getElementById('attention');
+    if(!host)return;
+    const asks=[];
+    for(const kind of KINDS)for(const p of m.plugins[kind]||[]){
+        if(!p.enabled||!p.has_notices)continue;
+        asks.push(post('/api/plugins/notices',{kind,name:p.name})
+            .then(r=>({kind,plugin:p,notices:r.notices||[],error:r.error}))
+            .catch(e=>({kind,plugin:p,notices:[],error:e.message})));
+    }
+    const answers=await Promise.all(asks);
+    host.replaceChildren();
+    const items=[];
+    for(const a of answers){
+        const target='#plugin_'+a.kind+'_'+a.plugin.name;
+        if(a.error)items.push({target,label:a.plugin.name,title:'插件状态读取失败：'+a.error,act:false});
+        for(const n of a.notices)items.push({
+            target,label:a.plugin.name,title:n.title,
+            act:Boolean(n.action_label||n.dismiss_label),
+        });
+    }
+    host.hidden=!items.length;
+    if(!items.length)return;
+    const actionable=items.filter(i=>i.act).length;
+    const head=controlNode('div','',host);head.className='attention-head';
+    controlNode('strong',actionable?'有 '+actionable+' 件事需要你处理':'有 '+items.length+' 条插件消息',head);
+    controlNode('span',actionable&&actionable<items.length?'另有 '+(items.length-actionable)+' 条只是通知':'',head).className='muted';
+    const list=controlNode('ul','',host);list.className='attention-list';
+    for(const item of items){
+        const row=controlNode('li','',list);
+        controlNode('span',item.label+' · '+item.title,row);
+        const go=controlNode('a',item.act?'去处理 →':'去查看 →',row);
+        go.href=item.target;go.className='attention-go';
+    }
+}
+
 function renderManager(m) {
     LAST_MANAGER=m;
     // The provider form has only one DOM instance, even when reached from two pages.
@@ -83,6 +124,7 @@ function renderManager(m) {
     const manager=document.getElementById('pluginManager');manager.replaceChildren();
     document.getElementById('pluginCategoryHome').innerHTML='<h3>给机器人选择扩展能力</h3><p class="muted">交易平台、策略、研究，以及 Agent 行为风控和业务风控这两类过滤插件，都在这里管理。AI 账号、兼容 API、模型与调用顺序统一放在左侧“模型服务”，不在插件中心重复出现。</p>'+processStrip(['平台发现市场','策略 + 模型分析','工具补充证据','行为与风控检查','平台执行'])+'<div class="category-grid">'+PLUGIN_CENTER_KINDS.map(kind=>{const h=CATEGORY_HELP[kind],all=m.plugins[kind]||[],on=all.filter(p=>p.enabled).length;return '<a class="category-tile" href="#plugins/'+kind+'"><span class="eyebrow">'+esc(on+' / '+all.length+' 已启用')+'</span><h4>'+h.title+' <span aria-hidden="true">→</span></h4><p>'+h.role+'</p></a>'}).join('')+'</div>';
     document.getElementById('pluginCategoryNav').innerHTML='<a href="#plugins">全部分类</a>'+PLUGIN_CENTER_KINDS.map(k=>'<a href="#plugins/'+k+'">'+LABELS[k]+'</a>').join('');
+    refreshAttention(m);
     for(const kind of KINDS){
         const parent=kind==='decision_provider'?document.getElementById('modelConfigurations'):manager;
         const group=controlNode('div','',parent);group.id='category_'+kind;group.className='plugin-category';group.dataset.kind=kind;
@@ -503,7 +545,24 @@ async function renderPluginNotices(card,kind,plugin){
                     const values={};for(const [name,input] of inputs)values[name]=input.value;
                     const answer=await post('/api/plugins/notices/action',{kind,name:plugin.name,key:notice.key,action,values});
                     setOperationStatus(status,answer.message||(answer.ok?'完成':'未完成'),answer.ok?'':'danger');
-                    if(answer.ok)renderPluginNotices(card,kind,plugin),host.remove();
+                    /* Some answers are the point of pressing the button, not a report on it.
+                       A plugin that returns `reveal` has produced something the operator has to
+                       read and keep, so it is shown where it can be selected and copied - and the
+                       refresh that would redraw this card is skipped, because redrawing it is what
+                       used to make the answer vanish the instant it arrived. */
+                    if(answer.reveal){
+                        const shown=controlNode('div','',box);shown.className='notice-reveal';
+                        const text=controlNode('pre',String(answer.reveal),shown);
+                        text.className='notice-content';text.tabIndex=0;
+                        const copy=controlNode('button','复制',shown);
+                        copy.onclick=async()=>{
+                            try{await navigator.clipboard.writeText(String(answer.reveal));copy.textContent='已复制'}
+                            catch(e){getSelection().selectAllChildren(text);copy.textContent='已选中，按 Cmd/Ctrl+C'}
+                        };
+                        button.disabled=false;return;
+                    }
+                    if(answer.ok){renderPluginNotices(card,kind,plugin);host.remove()}
+                    if(LAST_MANAGER)refreshAttention(LAST_MANAGER);
                 }catch(e){setOperationStatus(status,e.message,'danger')}
                 button.disabled=false;
             };
