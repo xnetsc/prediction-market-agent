@@ -169,9 +169,38 @@ TRADE_CONTROL_MISSION = (
 )
 
 
-def _final_prompt(payload: dict[str, Any], mission: str, instructions: str) -> str:
+AGENT_LANGUAGES = {
+    "en": "",
+    "zh": (
+        "\n\nWRITE FOR THE PERSON READING THIS\n"
+        "Every piece of prose you produce - the rationale, the reason on a selection, why you "
+        "skipped a round, why you want funds, the note on an answer you give back - is written in "
+        "Simplified Chinese (简体中文). It is read by the operator, who reads Chinese, and a "
+        "rationale they cannot read is a rationale that was never given.\n"
+        "This is about prose only. Field names, enum values (BUY, SELL, HOLD, CANCEL, MARKET, "
+        "LIMIT), tool names, ids, symbols, URLs and every number stay exactly as the schema "
+        "defines them - translating any of those breaks the thing that reads your answer. Quote a "
+        "market's own wording in its own language; resolution criteria settle on what they say, "
+        "not on a translation of it."
+    ),
+}
+"""What language the model writes its human-readable text in, keyed by the configured setting.
+
+Only prose. The strategy text, the tool contracts and the schemas stay in English because they are
+instructions to a model, not something an operator reads - and a runtime that translated its own
+enum values would stop being able to parse its own answers.
+"""
+
+
+def language_directive(language: str) -> str:
+    return AGENT_LANGUAGES.get(str(language or "").lower(), "")
+
+
+def _final_prompt(
+    payload: dict[str, Any], mission: str, instructions: str, preamble: str = SYSTEM_INSTRUCTIONS
+) -> str:
     return (
-        f"{SYSTEM_INSTRUCTIONS}\n\n{mission}"
+        f"{preamble}\n\n{mission}"
         + instructions
         + "\n\nINPUT_JSON:\n"
         + json.dumps(payload, ensure_ascii=False, sort_keys=True)
@@ -188,9 +217,10 @@ def _control_prompt(
     tools: dict[str, Any],
     mission: str = TRADE_CONTROL_MISSION,
     instructions: str | None = None,
+    preamble: str = SYSTEM_INSTRUCTIONS,
 ) -> str:
     return (
-        f"{SYSTEM_INSTRUCTIONS}\n\n{mission} arguments_json must encode a JSON object; use '{{}}' "
+        f"{preamble}\n\n{mission} arguments_json must encode a JSON object; use '{{}}' "
         "when there are no arguments. Do not repeat failed or redundant work."
         + (_strategy_instructions(payload) if instructions is None else instructions)
         + "\n\nAVAILABLE_TOOLS:\n"
@@ -208,6 +238,9 @@ class AgentDecisionProvider:
         self.name = backend.name
         self.max_tool_steps = config.agent_max_tool_steps
         self.tool_result_chars = config.agent_tool_result_chars
+        # Appended to the preamble every prompt shares, so one setting reaches the decision, the
+        # discovery round, the funding request an operator will read, and any question put back.
+        self.preamble = SYSTEM_INSTRUCTIONS + language_directive(config.agent_language)
 
     def _record(self, recorder: Callable[..., None] | None, **values: Any) -> None:
         if recorder is not None:
@@ -246,7 +279,7 @@ class AgentDecisionProvider:
                     backend=self.backend,
                     payload=payload,
                     trace=trace,
-                    preamble=SYSTEM_INSTRUCTIONS,
+                    preamble=self.preamble,
                     instructions=(
                         _strategy_instructions(payload) if instructions is None else instructions
                     ),
@@ -260,7 +293,9 @@ class AgentDecisionProvider:
             try:
                 for index in range(steps):
                     final_index = index + 1
-                    prompt = _control_prompt(payload, trace, tools, control_mission, instructions)
+                    prompt = _control_prompt(
+                        payload, trace, tools, control_mission, instructions, self.preamble
+                    )
                     step_input = {"prompt": prompt, "trace": trace}
                     try:
                         response = self.backend.complete(
@@ -355,7 +390,7 @@ class AgentDecisionProvider:
             "tool_budget_exhausted": bool(tool_executor is not None and len(trace) >= steps),
         }
         resolved = _strategy_instructions(final_input) if instructions is None else instructions
-        prompt = _final_prompt(final_input, mission, resolved)
+        prompt = _final_prompt(final_input, mission, resolved, self.preamble)
         try:
             response = self.backend.complete(prompt, schema, schema_name)
             if validate is not None:

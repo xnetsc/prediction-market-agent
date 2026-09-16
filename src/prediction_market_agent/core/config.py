@@ -100,6 +100,13 @@ APPLICATION_FIELDS = (
         "从 Passkey 登录时刻计算的绝对上限，到期后无论是否持续操作都必须重新登录。", 168, 1, 720,
     ),
     ApplicationConfigField(
+        "agent_language", "决策依据语言", "enum",
+        "模型写给人看的文字用哪种语言：决策理由、选中某个标的的原因、这一轮为什么跳过、为什么要资金、"
+        "答复里给你的说明。只影响这些文字——字段名、BUY/SELL/HOLD 这类取值、工具名、ID、代号和数字一律不变，"
+        "翻译它们会让程序读不懂自己的答案。标的自身的措辞按原文引用，因为结算认的是原文不是译文。",
+        "zh", options=("zh", "en"),
+    ),
+    ApplicationConfigField(
         "paper_trading", "纸面交易模式", "enum",
         "开启后，除了真正的买卖，一切都按真实情况走：真实平台、真实价格、真实模型、真实结算判定。"
         "订单不会发到平台，而是按平台当时报出的价格和费率在本地成交，持仓、现金和已实现盈亏照常记账，"
@@ -282,6 +289,9 @@ class Config:
     working_directory: Path = Path(".")
     decision_providers: tuple[str, ...] = ()
 
+    agent_language: str = "zh"
+    """Which language the model writes its human-readable text in. Prose only, never the schema."""
+
     paper_trading: bool = False
     """Whether orders stop at the door and are filled locally instead of at the venue."""
 
@@ -326,6 +336,7 @@ class Config:
         cfg = cls(
             working_directory=working_directory,
             decision_providers=managed.selected("decision_provider", ()),
+            agent_language=str(values["agent_language"]),
             paper_trading=str(values["paper_trading"]) == "on",
             paper_trading_funds=float(values["paper_trading_funds"]),
             agent_max_tool_steps=int(values["agent_max_tool_steps"]),
