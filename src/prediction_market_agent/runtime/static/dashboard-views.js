@@ -491,9 +491,42 @@ function activateChoiceLists(){
     }
 }
 
+/* Three kinds of row answer three different questions, and mixing them serves none of them.
+   What did it decide, what is it doing right now, and what broke - the default is the first,
+   because that is what the ledger is for. The counts are shown on every tab so an empty default
+   is read as "nothing concluded yet" rather than as a dead robot. */
+let LEDGER_TAB='concluded';
+const LEDGER_TAB_NOTE={
+    concluded:'每一条都是一次得出结论的判断（观望、买入、卖出、规则拒绝）。结论不等于成交。',
+    running:'模型正在分析、还没有结论的记录。这些不能删除——运行中的代码还要把结论写回去。',
+    failed:'没能得出结论的记录：模型调用失败、执行失败。它们会拉低 provider 排名，确认无用后可以删掉。',
+};
+
+function selectLedgerTab(group){
+    LEDGER_TAB=group;
+    for(const tab of document.querySelectorAll('.ledger-tabs [role="tab"]'))
+        tab.setAttribute('aria-selected',String(tab.dataset.group===group));
+    document.getElementById('ledgerTabNote').textContent=LEDGER_TAB_NOTE[group]||'';
+    refreshAudit();
+}
+
+async function refreshLedgerTabCounts(platformQuery){
+    /* Asked per tab rather than derived from the page: the page holds one tab's rows, and a count
+       taken from those would only ever say how many of them are on screen. */
+    for(const group of ['concluded','running','failed']){
+        const node=document.getElementById('tabCount_'+group);
+        if(!node)continue;
+        try{
+            const answer=await get('/api/decisions?limit=200&group='+group+platformQuery);
+            const total=(answer.items||[]).length;
+            node.textContent=total>=200?'200+':String(total);
+        }catch(e){node.textContent=''}
+    }
+}
+
 function renderDecisionLedger(rows){
     const root=document.getElementById('decisions');
-    if(!rows.length){root.innerHTML='<div class="empty-state"><strong>还没有符合条件的决策</strong><p>配置模型和平台后，机器人收到市场事件才会形成记录。也可以清空筛选重新查询。</p><a href="#overview">查看运行状态 →</a></div>';return}
+    if(!rows.length){root.innerHTML='<div class="empty-state"><strong>'+esc({concluded:'还没有得出结论的记录',running:'此刻没有正在分析的记录',failed:'没有出错的记录'}[LEDGER_TAB]||'还没有符合条件的决策')+'</strong><p>'+esc({concluded:'机器人可能正在分析，或者这一轮没有标的通过筛选。看看「分析中」和「出错」两个标签。',running:'没有正在跑的分析——上一轮已经结束，下一轮还没开始。',failed:'一次都没失败过，或者失败记录已经被删掉了。'}[LEDGER_TAB]||'配置模型和平台后，机器人收到市场事件才会形成记录。')+'</p><a href="#overview">查看运行状态 →</a></div>';return}
     const opened=new Set([...root.querySelectorAll('details.decision-entry[open]')].map(e=>e.dataset.id));
     const filter=document.getElementById('statusFilter');
     for(const row of rows)if(row.status&&![...filter.options].some(o=>o.value===row.status)){const option=controlNode('option',decisionStatusTitle(row.status),filter);option.value=row.status}

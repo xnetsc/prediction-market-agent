@@ -76,3 +76,10 @@ dialog{background:var(--surface)!important;color:var(--ink)!important;border:1px
 .decision-forget{margin-left:auto;border:none;background:none;color:var(--muted,#888);font-size:1.1rem;line-height:1;padding:0 .35rem;cursor:pointer;opacity:.35;transition:opacity .15s,color .15s}
 .decision-entry:hover .decision-forget,.decision-forget:focus-visible{opacity:1}
 .decision-forget:hover{color:var(--danger,#c0392b);opacity:1}
+
+/* Ledger tabs. The selected one carries the weight; the counts stay quiet so a tab with nothing
+   in it reads as an answer rather than as an error. */
+.ledger-tabs{display:flex;gap:.25rem;margin:0 0 .25rem;flex-wrap:wrap}
+.ledger-tabs button{border:1px solid transparent;border-bottom:2px solid transparent;background:none;padding:.4rem .75rem;cursor:pointer;font:inherit;color:var(--muted,#666)}
+.ledger-tabs button[aria-selected="true"]{color:inherit;font-weight:600;border-bottom-color:currentColor}
+.tab-count{opacity:.55;font-weight:400;font-size:.9em}

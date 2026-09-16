@@ -755,3 +755,96 @@ class OneBadCandidateDoesNotEndTheRoundTests(unittest.TestCase):
         candidates = provider.requests[0]["candidates"]
         self.assertTrue(all(not item.get("verified") for item in candidates))
         self.assertTrue(any("lookup_error" in item for item in candidates))
+
+
+class TheAgentSetsTheNextLookTests(unittest.TestCase):
+    """When to come back and what to look for are judgements about the venue, not constants."""
+
+    def setUp(self) -> None:
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.memory = SessionMemory(Path(self.temp.name) / "m.sqlite3")
+
+    class _Planner(RecordingProvider):
+        plan = {"next_scan_seconds": 900, "next_survey_queries": ["fed decision"],
+                "pacing_reason": "nothing due here until Thursday"}
+
+        def run(self, payload, **options):
+            super().run(payload, **options)
+            head = (payload.get("candidates") or [])[:1]
+            return AgentRunResult(
+                value={
+                    "selections": [
+                        {"topic_id": item["topic_id"], "reason": "r", "priors": []}
+                        for item in head
+                    ],
+                    "skipped_reason": "",
+                    **self.plan,
+                },
+                raw_output="{}", provider="planner", research_trace=[],
+            )
+
+    def _engine(self, provider):
+        return DiscoveryEngine(
+            memory=self.memory, provider=provider, strategy=BuiltInMarketDiscovery(),
+            evolution_enabled=True,
+        )
+
+    def test_the_schema_asks_for_both(self) -> None:
+        from prediction_market_agent.runtime.market_discovery import DISCOVERY_SCHEMA
+
+        for field in ("next_scan_seconds", "next_survey_queries", "pacing_reason"):
+            self.assertIn(field, DISCOVERY_SCHEMA["required"])
+
+    def test_what_it_asked_for_is_kept(self) -> None:
+        self._engine(self._Planner()).discover(
+            platform="fake", plugin=FakePlugin(20), maximum_topics=2
+        )
+        plan = self.memory.survey_plan("fake")
+        self.assertEqual(plan["next_scan_seconds"], 900)
+        self.assertEqual(plan["queries"], ["fed decision"])
+        self.assertIn("Thursday", plan["reason"])
+
+    def test_the_next_survey_looks_for_what_it_named(self) -> None:
+        plugin = FakePlugin(20)
+        asked: list[str] = []
+        plugin.search_market_candidates = lambda query, limit: asked.append(query) or []
+        self.memory.save_survey_plan(
+            platform="fake", queries=["opec meeting"], next_scan_seconds=0, reason="",
+        )
+        self._engine(RecordingProvider()).discover(
+            platform="fake", plugin=plugin, maximum_topics=2
+        )
+        self.assertEqual(asked, ["opec meeting"])
+
+    def test_a_query_that_finds_nothing_leaves_the_round_intact(self) -> None:
+        plugin = FakePlugin(20)
+        plugin.search_market_candidates = lambda query, limit: []
+        self.memory.save_survey_plan(
+            platform="fake", queries=["nothing matches this"], next_scan_seconds=0, reason="",
+        )
+        selected = self._engine(RecordingProvider()).discover(
+            platform="fake", plugin=plugin, maximum_topics=2
+        )
+        self.assertTrue(selected, "the listing must still be surveyed")
+
+    def test_a_failing_search_does_not_end_the_round(self) -> None:
+        plugin = FakePlugin(20)
+
+        def explode(query, limit):
+            raise RuntimeError("search endpoint is down")
+
+        plugin.search_market_candidates = explode
+        self.memory.save_survey_plan(
+            platform="fake", queries=["anything"], next_scan_seconds=0, reason="",
+        )
+        self.assertTrue(
+            self._engine(RecordingProvider()).discover(
+                platform="fake", plugin=plugin, maximum_topics=2
+            )
+        )
+
+    def test_the_strategy_explains_that_it_cannot_ask_to_come_back_sooner(self) -> None:
+        text = BuiltInMarketDiscovery().instructions
+        self.assertIn("SET THE NEXT LOOK", text)
+        self.assertIn("never to come back sooner", text)

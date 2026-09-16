@@ -42,6 +42,8 @@ class PolymarketEventLoop:
         callback = services.get("submit_scan")
         if not callable(callback):
             raise ValueError("Polymarket runtime requires a callable submit_scan service")
+        # Optional: a plugin that never asks keeps its fixed interval and nothing changes.
+        pacing = services.get("next_scan_delay")
         discover = services.get("discover_markets")
         if not callable(discover):
             raise ValueError("Polymarket runtime requires a callable discover_markets service")
@@ -53,7 +55,7 @@ class PolymarketEventLoop:
             self._status.update({"running": True, "last_error": ""})
             self._thread = threading.Thread(
                 target=self._run,
-                args=(callback, discover, settings),
+                args=(callback, discover, settings, pacing),
                 name="prediction-polymarket-runtime",
                 daemon=True,
             )
@@ -64,6 +66,7 @@ class PolymarketEventLoop:
         callback: Callable[..., object],
         discover: Callable[..., Any],
         settings: PolymarketPluginConfig,
+        pacing: Callable[..., dict] | None = None,
     ) -> None:
         consecutive_failures = 0
         try:
@@ -74,7 +77,20 @@ class PolymarketEventLoop:
                     topics = discover(settings.max_topics_per_cycle)
                     callback(topics, settings.max_decisions_per_cycle)
                     consecutive_failures = 0
+                    # The configured interval is how often this plugin is willing to be asked, not
+                    # how often there is anything worth looking at. How fast this venue actually
+                    # moves is a judgement about it right now, and the agent has just read it - so
+                    # it may ask to wait longer. It cannot ask to come back sooner: that bound is
+                    # this plugin's to keep.
                     delay = settings.scan_interval_seconds
+                    if callable(pacing):
+                        try:
+                            answer = pacing(settings.scan_interval_seconds)
+                            delay = max(
+                                settings.scan_interval_seconds, int(answer.get("seconds", delay))
+                            )
+                        except Exception:
+                            delay = settings.scan_interval_seconds
                     with self._lock:
                         self._status["cycles"] = int(self._status["cycles"]) + 1
                         self._status["last_error"] = ""

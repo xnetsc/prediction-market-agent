@@ -116,7 +116,10 @@ APPLICATION_FIELDS = (
     ),
     ApplicationConfigField(
         "agent_max_tool_steps", "Agent 工具步骤上限", "integer",
-        "每次最终决策前允许 Agent 自主调用研究工具的最大次数。", 4, 0, 12,
+        "每次最终决策前允许 Agent 自主调用研究工具的最大次数。它手上有二十多个工具（盘口、K 线、跨平台比价、"
+        "网页搜索、抓取页面、历史召回、查账），四步连把结算条款读完都不够，于是结论会普遍变成「信息不足，"
+        "所以观望」——那不是判断，是没得查。调高会让每次决策更慢、更贵，但研究本来就是用来消除「信息不足」的。",
+        12, 0, 40,
     ),
     ApplicationConfigField(
         "agent_tool_result_chars", "单次工具结果字符上限", "integer",
@@ -285,7 +288,7 @@ class Config:
     paper_trading_funds: float = 0.0
     """What the account is told it holds while paper trading. Meaningless when that is off."""
 
-    agent_max_tool_steps: int = 4
+    agent_max_tool_steps: int = 12
     agent_tool_result_chars: int = 12_000
     context_window_chars: int = 60_000
     history_per_market: int = 12
@@ -373,8 +376,8 @@ class Config:
         PluginDirectoryConfig.load(
             self.plugin_directories_file, working_directory=self.working_directory
         )
-        if not 0 <= self.agent_max_tool_steps <= 12:
-            raise ValueError("agent_max_tool_steps must be in [0, 12]")
+        if not 0 <= self.agent_max_tool_steps <= 40:
+            raise ValueError("agent_max_tool_steps must be in [0, 40]")
         if self.agent_tool_result_chars < 1000:
             raise ValueError("agent_tool_result_chars must be at least 1000")
         if self.context_window_chars < 4_000:

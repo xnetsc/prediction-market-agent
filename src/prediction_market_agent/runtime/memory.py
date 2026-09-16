@@ -173,6 +173,13 @@ class SessionMemory:
                 ON discovery_selections(platform, market_topic_id, selected_at DESC);
             CREATE INDEX IF NOT EXISTS idx_discovery_selection_review
                 ON discovery_selections(reviewed_at, selected_at);
+            CREATE TABLE IF NOT EXISTS survey_plans (
+                platform TEXT PRIMARY KEY,
+                queries_json TEXT NOT NULL DEFAULT '[]',
+                next_scan_seconds INTEGER NOT NULL DEFAULT 0,
+                reason TEXT NOT NULL DEFAULT '',
+                updated_at INTEGER NOT NULL
+            );
             CREATE TABLE IF NOT EXISTS discovery_priors (
                 strategy TEXT NOT NULL,
                 prior_id TEXT NOT NULL,
@@ -790,6 +797,28 @@ class SessionMemory:
                 continue
         return results
 
+    FAILED_STATUSES = frozenset({"PROVIDER_ERROR", "EXECUTION_ERROR", "ERROR", "FAILED"})
+    """Statuses where the round did not reach a conclusion because something broke.
+
+    Kept apart from the rest because they answer a different question. A reader looking for what the
+    robot decided is not helped by a list of times a model timed out, and a reader debugging an
+    outage is not helped by scrolling past a hundred sound decisions to find the failures.
+    """
+
+    @classmethod
+    def decision_group(cls, status: str) -> str:
+        """Which of the three kinds a ledger row is: still running, broken, or concluded.
+
+        Defined once, next to the code that writes these statuses, so the page and anything else
+        reading the ledger cannot drift into disagreeing about what a row means.
+        """
+        value = str(status or "").upper()
+        if value == cls.IN_PROGRESS:
+            return "running"
+        if value in cls.FAILED_STATUSES:
+            return "failed"
+        return "concluded"
+
     IN_PROGRESS = "STARTED"
     """The status a decision carries while the code that opened it is still running.
 
@@ -1095,6 +1124,55 @@ class SessionMemory:
             }
             for provider, entry in totals.items()
             if entry["reviews"]
+        }
+
+    def save_survey_plan(
+        self, *, platform: str, queries: list[str], next_scan_seconds: int, reason: str
+    ) -> None:
+        """Keep what the agent asked for next, so the plan outlives the round that made it.
+
+        Held in the database rather than in the process because a plan that vanishes on restart
+        reverts the robot to the fixed cadence and the fixed listing without saying so - and the
+        symptom of that, a survey quietly back to its defaults, is indistinguishable from the agent
+        having asked for the defaults.
+        """
+        self.connection.execute(
+            """
+            INSERT INTO survey_plans(platform, queries_json, next_scan_seconds, reason, updated_at)
+            VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(platform) DO UPDATE SET
+                queries_json = excluded.queries_json,
+                next_scan_seconds = excluded.next_scan_seconds,
+                reason = excluded.reason,
+                updated_at = excluded.updated_at
+            """,
+            (
+                str(platform),
+                json.dumps([str(item) for item in queries][:8], ensure_ascii=False),
+                max(0, int(next_scan_seconds)),
+                str(reason)[:400],
+                int(time.time() * 1000),
+            ),
+        )
+        self.connection.commit()
+
+    def survey_plan(self, platform: str) -> dict[str, Any]:
+        row = self.connection.execute(
+            "SELECT queries_json, next_scan_seconds, reason, updated_at"
+            " FROM survey_plans WHERE platform = ?",
+            (str(platform),),
+        ).fetchone()
+        if row is None:
+            return {"queries": [], "next_scan_seconds": 0, "reason": "", "updated_at": 0}
+        try:
+            queries = json.loads(row[0])
+        except json.JSONDecodeError:
+            queries = []
+        return {
+            "queries": [str(item) for item in queries] if isinstance(queries, list) else [],
+            "next_scan_seconds": int(row[1]),
+            "reason": str(row[2]),
+            "updated_at": int(row[3]),
         }
 
     def load_discovery_priors(self, strategy: str) -> list[dict[str, Any]]:

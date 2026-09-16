@@ -1,6 +1,7 @@
 import json
 
 from ._support import *
+from prediction_market_agent.core.config import APPLICATION_FIELDS
 
 class ConfigurationTests(unittest.TestCase):
     def test_platform_credentials_are_plugin_private_and_manifests_are_redacted(self) -> None:
@@ -67,7 +68,11 @@ class ConfigurationTests(unittest.TestCase):
             )
             self.assertTrue(field["configured"])
             store.reset(["agent_max_tool_steps"])
-            self.assertEqual(store.values()["agent_max_tool_steps"], 4)
+            default = next(
+                item.default for item in APPLICATION_FIELDS
+                if item.name == "agent_max_tool_steps"
+            )
+            self.assertEqual(store.values()["agent_max_tool_steps"], default)
             self.assertFalse(store.path.exists())
 
     def test_financial_limits_are_not_generic_config_fields(self) -> None:

@@ -227,12 +227,33 @@ class RobotRuntimeManager:
                                 )
                             )
 
+                        def next_scan_delay(
+                            minimum_seconds: int, *, platform: str = name
+                        ) -> dict[str, Any]:
+                            """What the agent asked for after its last look at this platform.
+
+                            When to come back is a judgement about this venue right now - how fast
+                            its prices move, whether a catalyst is due - and the agent is the only
+                            thing here that has just read it. The plugin still owns the decision:
+                            this is a request, its own interval is the floor, and a plugin that
+                            does not ask never hears about it.
+                            """
+                            plan = engine.memory.survey_plan(platform)
+                            requested = int(plan.get("next_scan_seconds", 0) or 0)
+                            return {
+                                "seconds": max(int(minimum_seconds), requested),
+                                "requested_seconds": requested,
+                                "minimum_seconds": int(minimum_seconds),
+                                "reason": str(plan.get("reason", "")),
+                            }
+
                         try:
                             spec.runtime.start(
                                 {
                                     "platform": name,
                                     "submit_scan": submit_scan,
                                     "discover_markets": discover_markets,
+                                    "next_scan_delay": next_scan_delay,
                                 }
                             )
                             runtime_status = spec.runtime.status()

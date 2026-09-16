@@ -48,8 +48,18 @@ DISCOVERY_SCHEMA: dict[str, Any] = {
             },
         },
         "skipped_reason": {"type": "string", "maxLength": 400},
+        "next_scan_seconds": {"type": "integer", "minimum": 0, "maximum": 86400},
+        "next_survey_queries": {
+            "type": "array",
+            "maxItems": 8,
+            "items": {"type": "string", "minLength": 1, "maxLength": 120},
+        },
+        "pacing_reason": {"type": "string", "maxLength": 300},
     },
-    "required": ["selections", "skipped_reason"],
+    "required": [
+        "selections", "skipped_reason", "next_scan_seconds", "next_survey_queries",
+        "pacing_reason",
+    ],
 }
 
 DISCOVERY_MISSION = (
@@ -160,6 +170,44 @@ class DiscoveryEngine:
             if not page.has_more or not page.topics:
                 break
             offset = page.next_offset
+        return self._with_requested(plugin, topics, budget)
+
+    def _with_requested(
+        self,
+        plugin: PredictionMarketApiPlugin,
+        topics: list[Topic],
+        budget: DiscoveryBudget,
+    ) -> list[Topic]:
+        """Add what the agent asked to look for, alongside what the venue happens to list first.
+
+        The listing is one fixed opinion - most traded first - and a robot that only ever sees that
+        can only ever find something there. What is worth looking at is a judgement about the
+        moment: a catalyst due this week, a category that moved, a question it saw quoted elsewhere.
+        Asking is free; it already reads this platform every round.
+
+        These are added to the listing, never instead of it. A query that finds nothing leaves the
+        round exactly as it was.
+        """
+        queries = self.memory.survey_plan(plugin.name).get("queries") or []
+        if not queries:
+            return topics
+        seen = {topic.topic_id for topic in topics}
+        for query in queries:
+            if len(topics) >= budget.survey_topics:
+                break
+            try:
+                found = plugin.search_market_candidates(query, budget.shortlist_topics)
+            except Exception as error:
+                LOGGER.warning("requested survey %r failed on %s: %s", query, plugin.name, error)
+                continue
+            for candidate in found:
+                topic = getattr(candidate, "topic", None)
+                if topic is None or topic.topic_id in seen:
+                    continue
+                seen.add(topic.topic_id)
+                topics.append(topic)
+                if len(topics) >= budget.survey_topics:
+                    break
         return topics
 
     def _prior_weights(self) -> dict[str, float]:
@@ -502,6 +550,18 @@ class DiscoveryEngine:
             )
         selections = [item for item in result.value.get("selections", []) if isinstance(item, dict)]
         skipped_reason = str(result.value.get("skipped_reason", ""))
+        # How soon to come back and what to go looking for are judgements about this platform right
+        # now - how fast its prices move, what catalyst is due - and the only thing here that has
+        # looked at that is the agent that just read it.
+        self.memory.save_survey_plan(
+            platform=platform,
+            queries=[
+                str(item) for item in result.value.get("next_survey_queries", [])
+                if str(item).strip()
+            ],
+            next_scan_seconds=int(result.value.get("next_scan_seconds", 0) or 0),
+            reason=str(result.value.get("pacing_reason", "")),
+        )
         self.memory.complete_decision(
             decision_id,
             provider=result.provider,

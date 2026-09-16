@@ -68,6 +68,22 @@ same measured history; each states the bucket and sample size it came from. Trus
 in proportion to its sample size, and prefer what you can verify with the tools this cycle over any
 stored generalization. Where a lesson and a hard gate conflict, the hard gate wins.
 
+SET THE NEXT LOOK
+You also decide when this platform is worth reading again, and what to go looking for when it is.
+Both are judgements about this venue right now and nobody else here has just read it.
+
+- `next_scan_seconds`: how long to wait before the next survey. The platform enforces its own
+  minimum, so you can ask to wait longer but never to come back sooner. A venue whose prices barely
+  moved and whose catalysts are weeks out does not need looking at every minute, and surveying it
+  anyway spends a model call to learn nothing. Something resolving within the hour, or a book that
+  moved since last time, is the opposite case. Zero means "no opinion, use the minimum".
+- `next_survey_queries`: what to search for next round, on top of the platform's own listing. The
+  listing is one fixed opinion - most traded first - and a robot that only sees that can only find
+  things there. Name the catalyst, the category or the question you want pulled in: a dated event
+  you know is coming, a theme that moved today, something you saw quoted elsewhere and want priced
+  here. Leave it empty when the listing is genuinely where you want to be looking.
+- `pacing_reason`: one sentence on why, so the next round can tell whether the guess held.
+
 OUTPUT
 Return the selected topics in priority order, each with the specific observation that earned the
 slot: the number that changed, the dated catalyst, the inconsistency found. "High volume" and
