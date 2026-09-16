@@ -166,7 +166,7 @@ APPLICATION_FIELDS = (
     ),
     ApplicationConfigField(
         "dashboard_refresh_seconds", "界面刷新间隔（秒）", "integer",
-        "决策和运行状态在浏览器中的自动刷新间隔。", 5, 1, 300,
+        "运行状态和插件状态在浏览器中的自动刷新间隔。决策账本不在其中——它是只写历史，写完不会变，由页面顶部的刷新按钮手动读取，免得在你读的时候把展开的记录收起来。", 5, 1, 300,
     ),
     ApplicationConfigField(
         "environment_probe_services", "公网出口查询服务 JSON", "string",
