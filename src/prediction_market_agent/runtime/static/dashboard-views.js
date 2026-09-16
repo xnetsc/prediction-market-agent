@@ -502,6 +502,87 @@ const LEDGER_TAB_NOTE={
     failed:'没能得出结论的记录：模型调用失败、执行失败。它们会拉低 provider 排名，确认无用后可以删掉。',
 };
 
+/* The ledger is append-only history and nothing on it changes once written, so it is read when
+   asked and never on a timer - a periodic rebuild only ever cost the reader the panel they had
+   open and the place they were scrolled to. What a manual refresh must still not lose is that
+   same state, so the open JSON blocks are carried across it. */
+const OPEN_DETAILS=new Set();
+
+/* Ten to start, five at a time after that. The page used to fetch a hundred rows - each one
+   carrying its whole context, research trace and raw model output - before it could draw anything,
+   which is why it sat blank long enough to look empty. Almost nobody reads past the first few. */
+const LEDGER_FIRST_PAGE=10;
+const LEDGER_PAGE=5;
+let LEDGER_QUERY='';
+let LEDGER_LOADED=0;
+let LEDGER_EXHAUSTED=false;
+let LEDGER_FETCHING=false;
+let LEDGER_WATCHER=null;
+
+/* Which way the reader is going. The sentinel keeps intersecting while they scroll back up through
+   what they just loaded, and fetching - never mind animating a placeholder - because somebody is
+   reading upward is the opposite of what they asked for. Older rows are wanted on the way down. */
+let LEDGER_SCROLL_DOWN=true;
+let LEDGER_LAST_SCROLL=typeof window==='undefined'?0:window.scrollY;
+
+function watchLedgerScrollDirection(){
+    if(typeof window==='undefined'||window.__ledgerScrollWatched)return;
+    window.__ledgerScrollWatched=true;
+    window.addEventListener('scroll',()=>{
+        const position=window.scrollY;
+        if(position===LEDGER_LAST_SCROLL)return;
+        LEDGER_SCROLL_DOWN=position>LEDGER_LAST_SCROLL;
+        LEDGER_LAST_SCROLL=position;
+        if(!LEDGER_SCROLL_DOWN)clearLedgerSkeleton();
+    },{passive:true});
+}
+
+function skeletonRowsHtml(count){
+    /* Placed where the rows will actually appear, and shaped like them - a spinner somewhere else
+       on the page tells you something is happening but not where, and the reader is already looking
+       at the gap the new rows will fill. */
+    return '<div class="decision-skeleton" aria-hidden="true">'
+        + Array.from({length: count}, () =>
+            '<div class="skeleton-entry"><span class="skeleton-bar meta"></span>'
+            + '<span class="skeleton-bar title"></span>'
+            + '<span class="skeleton-bar reason"></span></div>').join('')
+        + '</div>';
+}
+
+function showLedgerSkeleton(count){
+    const more=document.getElementById('ledgerMore');
+    if(!more)return;
+    more.insertAdjacentHTML('beforebegin', skeletonRowsHtml(count));
+}
+
+function clearLedgerSkeleton(){
+    for(const node of document.querySelectorAll('#decisions .decision-skeleton'))node.remove();
+}
+
+function rememberOpenDetails(){
+    /* Only the inner JSON blocks: the entry's own state is carried by `opened` below. */
+    OPEN_DETAILS.clear();
+    for(const node of document.querySelectorAll('#decisions [data-detail-key]'))
+        if(node.open)OPEN_DETAILS.add(String(node.dataset.detailKey));
+}
+
+function setLedgerLoading(busy){
+    /* Silence while a slow query runs reads as "there is nothing here", which is the one thing it
+       must not be mistaken for - especially on a page whose whole job is to show you that the
+       robot has been doing something. */
+    const root=document.getElementById('decisions');
+    if(!root)return;
+    if(busy){
+        root.setAttribute('aria-busy','true');
+        if(!root.querySelector('.decision-entry'))
+            root.innerHTML='<p class="muted">正在读取决策记录…</p>'+skeletonRowsHtml(LEDGER_FIRST_PAGE);
+        else root.classList.add('is-loading');
+    }else{
+        root.removeAttribute('aria-busy');
+        root.classList.remove('is-loading');
+    }
+}
+
 function selectLedgerTab(group){
     LEDGER_TAB=group;
     for(const tab of document.querySelectorAll('.ledger-tabs [role="tab"]'))
@@ -511,27 +592,81 @@ function selectLedgerTab(group){
 }
 
 async function refreshLedgerTabCounts(platformQuery){
-    /* Asked per tab rather than derived from the page: the page holds one tab's rows, and a count
-       taken from those would only ever say how many of them are on screen. */
-    for(const group of ['concluded','running','failed']){
-        const node=document.getElementById('tabCount_'+group);
-        if(!node)continue;
-        try{
-            const answer=await get('/api/decisions?limit=200&group='+group+platformQuery);
-            const total=(answer.items||[]).length;
-            node.textContent=total>=200?'200+':String(total);
-        }catch(e){node.textContent=''}
+    /* Counted in the database, in one request. Deriving it from the rows on screen would only say
+       how many are on screen, and fetching a page per tab to measure its length was most of the
+       reason this view took so long to appear. */
+    try{
+        const counts=await get('/api/decisions/counts?'+platformQuery.replace(/^&/,''));
+        for(const group of ['concluded','running','failed']){
+            const node=document.getElementById('tabCount_'+group);
+            if(node)node.textContent=String(counts[group]??'');
+        }
+    }catch(e){
+        for(const group of ['concluded','running','failed']){
+            const node=document.getElementById('tabCount_'+group);
+            if(node)node.textContent='';
+        }
     }
+}
+
+async function loadMoreDecisions(){
+    /* Appending rather than redrawing: a rebuild would close whatever the reader has open, which
+       is the whole reason this view stopped refreshing itself. */
+    if(LEDGER_FETCHING||LEDGER_EXHAUSTED||!LEDGER_SCROLL_DOWN)return;
+    LEDGER_FETCHING=true;
+    const more=document.getElementById('ledgerMore');
+    if(more)more.textContent='';
+    showLedgerSkeleton(LEDGER_PAGE);
+    try{
+        const answer=await get('/api/decisions?limit='+LEDGER_PAGE+'&offset='+LEDGER_LOADED+LEDGER_QUERY);
+        const rows=answer.items||[];
+        if(rows.length)appendDecisionEntries(rows);
+        if(rows.length<LEDGER_PAGE)LEDGER_EXHAUSTED=true;
+        if(more)more.textContent=LEDGER_EXHAUSTED?'没有更多记录了':'';
+    }catch(e){
+        if(more)more.textContent='加载更多失败：'+(e&&e.message||e);
+    }finally{clearLedgerSkeleton();LEDGER_FETCHING=false}
+}
+
+function watchLedgerEnd(){
+    const sentinel=document.getElementById('ledgerSentinel');
+    if(LEDGER_WATCHER)LEDGER_WATCHER.disconnect();
+    if(!sentinel||typeof IntersectionObserver!=='function')return;
+    watchLedgerScrollDirection();
+    LEDGER_WATCHER=new IntersectionObserver(entries=>{
+        if(entries.some(entry=>entry.isIntersecting)&&LEDGER_SCROLL_DOWN)loadMoreDecisions();
+    },{rootMargin:'200px'});
+    LEDGER_WATCHER.observe(sentinel);
+}
+
+function appendDecisionEntries(rows){
+    const root=document.getElementById('decisions');
+    if(!root)return;
+    const list=root.querySelector('.decision-list')||root;
+    list.insertAdjacentHTML('beforeend',decisionEntriesHtml(rows));
+    LEDGER_LOADED+=rows.length;
 }
 
 function renderDecisionLedger(rows){
     const root=document.getElementById('decisions');
     if(!rows.length){root.innerHTML='<div class="empty-state"><strong>'+esc({concluded:'还没有得出结论的记录',running:'此刻没有正在分析的记录',failed:'没有出错的记录'}[LEDGER_TAB]||'还没有符合条件的决策')+'</strong><p>'+esc({concluded:'机器人可能正在分析，或者这一轮没有标的通过筛选。看看「分析中」和「出错」两个标签。',running:'没有正在跑的分析——上一轮已经结束，下一轮还没开始。',failed:'一次都没失败过，或者失败记录已经被删掉了。'}[LEDGER_TAB]||'配置模型和平台后，机器人收到市场事件才会形成记录。')+'</p><a href="#overview">查看运行状态 →</a></div>';return}
-    const opened=new Set([...root.querySelectorAll('details.decision-entry[open]')].map(e=>e.dataset.id));
+    rememberOpenDetails();
     const filter=document.getElementById('statusFilter');
     for(const row of rows)if(row.status&&![...filter.options].some(o=>o.value===row.status)){const option=controlNode('option',decisionStatusTitle(row.status),filter);option.value=row.status}
     const reason=d=>d?.rationale||d?.reason||'没有记录说明';
-    root.innerHTML=rows.map(r=>{const d=r.final_decision||r.proposed_decision||{},stages=[
+    LEDGER_LOADED=rows.length;
+    LEDGER_EXHAUSTED=rows.length<LEDGER_FIRST_PAGE;
+    root.innerHTML='<div class="decision-list">'+decisionEntriesHtml(rows)+'</div>'
+        +'<p class="muted" id="ledgerMore">'+(LEDGER_EXHAUSTED?'没有更多记录了':'')+'</p>'
+        +'<div id="ledgerSentinel"></div>';
+    watchLedgerEnd();
+}
+
+function decisionEntriesHtml(rows){
+    const opened=new Set(
+        [...document.querySelectorAll('#decisions details.decision-entry[open]')].map(e=>e.dataset.id)
+    );
+    return rows.map(r=>{const d=r.final_decision||r.proposed_decision||{},stages=[
         ['发现了什么',r.context?.market?.title||r.market_topic_id||'没有记录市场标题',{context:r.context}],
         ['参考了什么',String(r.research?.length||0)+' 条研究结果，'+String(r.agent_steps??0)+' 个工具步骤',{research:r.research}],
         ['模型如何判断',reason(r.proposed_decision),{decision:r.proposed_decision,model_output:r.model_raw_output}],
@@ -542,7 +677,7 @@ function renderDecisionLedger(rows){
            calibrates - so an entry recording a fault since fixed keeps arguing its case until it is
            removed. On the row itself, because deciding a record is junk does not require reading it
            again. What the venue actually did is refused separately and stays. */
-        +'<button class="decision-forget" title="删除这条记录" aria-label="删除这条记录" onclick="forgetDecision(event,'+esc(r.id)+')">×</button></summary><p class="description">模型服务：'+esc(serviceTitle(r.provider))+' · 策略：'+esc(r.strategy_name||'未记录')+'。模型建议不等于成交，后续观察也不自动等于已实现盈亏。</p><ol class="decision-timeline">'+stages.map(([title,summary,raw])=>'<li><h4>'+title+'</h4><p>'+esc(summary)+'</p>'+detail(raw)+'</li>').join('')+'</ol>'
+        +'<button class="decision-forget" title="删除这条记录" aria-label="删除这条记录" onclick="forgetDecision(event,'+esc(r.id)+')">×</button></summary><p class="description">模型服务：'+esc(serviceTitle(r.provider))+' · 策略：'+esc(r.strategy_name||'未记录')+'。模型建议不等于成交，后续观察也不自动等于已实现盈亏。</p><ol class="decision-timeline">'+stages.map(([title,summary,raw],index)=>'<li><h4>'+title+'</h4><p>'+esc(summary)+'</p>'+detail(raw,r.id+':'+index)+'</li>').join('')+'</ol>'
         +'</details>'}).join('');
 }
 

@@ -54,7 +54,7 @@ HTML = r"""<!doctype html><html lang="zh-CN"><head><meta charset="utf-8">
 <section data-view="settings" hidden class="advanced-section"><details><summary>插件文件位置 <span>开发与自定义部署时修改</span></summary><p class="muted">程序从这些目录发现插件，每行一个目录。普通使用者无需改动；新增插件可在插件中心安装。</p><div id="pluginDirectories" class="plugin-grid"></div><div class="toolbar"><button class="primary" onclick="savePluginDirectories()">保存插件目录</button><button class="danger" onclick="resetPluginDirectories()">恢复默认目录</button></div></details></section>
 <section data-view="plugins" hidden id="pluginWorkspace"><div id="pluginCategoryHome"></div><nav id="pluginCategoryNav" class="subnav" aria-label="插件分类"></nav><div id="pluginCategoryGuide"></div><div class="toolbar plugin-management-tools"><button onclick="refreshPlugins()">重新扫描插件文件</button><span class="muted">新增、删除或更新文件后使用；不会替你启用插件。</span></div><div id="pluginManager"></div><div class="toolbar plugin-management-tools"><button class="primary" onclick="saveSelection()">保存启用与顺序</button><span id="manageStatus" class="status" role="status"></span></div></section>
 <section data-view="plugins" hidden><details><summary>安装新的自定义插件</summary><p class="muted">把受信任的 Python 插件源码写入已配置的类别目录。新插件安装后保持禁用，只扫描文件名；启用后才会导入并调用初始化函数。</p><div class="plugin-grid"><label class="field"><b>类别</b><select id="installKind" onchange="renderInstallTargets()"></select></label><label class="field"><b>安装目录</b><select id="installTarget"></select></label><label class="field"><b>插件名</b><input id="installName" placeholder="example_plugin"></label></div><label class="field"><b>Python 源码</b><textarea id="installSource" rows="14" placeholder="def initialize_plugin(context): ..."></textarea></label><div class="toolbar"><button class="primary" onclick="installPlugin()">安装并刷新</button><span id="installStatus" class="status muted"></span></div></details></section>
-<section data-view="decisions" hidden><h3>查看机器人为什么这样做</h3><p class="muted">一条记录是一次判断，不等于一笔成交。先看“最终动作”和“执行状态”，再展开查看证据与规则检查；没有后续观察时不能判断盈亏。</p><ol class="process-strip"><li>发现市场</li><li>收集证据</li><li>模型判断</li><li>风险检查</li><li>执行与跟踪</li></ol><div class="ledger-tabs" role="tablist"><button role="tab" data-group="concluded" aria-selected="true" onclick="selectLedgerTab('concluded')">有结论 <span class="tab-count" id="tabCount_concluded"></span></button><button role="tab" data-group="running" aria-selected="false" onclick="selectLedgerTab('running')">分析中 <span class="tab-count" id="tabCount_running"></span></button><button role="tab" data-group="failed" aria-selected="false" onclick="selectLedgerTab('failed')">出错 <span class="tab-count" id="tabCount_failed"></span></button></div><p class="muted" id="ledgerTabNote"></p><div class="filter-bar"><label>平台<input id="platform" placeholder="全部平台"></label><label>模型服务<input id="providerFilter" placeholder="全部服务"></label><label>记录状态<select id="statusFilter"><option value="">全部状态</option><option value="STARTED">分析中</option><option value="PROVIDER_ERROR">模型调用失败</option><option value="RISK_REJECTED">规则拒绝，未执行</option><option value="EXECUTION_ERROR">执行失败</option><option value="COMPLETED">流程已完成</option></select></label><label>最终动作<select id="actionFilter"><option value="">全部动作</option><option value="BUY">买入</option><option value="SELL">卖出</option><option value="HOLD">观望</option><option value="CANCEL">撤单</option></select></label><button class="primary" onclick="refreshAudit()">查询记录</button></div></section>
+<section data-view="decisions" hidden><h3>查看机器人为什么这样做</h3><p class="muted">一条记录是一次判断，不等于一笔成交。先看“最终动作”和“执行状态”，再展开查看证据与规则检查；没有后续观察时不能判断盈亏。</p><ol class="process-strip"><li>发现市场</li><li>收集证据</li><li>模型判断</li><li>风险检查</li><li>执行与跟踪</li></ol><div class="toolbar ledger-toolbar"><button class="primary" onclick="refreshAudit()" title="重新读取决策记录">↻ 刷新</button><span class="muted" id="ledgerStamp">尚未读取</span><span class="muted">这里不自动刷新——展开的记录不会在你读的时候被收起。</span></div><div class="ledger-tabs" role="tablist"><button role="tab" data-group="concluded" aria-selected="true" onclick="selectLedgerTab('concluded')">有结论 <span class="tab-count" id="tabCount_concluded"></span></button><button role="tab" data-group="running" aria-selected="false" onclick="selectLedgerTab('running')">分析中 <span class="tab-count" id="tabCount_running"></span></button><button role="tab" data-group="failed" aria-selected="false" onclick="selectLedgerTab('failed')">出错 <span class="tab-count" id="tabCount_failed"></span></button></div><p class="muted" id="ledgerTabNote"></p><div class="filter-bar"><label>平台<input id="platform" placeholder="全部平台"></label><label>模型服务<input id="providerFilter" placeholder="全部服务"></label><label>记录状态<select id="statusFilter"><option value="">全部状态</option><option value="STARTED">分析中</option><option value="PROVIDER_ERROR">模型调用失败</option><option value="RISK_REJECTED">规则拒绝，未执行</option><option value="EXECUTION_ERROR">执行失败</option><option value="COMPLETED">流程已完成</option></select></label><label>最终动作<select id="actionFilter"><option value="">全部动作</option><option value="BUY">买入</option><option value="SELL">卖出</option><option value="HOLD">观望</option><option value="CANCEL">撤单</option></select></label><button class="primary" onclick="refreshAudit()">查询记录</button></div></section>
 <section data-view="decisions" hidden><div class="section-heading"><div><h3>决策记录</h3><p>显示最近 100 条匹配记录。点击一条记录的“查看决策过程”追溯原因。</p></div></div><div id="decisions"></div></section>
 <section data-view="decisions" hidden class="advanced-section"><details><summary>平台操作明细 <span>排查问题时展开</span></summary><p class="muted">发送给平台的操作和返回结果；请求失败不代表成交。</p><div id="actions"></div></details></section>
 <section data-view="decisions" hidden class="advanced-section"><details><summary>模型对话明细 <span>排查问题时展开</span></summary><p class="muted">一次决策可能多次询问模型。这里用于排查模型调用失败。</p><div id="turns"></div></details></section>
@@ -68,7 +68,7 @@ const LOCAL_ACCESS=LOCAL_ACCESS_VALUE;
 const LABELS={api:'交易平台',decision_provider:'AI 模型服务',decision_strategy:'决策策略',market_discovery:'标的发现策略',research_tool:'信息与研究',agent_policy:'Agent 行为风控',risk:'业务风控'};
 let LAST_MANAGER=null;
 const esc=s=>String(s??'').replace(/[&<>\"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','\"':'&quot;'}[c]));
-const detail=o=>'<details><summary>查看完整 JSON</summary><pre>'+esc(JSON.stringify(o,null,2))+'</pre></details>';
+const detail=(o,key)=>'<details'+(key?' data-detail-key="'+esc(key)+'"'+(OPEN_DETAILS.has(String(key))?' open':''):'')+'><summary>查看完整 JSON</summary><pre>'+esc(JSON.stringify(o,null,2))+'</pre></details>';
 const b64u=b=>btoa(String.fromCharCode(...new Uint8Array(b))).replaceAll('+','-').replaceAll('/','_').replaceAll('=','');
 const unb64u=s=>Uint8Array.from(atob(s.replaceAll('-','+').replaceAll('_','/')+'==='.slice((s.length+3)%4)),c=>c.charCodeAt(0));
 function keyDb(){return new Promise((ok,no)=>{let r=indexedDB.open('prediction-agent-keys',1);r.onupgradeneeded=()=>r.result.createObjectStore('sessions');r.onsuccess=()=>ok(r.result);r.onerror=()=>no(r.error)})}
@@ -185,8 +185,8 @@ async function deletePasskey(id){if(!confirm('删除这个 Passkey？关联登�
 async function kickSessions(ids){let current=ids.includes(SESSION_ID);await post('/api/auth/sessions/kick',{ids});if(current){await dropKey();location='/api/auth/clear'}else await refreshSecurity()}
 async function kickSelectedSessions(){await kickSessions([...document.querySelectorAll('.sessionPick:checked')].map(e=>e.value))}
 async function logout(){try{await post('/api/auth/logout',{})}finally{await dropKey();location='/'}}
-async function refreshAudit(){try{let p=document.getElementById('platform').value,q=p?'&platform='+encodeURIComponent(p):'',dq=q+'&provider='+encodeURIComponent(document.getElementById('providerFilter').value)+'&status='+encodeURIComponent(document.getElementById('statusFilter').value)+'&action='+encodeURIComponent(document.getElementById('actionFilter').value);dq+='&group='+encodeURIComponent(LEDGER_TAB);let [s,d,a,t,g,m]=await Promise.all([get('/api/summary'),get('/api/decisions?limit=100'+dq),get('/api/records?kind=actions&limit=100'+q),get('/api/records?kind=turns&limit=100'+q),get('/api/records?kind=steps&limit=100'+q),get('/api/manifest')]);let ag=s.aggregate_account||{},cards=[['权益',ag.equity],['决策',s.summary?.decisions],['模型调用错误',s.summary?.provider_errors],['信息收集步骤',s.summary?.agent_steps]];document.getElementById('cards').innerHTML=cards.map(x=>'<div class=card><div class=muted>'+esc(x[0])+'</div><h2>'+esc(x[1]??'—')+'</h2></div>').join('');renderDecisionLedger(d.items);refreshLedgerTabCounts(q);document.getElementById('actions').innerHTML=table(a.items,[['时间',r=>new Date(r.created_at).toLocaleString()],['平台',r=>esc(r.platform)],['动作',r=>esc(r.action)],['结果',r=>detail(r)]]);document.getElementById('turns').innerHTML=table(t.items,[['时间',r=>new Date(r.created_at).toLocaleString()],['平台/Provider',r=>esc(r.platform+' / '+r.provider)],['状态',r=>esc(r.status)],['内容',r=>detail(r)]]);document.getElementById('steps').innerHTML=table(g.items,[['时间',r=>new Date(r.created_at).toLocaleString()],['平台/Provider',r=>esc(r.platform+' / '+r.provider)],['工具/状态',r=>esc((r.tool_name||'control')+' / '+r.status)],['内容',r=>detail(r)]]);document.getElementById('manifest').textContent=JSON.stringify(m,null,2);document.getElementById('stamp').textContent='更新 '+new Date().toLocaleTimeString()}catch(e){document.getElementById('stamp').textContent='错误: '+e}}
-document.addEventListener('toggle',()=>activateChoiceLists(),true);document.getElementById('platform').onchange=refreshAudit;Promise.all([refreshSecurity(),refreshManager(),refreshConfiguration(),refreshAudit()]);setInterval(()=>Promise.all([refreshAudit(),refreshRuntime(),refreshClientControls()]),REFRESH_MS);
+async function refreshAudit(){setLedgerLoading(true);try{let p=document.getElementById('platform').value,q=p?'&platform='+encodeURIComponent(p):'',dq=q+'&provider='+encodeURIComponent(document.getElementById('providerFilter').value)+'&status='+encodeURIComponent(document.getElementById('statusFilter').value)+'&action='+encodeURIComponent(document.getElementById('actionFilter').value);dq+='&group='+encodeURIComponent(LEDGER_TAB);LEDGER_QUERY=dq;let [s,d,a,t,g,m]=await Promise.all([get('/api/summary'),get('/api/decisions?limit='+LEDGER_FIRST_PAGE+'&offset=0'+dq),get('/api/records?kind=actions&limit=20'+q),get('/api/records?kind=turns&limit=20'+q),get('/api/records?kind=steps&limit=20'+q),get('/api/manifest')]);let ag=s.aggregate_account||{},cards=[['权益',ag.equity],['决策',s.summary?.decisions],['模型调用错误',s.summary?.provider_errors],['信息收集步骤',s.summary?.agent_steps]];document.getElementById('cards').innerHTML=cards.map(x=>'<div class=card><div class=muted>'+esc(x[0])+'</div><h2>'+esc(x[1]??'—')+'</h2></div>').join('');renderDecisionLedger(d.items);refreshLedgerTabCounts(q);document.getElementById('actions').innerHTML=table(a.items,[['时间',r=>new Date(r.created_at).toLocaleString()],['平台',r=>esc(r.platform)],['动作',r=>esc(r.action)],['结果',r=>detail(r)]]);document.getElementById('turns').innerHTML=table(t.items,[['时间',r=>new Date(r.created_at).toLocaleString()],['平台/Provider',r=>esc(r.platform+' / '+r.provider)],['状态',r=>esc(r.status)],['内容',r=>detail(r)]]);document.getElementById('steps').innerHTML=table(g.items,[['时间',r=>new Date(r.created_at).toLocaleString()],['平台/Provider',r=>esc(r.platform+' / '+r.provider)],['工具/状态',r=>esc((r.tool_name||'control')+' / '+r.status)],['内容',r=>detail(r)]]);document.getElementById('manifest').textContent=JSON.stringify(m,null,2);document.getElementById('stamp').textContent='更新 '+new Date().toLocaleTimeString();document.getElementById('ledgerStamp').textContent='读取于 '+new Date().toLocaleTimeString()}catch(e){document.getElementById('stamp').textContent='错误: '+e;document.getElementById('decisions').innerHTML='<div class="empty-state"><strong>没能读到决策记录</strong><p>'+esc(String(e&&e.message||e))+'</p></div>'}finally{setLedgerLoading(false)}}
+document.addEventListener('toggle',()=>activateChoiceLists(),true);document.getElementById('platform').onchange=refreshAudit;Promise.all([refreshSecurity(),refreshManager(),refreshConfiguration(),refreshAudit()]);setInterval(()=>Promise.all([refreshRuntime(),refreshClientControls()]),REFRESH_MS);
 </script><script src="/assets/dashboard-shell.js"></script><script src="/assets/environment.js"></script></body></html>"""
 
 
@@ -300,6 +300,37 @@ class AuditData:
                 item[column.removesuffix("_json")] = _json_value(item.pop(column))
             items.append(item)
         return {"kind": kind, "limit": limit, "offset": offset, "items": items}
+
+    def decision_counts(self, platform: str) -> dict[str, int]:
+        """How many rows are in each tab, counted in the database.
+
+        The page used to learn this by fetching two hundred rows per tab and measuring the list -
+        six hundred rows, three round trips, to display three numbers, which is most of why the
+        ledger took so long to appear.
+        """
+        failed = sorted(SessionMemory.FAILED_STATUSES)
+        marks = ",".join("?" * len(failed))
+        where, params = "", []
+        if platform:
+            where, params = " AND platform = ?", [platform]
+        connection = sqlite3.connect(self.config.session_db)
+        try:
+            counts = {}
+            for group, clause, extra in (
+                ("running", "status = ?", [SessionMemory.IN_PROGRESS]),
+                ("failed", f"status IN ({marks})", failed),
+                ("concluded", f"status NOT IN ({marks},?)",
+                 [*failed, SessionMemory.IN_PROGRESS]),
+            ):
+                counts[group] = int(
+                    connection.execute(
+                        f"SELECT COUNT(*) FROM decision_ledger WHERE {clause}{where}",
+                        [*extra, *params],
+                    ).fetchone()[0]
+                )
+            return counts
+        finally:
+            connection.close()
 
     def forget_decisions(
         self, decision_ids: list[int], status: str, platform: str
@@ -642,6 +673,8 @@ def create_app(config: Config, *, start_robot: bool = True) -> FastAPI:
             return application_settings.reset(
                 payload.get("names") if "names" in payload else None
             )
+        if path == "/api/decisions/counts":
+            return data.decision_counts(query_value(query, "platform"))
         if path == "/api/decisions/forget":
             ids = payload.get("decision_ids") or []
             if not isinstance(ids, list):
