@@ -55,7 +55,7 @@ HTML = r"""<!doctype html><html lang="zh-CN"><head><meta charset="utf-8">
 <section data-view="plugins" hidden id="pluginWorkspace"><div id="pluginCategoryHome"></div><nav id="pluginCategoryNav" class="subnav" aria-label="插件分类"></nav><div id="pluginCategoryGuide"></div><div class="toolbar plugin-management-tools"><button onclick="refreshPlugins()">重新扫描插件文件</button><span class="muted">新增、删除或更新文件后使用；不会替你启用插件。</span></div><div id="pluginManager"></div><div class="toolbar plugin-management-tools"><button class="primary" onclick="saveSelection()">保存启用与顺序</button><span id="manageStatus" class="status" role="status"></span></div></section>
 <section data-view="plugins" hidden><details><summary>安装新的自定义插件</summary><p class="muted">把受信任的 Python 插件源码写入已配置的类别目录。新插件安装后保持禁用，只扫描文件名；启用后才会导入并调用初始化函数。</p><div class="plugin-grid"><label class="field"><b>类别</b><select id="installKind" onchange="renderInstallTargets()"></select></label><label class="field"><b>安装目录</b><select id="installTarget"></select></label><label class="field"><b>插件名</b><input id="installName" placeholder="example_plugin"></label></div><label class="field"><b>Python 源码</b><textarea id="installSource" rows="14" placeholder="def initialize_plugin(context): ..."></textarea></label><div class="toolbar"><button class="primary" onclick="installPlugin()">安装并刷新</button><span id="installStatus" class="status muted"></span></div></details></section>
 <section data-view="decisions" hidden><h3>查看机器人为什么这样做</h3><p class="muted">一条记录是一次判断，不等于一笔成交。先看“最终动作”和“执行状态”，再展开查看证据与规则检查；没有后续观察时不能判断盈亏。</p><ol class="process-strip"><li>发现市场</li><li>收集证据</li><li>模型判断</li><li>风险检查</li><li>执行与跟踪</li></ol><div class="toolbar ledger-toolbar"><button class="primary" onclick="refreshAudit()" title="重新读取决策记录">↻ 刷新</button><span class="muted" id="ledgerStamp">尚未读取</span><span class="muted">这里不自动刷新——展开的记录不会在你读的时候被收起。</span></div><div class="ledger-tabs" role="tablist"><button role="tab" data-group="concluded" aria-selected="true" onclick="selectLedgerTab('concluded')">有结论 <span class="tab-count" id="tabCount_concluded"></span></button><button role="tab" data-group="running" aria-selected="false" onclick="selectLedgerTab('running')">分析中 <span class="tab-count" id="tabCount_running"></span></button><button role="tab" data-group="failed" aria-selected="false" onclick="selectLedgerTab('failed')">出错 <span class="tab-count" id="tabCount_failed"></span></button></div><p class="muted" id="ledgerTabNote"></p><div class="filter-bar"><label>平台<input id="platform" placeholder="全部平台"></label><label>模型服务<input id="providerFilter" placeholder="全部服务"></label><label>记录状态<select id="statusFilter"><option value="">全部状态</option><option value="STARTED">分析中</option><option value="PROVIDER_ERROR">模型调用失败</option><option value="RISK_REJECTED">规则拒绝，未执行</option><option value="EXECUTION_ERROR">执行失败</option><option value="COMPLETED">流程已完成</option></select></label><label>最终动作<select id="actionFilter"><option value="">全部动作</option><option value="BUY">买入</option><option value="SELL">卖出</option><option value="HOLD">观望</option><option value="CANCEL">撤单</option></select></label><button class="primary" onclick="refreshAudit()">查询记录</button></div></section>
-<section data-view="decisions" hidden><div class="section-heading"><div><h3>决策记录</h3><p>显示最近 100 条匹配记录。点击一条记录的“查看决策过程”追溯原因。</p></div></div><div id="decisions"></div></section>
+<section data-view="decisions" hidden><div class="section-heading"><div><h3>决策记录</h3><p>先显示最近 10 条，向下滚动每次再加载 5 条。点开一条记录才会读取它的完整证据。</p></div></div><div id="decisions"></div></section>
 <section data-view="decisions" hidden class="advanced-section"><details><summary>平台操作明细 <span>排查问题时展开</span></summary><p class="muted">发送给平台的操作和返回结果；请求失败不代表成交。</p><div id="actions"></div></details></section>
 <section data-view="decisions" hidden class="advanced-section"><details><summary>模型对话明细 <span>排查问题时展开</span></summary><p class="muted">一次决策可能多次询问模型。这里用于排查模型调用失败。</p><div id="turns"></div></details></section>
 <section data-view="decisions" hidden class="advanced-section"><details><summary>信息收集明细 <span>排查问题时展开</span></summary><p class="muted">模型为收集信息而调用的工具及结果。通常无需查看。</p><div id="steps"></div></details></section>
@@ -185,7 +185,7 @@ async function deletePasskey(id){if(!confirm('删除这个 Passkey？关联登�
 async function kickSessions(ids){let current=ids.includes(SESSION_ID);await post('/api/auth/sessions/kick',{ids});if(current){await dropKey();location='/api/auth/clear'}else await refreshSecurity()}
 async function kickSelectedSessions(){await kickSessions([...document.querySelectorAll('.sessionPick:checked')].map(e=>e.value))}
 async function logout(){try{await post('/api/auth/logout',{})}finally{await dropKey();location='/'}}
-async function refreshAudit(){setLedgerLoading(true);try{let p=document.getElementById('platform').value,q=p?'&platform='+encodeURIComponent(p):'',dq=q+'&provider='+encodeURIComponent(document.getElementById('providerFilter').value)+'&status='+encodeURIComponent(document.getElementById('statusFilter').value)+'&action='+encodeURIComponent(document.getElementById('actionFilter').value);dq+='&group='+encodeURIComponent(LEDGER_TAB);LEDGER_QUERY=dq;let [s,d,a,t,g,m]=await Promise.all([get('/api/summary'),get('/api/decisions?limit='+LEDGER_FIRST_PAGE+'&offset=0'+dq),get('/api/records?kind=actions&limit=20'+q),get('/api/records?kind=turns&limit=20'+q),get('/api/records?kind=steps&limit=20'+q),get('/api/manifest')]);let ag=s.aggregate_account||{},cards=[['权益',ag.equity],['决策',s.summary?.decisions],['模型调用错误',s.summary?.provider_errors],['信息收集步骤',s.summary?.agent_steps]];document.getElementById('cards').innerHTML=cards.map(x=>'<div class=card><div class=muted>'+esc(x[0])+'</div><h2>'+esc(x[1]??'—')+'</h2></div>').join('');renderDecisionLedger(d.items);refreshLedgerTabCounts(q);document.getElementById('actions').innerHTML=table(a.items,[['时间',r=>new Date(r.created_at).toLocaleString()],['平台',r=>esc(r.platform)],['动作',r=>esc(r.action)],['结果',r=>detail(r)]]);document.getElementById('turns').innerHTML=table(t.items,[['时间',r=>new Date(r.created_at).toLocaleString()],['平台/Provider',r=>esc(r.platform+' / '+r.provider)],['状态',r=>esc(r.status)],['内容',r=>detail(r)]]);document.getElementById('steps').innerHTML=table(g.items,[['时间',r=>new Date(r.created_at).toLocaleString()],['平台/Provider',r=>esc(r.platform+' / '+r.provider)],['工具/状态',r=>esc((r.tool_name||'control')+' / '+r.status)],['内容',r=>detail(r)]]);document.getElementById('manifest').textContent=JSON.stringify(m,null,2);document.getElementById('stamp').textContent='更新 '+new Date().toLocaleTimeString();document.getElementById('ledgerStamp').textContent='读取于 '+new Date().toLocaleTimeString()}catch(e){document.getElementById('stamp').textContent='错误: '+e;document.getElementById('decisions').innerHTML='<div class="empty-state"><strong>没能读到决策记录</strong><p>'+esc(String(e&&e.message||e))+'</p></div>'}finally{setLedgerLoading(false)}}
+async function refreshAudit(){setLedgerLoading(true);try{let p=document.getElementById('platform').value,q=p?'&platform='+encodeURIComponent(p):'',dq=q+'&provider='+encodeURIComponent(document.getElementById('providerFilter').value)+'&status='+encodeURIComponent(document.getElementById('statusFilter').value)+'&action='+encodeURIComponent(document.getElementById('actionFilter').value);dq+='&group='+encodeURIComponent(LEDGER_TAB);LEDGER_QUERY=dq;LEDGER_PLATFORM_QUERY=q;let [s,d,m]=await Promise.all([get('/api/summary'),get('/api/decisions?limit='+LEDGER_FIRST_PAGE+'&offset=0'+dq),get('/api/manifest')]);let ag=s.aggregate_account||{},cards=[['权益',ag.equity],['决策',s.summary?.decisions],['模型调用错误',s.summary?.provider_errors],['信息收集步骤',s.summary?.agent_steps]];document.getElementById('cards').innerHTML=cards.map(x=>'<div class=card><div class=muted>'+esc(x[0])+'</div><h2>'+esc(x[1]??'—')+'</h2></div>').join('');renderDecisionLedger(d.items);refreshLedgerTabCounts(q);resetDiagnosticPanels();document.getElementById('manifest').textContent=JSON.stringify(m,null,2);document.getElementById('stamp').textContent='更新 '+new Date().toLocaleTimeString();document.getElementById('ledgerStamp').textContent='读取于 '+new Date().toLocaleTimeString()}catch(e){document.getElementById('stamp').textContent='错误: '+e;document.getElementById('decisions').innerHTML='<div class="empty-state"><strong>没能读到决策记录</strong><p>'+esc(String(e&&e.message||e))+'</p></div>'}finally{setLedgerLoading(false)}}
 document.addEventListener('toggle',()=>activateChoiceLists(),true);document.getElementById('platform').onchange=refreshAudit;Promise.all([refreshSecurity(),refreshManager(),refreshConfiguration(),refreshAudit()]);setInterval(()=>Promise.all([refreshRuntime(),refreshClientControls()]),REFRESH_MS);
 </script><script src="/assets/dashboard-shell.js"></script><script src="/assets/environment.js"></script></body></html>"""
 
@@ -209,6 +209,26 @@ def _midpoint(book: dict[str, Any]) -> float | None:
         return (float(book["best_bid"]) + float(book["best_ask"])) / 2
     except (KeyError, TypeError, ValueError):
         return None
+
+
+def _slim_decision(item: dict[str, Any]) -> dict[str, Any]:
+    """What a list row needs, without what only an opened row needs.
+
+    Ten rows were half a megabyte, and nearly all of it was the full context handed to the model and
+    its raw output - neither of which the list draws. The database answered in a fraction of a
+    second; the page was slow because it was receiving and parsing everything every row had ever
+    been told, to show a title and a sentence. The rest arrives when somebody opens the row.
+    """
+    slim = dict(item)
+    context = item.get("context") if isinstance(item.get("context"), dict) else {}
+    market = context.get("market") if isinstance(context.get("market"), dict) else {}
+    slim["context"] = {"market": {"title": market.get("title", "")}} if market else {}
+    research = item.get("research")
+    slim["research_count"] = len(research) if isinstance(research, list) else 0
+    slim.pop("research", None)
+    slim.pop("model_raw_output", None)
+    slim["slim"] = True
+    return slim
 
 
 class AuditData:
@@ -357,6 +377,9 @@ class AuditData:
         status: str,
         action: str,
         group: str = "",
+        *,
+        full: bool = False,
+        only_id: int | None = None,
     ) -> dict[str, Any]:
         columns = [
             "id", "created_at", "updated_at", "platform", "provider",
@@ -374,6 +397,9 @@ class AuditData:
         if action:
             filters.append("json_extract(final_decision_json, '$.action') = ?")
             params.append(action.upper())
+        if only_id is not None:
+            filters.append("id = ?")
+            params.append(int(only_id))
         # Grouping is a property of the status, so it filters in SQL rather than after paging -
         # otherwise asking for a hundred concluded rows would return however many of the most
         # recent hundred rows happened to be concluded.
@@ -438,9 +464,25 @@ class AuditData:
                     "SELECT COUNT(*) FROM agent_steps WHERE decision_id = ?", (item["id"],)
                 ).fetchone()[0]
             )
-            items.append(item)
+            items.append(item if full else _slim_decision(item))
         connection.close()
         return {"limit": limit, "offset": offset, "items": items}
+
+    def decision(self, decision_id: int) -> dict[str, Any]:
+        """One row in full, for the moment somebody opens it."""
+        connection = sqlite3.connect(self.config.session_db)
+        try:
+            row = connection.execute(
+                "SELECT platform, status FROM decision_ledger WHERE id = ?", (int(decision_id),)
+            ).fetchone()
+        finally:
+            connection.close()
+        if row is None:
+            raise ValueError(f"Decision {decision_id} does not exist")
+        page = self.decisions(200, 0, row[0], "", "", "", "", full=True, only_id=int(decision_id))
+        if not page["items"]:
+            raise ValueError(f"Decision {decision_id} does not exist")
+        return page["items"][0]
 
 
 def create_app(config: Config, *, start_robot: bool = True) -> FastAPI:
@@ -673,6 +715,8 @@ def create_app(config: Config, *, start_robot: bool = True) -> FastAPI:
             return application_settings.reset(
                 payload.get("names") if "names" in payload else None
             )
+        if path == "/api/decisions/detail":
+            return data.decision(int(query_value(query, "id", "0")))
         if path == "/api/decisions/counts":
             return data.decision_counts(query_value(query, "platform"))
         if path == "/api/decisions/forget":
@@ -821,9 +865,15 @@ def create_app(config: Config, *, start_robot: bool = True) -> FastAPI:
             raise HTTPException(status_code=401, detail="Login script expired; generate a new command in the wizard") from None
 
     async def dispatch_async(request, session, message):
-        if urlsplit(message["url"]).path in {"/api/plugins/config/choices", "/api/plugins/controls/action", "/api/environment", "/api/environment/probe"}:
-            return await run_in_threadpool(dispatch, request, session, message["url"], message.get("body"))
-        return dispatch(request, session, message["url"], message.get("body"))
+        # Every handler here is synchronous - database reads, plugin calls, JSON assembly - and
+        # running one on the event loop blocks the loop for as long as it takes. Only four paths
+        # used to go to the thread pool, so every other request was served strictly one at a time:
+        # a settings read that takes three milliseconds alone took six hundred when it arrived
+        # alongside the page's other requests, because it waited for each of them to finish. That
+        # queue, not the database and not the size of the JSON, is why the ledger took so long.
+        return await run_in_threadpool(
+            dispatch, request, session, message["url"], message.get("body")
+        )
 
     @app.post("/api/secure")
     async def secure_api(request: Request) -> JSONResponse:
@@ -831,12 +881,16 @@ def create_app(config: Config, *, start_robot: bool = True) -> FastAPI:
         if request.headers.get("X-Admin-CSRF", "") != session.csrf_token:
             raise HTTPException(status_code=403, detail="Invalid session request token")
         try:
-            message = auth.decrypt(session, await request.json(), aad="POST /api/secure")
+            message = await run_in_threadpool(
+                auth.decrypt, session, await request.json(), aad="POST /api/secure"
+            )
             auth.session(session.token, touch=True)
             if not isinstance(message, dict) or not isinstance(message.get("url"), str):
                 raise ValueError("Protected operation must include a URL")
             result = await dispatch_async(request, session, message)
-            envelope = auth.encrypt(session, result, aad="RESPONSE /api/secure")
+            envelope = await run_in_threadpool(
+                auth.encrypt, session, result, aad="RESPONSE /api/secure"
+            )
             return JSONResponse(envelope)
         except ValueError as error:
             envelope = auth.encrypt(session, {"error": str(error)}, aad="RESPONSE /api/secure")

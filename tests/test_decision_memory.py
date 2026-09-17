@@ -128,9 +128,15 @@ class DecisionAndMemoryTests(unittest.TestCase):
                 row = data.decisions(10, 0, "binance", "codex", "NO_ACTION", "HOLD")["items"][0]
                 self.assertEqual(row["id"], decision_id)
                 self.assertEqual(row["agent_steps"], 1)
-                self.assertEqual(row["research"][0]["tool"], "SEARCH_WEB")
+                # The list row says how much research there was; the evidence itself arrives
+                # when the row is opened, because it is most of a row's weight.
+                self.assertEqual(row["research_count"], 1)
                 self.assertEqual(row["risk_decision"]["outcome"], "ALLOW")
                 self.assertEqual(row["execution"]["status"], "NO_ACTION")
+                full = data.decision(decision_id)
+                self.assertEqual(full["research"][0]["tool"], "SEARCH_WEB")
+                self.assertEqual(full["risk_decision"]["outcome"], "ALLOW")
+                self.assertIn("model_raw_output", full)
             finally:
                 data.management.shutdown()
 

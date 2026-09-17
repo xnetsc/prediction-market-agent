@@ -1,4 +1,5 @@
 from ._support import *
+import json
 
 from prediction_market_agent.runtime.memory import SessionMemory
 
@@ -181,11 +182,16 @@ class PagedLedgerTests(unittest.TestCase):
     def test_two_scrolls_at_once_do_not_load_the_same_page_twice(self) -> None:
         self.assertIn("if(LEDGER_FETCHING||LEDGER_EXHAUSTED", self._views())
 
-    def test_the_diagnostic_tables_are_not_a_hundred_rows_each(self) -> None:
-        """Three more hundred-row fetches on the same page, behind a collapsed panel nobody opened."""
+    def test_the_diagnostic_tables_load_only_when_opened(self) -> None:
+        """Two and a half megabytes, on every visit, for panels labelled "open when debugging"."""
         shell = self._shell()
-        self.assertNotIn("kind=actions&limit=100", shell)
-        self.assertIn("kind=actions&limit=20", shell)
+        refresh = shell[shell.index("async function refreshAudit("):]
+        refresh = refresh[: refresh.index("\n")]
+        self.assertNotIn("kind=turns", refresh)
+        self.assertNotIn("kind=steps", refresh)
+        views = self._views()
+        self.assertIn("function loadDiagnosticPanel", views)
+        self.assertIn("panel.querySelector('#'+id))loadDiagnosticPanel(id)", views)
 
 
 class LoadingIsShownWhereItLandsTests(unittest.TestCase):
@@ -245,3 +251,66 @@ class OnlyDownwardsLoadsMoreTests(unittest.TestCase):
     def test_the_fetch_itself_also_declines_when_going_up(self) -> None:
         """Belt and braces: the observer is not the only caller."""
         self.assertIn("LEDGER_EXHAUSTED||!LEDGER_SCROLL_DOWN", self._views())
+
+
+class TheRowMarkupActuallyRunsTests(unittest.TestCase):
+    """Searching the source for strings passed while the page showed "reason is not defined"."""
+
+    def test_rendering_real_rows_in_a_javascript_engine(self) -> None:
+        import shutil
+        import subprocess
+
+        node = shutil.which("node")
+        if node is None:
+            self.skipTest("node is not installed; this check needs a JavaScript engine")
+        completed = subprocess.run(
+            [node, "tests/ledger_render_check.js",
+             "src/prediction_market_agent/runtime/static/dashboard-views.js"],
+            capture_output=True, text=True, timeout=60,
+        )
+        self.assertEqual(
+            completed.returncode, 0, completed.stderr or completed.stdout
+        )
+        self.assertIn("OK", completed.stdout)
+
+
+class ListRowsAreLightTests(unittest.TestCase):
+    """The database answered in a fifth of a second; the page was slow because of what it shipped."""
+
+    def _shell(self) -> str:
+        return Path("src/prediction_market_agent/runtime/dashboard.py").read_text()
+
+    def _views(self) -> str:
+        return Path("src/prediction_market_agent/runtime/static/dashboard-views.js").read_text()
+
+    def test_a_list_row_drops_what_only_an_opened_row_draws(self) -> None:
+        from prediction_market_agent.runtime.dashboard import _slim_decision
+
+        heavy = {
+            "id": 1,
+            "context": {"market": {"title": "BTC"}, "order_book": {"bids": ["x"] * 5000}},
+            "research": [{"page": "y" * 5000}] * 4,
+            "model_raw_output": "z" * 50000,
+            "final_decision": {"action": "HOLD", "rationale": "wide spread"},
+        }
+        slim = _slim_decision(heavy)
+        self.assertEqual(slim["context"], {"market": {"title": "BTC"}})
+        self.assertNotIn("model_raw_output", slim)
+        self.assertNotIn("research", slim)
+        self.assertEqual(slim["research_count"], 4)
+        self.assertEqual(slim["final_decision"]["rationale"], "wide spread")
+        self.assertTrue(slim["slim"])
+        self.assertLess(len(json.dumps(slim)), len(json.dumps(heavy)) / 20)
+
+    def test_an_opened_row_fetches_its_full_record(self) -> None:
+        shell = self._shell()
+        self.assertIn('if path == "/api/decisions/detail":', shell)
+        views = self._views()
+        self.assertIn("async function hydrateDecisionEntry", views)
+        self.assertIn("'/api/decisions/detail?id='", views)
+
+    def test_the_list_still_says_how_much_research_there_was(self) -> None:
+        self.assertIn("r.research_count??", self._views())
+
+    def test_the_page_no_longer_promises_a_hundred_rows(self) -> None:
+        self.assertNotIn("显示最近 100 条匹配记录", self._shell())

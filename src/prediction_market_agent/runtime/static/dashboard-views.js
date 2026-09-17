@@ -651,9 +651,6 @@ function renderDecisionLedger(rows){
     const root=document.getElementById('decisions');
     if(!rows.length){root.innerHTML='<div class="empty-state"><strong>'+esc({concluded:'还没有得出结论的记录',running:'此刻没有正在分析的记录',failed:'没有出错的记录'}[LEDGER_TAB]||'还没有符合条件的决策')+'</strong><p>'+esc({concluded:'机器人可能正在分析，或者这一轮没有标的通过筛选。看看「分析中」和「出错」两个标签。',running:'没有正在跑的分析——上一轮已经结束，下一轮还没开始。',failed:'一次都没失败过，或者失败记录已经被删掉了。'}[LEDGER_TAB]||'配置模型和平台后，机器人收到市场事件才会形成记录。')+'</p><a href="#overview">查看运行状态 →</a></div>';return}
     rememberOpenDetails();
-    const filter=document.getElementById('statusFilter');
-    for(const row of rows)if(row.status&&![...filter.options].some(o=>o.value===row.status)){const option=controlNode('option',decisionStatusTitle(row.status),filter);option.value=row.status}
-    const reason=d=>d?.rationale||d?.reason||'没有记录说明';
     LEDGER_LOADED=rows.length;
     LEDGER_EXHAUSTED=rows.length<LEDGER_FIRST_PAGE;
     root.innerHTML='<div class="decision-list">'+decisionEntriesHtml(rows)+'</div>'
@@ -662,17 +659,109 @@ function renderDecisionLedger(rows){
     watchLedgerEnd();
 }
 
+/* The three diagnostic tables sit behind panels labelled "open when debugging", and were fetched on
+   every visit anyway - two and a half megabytes of raw model output for twenty rows, for panels
+   almost nobody opens. They load when opened, and again when opened after a refresh. */
+let LEDGER_PLATFORM_QUERY='';
+const DIAGNOSTIC_PANELS={
+    actions:{kind:'actions',columns:()=>[['时间',r=>new Date(r.created_at).toLocaleString()],['平台',r=>esc(r.platform)],['动作',r=>esc(r.action)],['结果',r=>detail(r)]]},
+    turns:{kind:'turns',columns:()=>[['时间',r=>new Date(r.created_at).toLocaleString()],['平台/Provider',r=>esc(r.platform+' / '+r.provider)],['状态',r=>esc(r.status)],['内容',r=>detail(r)]]},
+    steps:{kind:'steps',columns:()=>[['时间',r=>new Date(r.created_at).toLocaleString()],['平台/Provider',r=>esc(r.platform+' / '+r.provider)],['工具/状态',r=>esc((r.tool_name||'control')+' / '+r.status)],['内容',r=>detail(r)]]},
+};
+
+function resetDiagnosticPanels(){
+    for(const id of Object.keys(DIAGNOSTIC_PANELS)){
+        const host=document.getElementById(id);
+        if(!host)continue;
+        delete host.dataset.loaded;
+        const panel=host.closest('details');
+        if(panel&&panel.open)loadDiagnosticPanel(id);
+        else host.innerHTML='';
+    }
+}
+
+async function loadDiagnosticPanel(id){
+    const host=document.getElementById(id),spec=DIAGNOSTIC_PANELS[id];
+    if(!host||!spec||host.dataset.loaded==='1')return;
+    host.dataset.loaded='1';
+    host.innerHTML=skeletonRowsHtml(3);
+    try{
+        const answer=await get('/api/records?kind='+spec.kind+'&limit=20'+LEDGER_PLATFORM_QUERY);
+        host.innerHTML=table(answer.items||[],spec.columns());
+    }catch(e){
+        delete host.dataset.loaded;
+        host.innerHTML='<p class="danger">没能读取：'+esc(String(e&&e.message||e))+'</p>';
+    }
+}
+
+if(typeof document!=='undefined'&&document.addEventListener)
+    document.addEventListener('toggle',event=>{
+        const panel=event.target;
+        if(!panel||!panel.open||!panel.querySelector)return;
+        for(const id of Object.keys(DIAGNOSTIC_PANELS))
+            if(panel.querySelector('#'+id))loadDiagnosticPanel(id);
+    },true);
+
+const decisionReason=d=>d?.rationale||d?.reason||'没有记录说明';
+
+/* A list row arrives without the context the model was given or its raw output - nearly all of a
+   row's weight, and nothing the list draws. The first time a row is opened its full record is
+   fetched and its timeline redrawn from it, so the evidence is there when somebody actually wants
+   to read it and costs nothing when they do not. */
+async function hydrateDecisionEntry(entry){
+    if(!entry||entry.dataset.slim!=='1'||entry.dataset.hydrating==='1')return;
+    entry.dataset.hydrating='1';
+    const timeline=entry.querySelector('.decision-timeline');
+    if(timeline)timeline.insertAdjacentHTML('beforebegin','<p class="muted decision-hydrating">正在读取完整记录…</p>'+skeletonRowsHtml(1));
+    try{
+        const full=await get('/api/decisions/detail?id='+encodeURIComponent(entry.dataset.id));
+        const wrapper=document.createElement('div');
+        wrapper.innerHTML=decisionEntriesHtml([full]);
+        const fresh=wrapper.querySelector('.decision-entry');
+        if(fresh){
+            fresh.open=true;
+            entry.replaceWith(fresh);
+        }
+    }catch(e){
+        const note=entry.querySelector('.decision-hydrating');
+        if(note)note.textContent='没能读取完整记录：'+(e&&e.message||e);
+        delete entry.dataset.hydrating;
+    }finally{
+        for(const node of entry.querySelectorAll('.decision-skeleton'))node.remove();
+    }
+}
+
+if(typeof document!=='undefined'&&document.addEventListener)
+    document.addEventListener('toggle',event=>{
+        const target=event.target;
+        if(target&&target.classList&&target.classList.contains('decision-entry')&&target.open)
+            hydrateDecisionEntry(target);
+    },true);
+
+function registerSeenStatuses(rows){
+    /* A status the filter has never heard of is one an operator cannot filter by. */
+    const filter=document.getElementById('statusFilter');
+    if(!filter)return;
+    for(const row of rows)
+        if(row.status&&![...filter.options].some(o=>o.value===row.status)){
+            const option=controlNode('option',decisionStatusTitle(row.status),filter);
+            option.value=row.status;
+        }
+}
+
 function decisionEntriesHtml(rows){
+    registerSeenStatuses(rows);
+    const reason=decisionReason;
     const opened=new Set(
         [...document.querySelectorAll('#decisions details.decision-entry[open]')].map(e=>e.dataset.id)
     );
     return rows.map(r=>{const d=r.final_decision||r.proposed_decision||{},stages=[
         ['发现了什么',r.context?.market?.title||r.market_topic_id||'没有记录市场标题',{context:r.context}],
-        ['参考了什么',String(r.research?.length||0)+' 条研究结果，'+String(r.agent_steps??0)+' 个工具步骤',{research:r.research}],
+        ['参考了什么',String(r.research_count??r.research?.length??0)+' 条研究结果，'+String(r.agent_steps??0)+' 个工具步骤',{research:r.research}],
         ['模型如何判断',reason(r.proposed_decision),{decision:r.proposed_decision,model_output:r.model_raw_output}],
         ['规则检查后',r.risk_decision?reason(r.risk_decision):'没有记录规则检查结果',{risk:r.risk_decision,final:r.final_decision}],
         ['实际执行与后续',r.error?String(r.error):r.execution?'已记录执行处理结果，请查看详情；这可能是跳过操作的记录，不代表已向平台下单':'未记录平台执行结果',{execution:r.execution,subsequent_observation:r.subsequent_observation}]
-    ];return '<details class="decision-entry" data-id="'+esc(r.id)+'" '+(opened.has(String(r.id))?'open':'')+'><summary><span class="decision-meta">'+esc(new Date(r.created_at).toLocaleString())+' · '+esc(r.platform)+' · #'+esc(r.id)+'</span><span class="decision-title">'+esc(r.context?.market?.title||r.market_topic_id||'未记录市场')+'</span><span class="decision-outcome"><span class="badge">'+esc((r.final_decision?'最终：':'建议：')+actionTitle(d.action))+'</span><span>'+esc(decisionStatusTitle(r.status))+'</span></span><span class="decision-reason">'+esc(reason(d))+'</span><span class="text-link">查看决策过程</span>'
+    ];return '<details class="decision-entry" data-id="'+esc(r.id)+'"'+(r.slim?' data-slim="1"':'')+' '+(opened.has(String(r.id))?'open':'')+'><summary><span class="decision-meta">'+esc(new Date(r.created_at).toLocaleString())+' · '+esc(r.platform)+' · #'+esc(r.id)+'</span><span class="decision-title">'+esc(r.context?.market?.title||r.market_topic_id||'未记录市场')+'</span><span class="decision-outcome"><span class="badge">'+esc((r.final_decision?'最终：':'建议：')+actionTitle(d.action))+'</span><span>'+esc(decisionStatusTitle(r.status))+'</span></span><span class="decision-reason">'+esc(reason(d))+'</span><span class="text-link">查看决策过程</span>'
         /* Measurements are read off these rows - which provider gets asked first, how the strategy
            calibrates - so an entry recording a fault since fixed keeps arguing its case until it is
            removed. On the row itself, because deciding a record is junk does not require reading it
