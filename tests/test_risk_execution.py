@@ -1,4 +1,5 @@
 from ._support import *
+import time
 
 class RiskAndExecutionTests(unittest.TestCase):
     def setUp(self) -> None:
@@ -184,7 +185,9 @@ class RiskAndExecutionTests(unittest.TestCase):
 
             def get_topic(self, topic_id):
                 del topic_id
-                return TopicDetail(topic, 0, 4_000_000_000_000, 0, (market,))
+                # Settling tomorrow: the built-in strategy only looks a few days out, so a
+                # fixture dated to the next century never reaches a decision at all.
+                return TopicDetail(topic, 0, int(time.time() * 1000) + 86_400_000, 0, (market,))
 
             def get_order_book(self, market_id, outcome_id):
                 del market_id, outcome_id
