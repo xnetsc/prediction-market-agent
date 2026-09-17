@@ -19,17 +19,13 @@ class StateStore:
                 starting_capital=self.starting_capital or 0.0,
                 cash=self.starting_capital or 0.0,
             )
+        # The figure a new book opens at is what the platform reports it can spend. For a book that
+        # already exists that figure is history: the platform's balance moves with every deposit,
+        # trade and settlement. Refusing to open a book whose opening figure differs from today's
+        # balance - a check left from when capital was typed into configuration - would have kept
+        # the robot from starting again after its first trade.
         with self.path.open("r", encoding="utf-8") as handle:
-            state = AccountState.from_dict(json.load(handle))
-        if (
-            self.starting_capital is not None
-            and abs(state.starting_capital - self.starting_capital) > 1e-9
-        ):
-            raise ValueError(
-                "Existing state uses a different starting capital; choose a new "
-                "PREDICTION_AGENT_STATE_FILE"
-            )
-        return state
+            return AccountState.from_dict(json.load(handle))
 
     def save(self, state: AccountState) -> None:
         state.updated_at = int(time.time() * 1000)

@@ -291,8 +291,19 @@ class PredictionMarketApiPlugin(Protocol):
     ) -> bool | None: ...
 
 
-def platform_state_path(configured: Path, platform: str, multiple: bool) -> Path:
-    if not multiple:
-        return configured
-    suffix = configured.suffix or ".json"
-    return configured.with_name(f"{configured.stem}-{platform}{suffix}")
+def platform_state_path(
+    configured: Path, platform: str, multiple: bool, *, paper: bool = False
+) -> Path:
+    """Where one platform's account book lives.
+
+    A paper run keeps a book of its own. Its fills are simulated and its opening figure is declared;
+    sharing the live file would put simulated positions into the real account's history, real ones
+    into the simulation, and leave neither readable.
+    """
+    path = configured
+    if multiple:
+        suffix = configured.suffix or ".json"
+        path = configured.with_name(f"{configured.stem}-{platform}{suffix}")
+    if paper:
+        path = path.with_name(f"{path.stem}.paper{path.suffix or '.json'}")
+    return path

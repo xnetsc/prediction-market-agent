@@ -120,7 +120,9 @@ def bootstrap_engine(
                 config.paper_trading_funds,
             )
         for plugin in [GuardedMarketApi(item, risk) for item in prepared]:
-            state_path = platform_state_path(config.state_file, plugin.name, multiple)
+            state_path = platform_state_path(
+                config.state_file, plugin.name, multiple, paper=bool(config.paper_trading)
+            )
             store = StateStore(state_path, _reported_funds(plugin))
             state = store.load()
             gateway = plugin.create_write_gateway(state)

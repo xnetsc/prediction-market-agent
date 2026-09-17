@@ -442,7 +442,9 @@ class AuditData:
         current = Config.load(self.config.application_config_file)
         multiple = len(current.market_api_plugins) > 1
         return {
-            name: platform_state_path(current.state_file, name, multiple)
+            name: platform_state_path(
+                current.state_file, name, multiple, paper=bool(current.paper_trading)
+            )
             for name in current.market_api_plugins
         }
 

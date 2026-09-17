@@ -252,7 +252,10 @@ class FundingConversationTests(unittest.TestCase):
             instructions=BuiltInDecisionStrategy().instructions,
         )
         self.assertIn("ENSURE_FUNDS", captured[0])
-        self.assertIn("A pending request is not funding", captured[0])
+        # Funding follows the decision; it never replaces it.
+        self.assertIn("The balance never decides the trade", captured[0])
+        self.assertIn("a request still waiting does not turn a BUY into a HOLD", captured[0])
+        self.assertNotIn("A pending request is not funding", captured[0])
 
 
 class FundingContinuationTests(unittest.TestCase):

@@ -434,8 +434,8 @@ class FundingLifecycleTests(unittest.TestCase):
                 self.assertEqual(plugin.funding_status(asked.request_id).operator_note, note)
 
 
-class NothingStopsAnUnfundedBuyTests(unittest.TestCase):
-    """The framework does not check affordability, so what does has to be stated, not assumed."""
+class TheVenueNotTheDecisionChecksTheMoneyTests(unittest.TestCase):
+    """Affordability is settled where the order lands, never by holding back the decision."""
 
     def test_an_order_with_no_cash_reaches_the_venue(self) -> None:
         """Recorded because it is surprising: the venue refuses it, nothing here does."""
@@ -462,12 +462,16 @@ class NothingStopsAnUnfundedBuyTests(unittest.TestCase):
         self.assertEqual(sent, ["order"])
         self.assertLess(state.cash, 0)
 
-    def test_the_built_in_strategy_tells_the_model_to_check_and_ask(self) -> None:
-        """Since nothing enforces it, the instruction is the only thing standing there."""
+    def test_the_built_in_strategy_decides_on_the_market_and_may_ask_for_money(self) -> None:
+        """47 of 53 holds said the account was empty, and not one asked for funds."""
         from prediction_market_agent.agent.strategy import BuiltInDecisionStrategy
 
         text = BuiltInDecisionStrategy().instructions
         for expected in ("ACCOUNT_FUNDS", "ENSURE_FUNDS", "FUNDING_STATUS"):
             with self.subTest(tool=expected):
                 self.assertIn(expected, text)
-        self.assertIn("A pending request is not funding", text)
+        self.assertIn("The balance never decides the trade", text)
+        self.assertIn("a request still waiting does not turn a BUY into a HOLD", text)
+        for gone in ("Do not propose a buy larger than ACCOUNT_FUNDS", "A pending request is not funding"):
+            with self.subTest(removed=gone):
+                self.assertNotIn(gone, text)

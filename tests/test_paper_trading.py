@@ -245,3 +245,76 @@ class PolymarketCanReportAWinnerTests(unittest.TestCase):
                 detail, market, outcome
             )
         )
+
+
+class TheMoneyIsCheckedWhereAVenueChecksItTests(unittest.TestCase):
+    """A decision is made on the market; whether it can be paid for is settled at the order."""
+
+    def _paper(self, cash: float):
+        from prediction_market_agent.core.domain import AccountState
+
+        state = AccountState(starting_capital=cash, cash=cash)
+        transport = PaperWriteTransport(FakeTransport(), state)
+        return transport, state
+
+    def test_a_buy_the_account_cannot_cover_is_refused_like_a_venue_would(self) -> None:
+        paper, _ = self._paper(5.0)
+        quote = paper.get_quote(outcome_id="t", side="BUY", amount="12", fee_bps=30)
+        with self.assertRaises(RuntimeError) as refused:
+            paper.place_order(quote_id=quote["quoteId"], order_type="MARKET", price_limit=None)
+        self.assertIn("模拟资金不足", str(refused.exception))
+        self.assertIn("12.04", str(refused.exception))
+        self.assertEqual(paper.orders, {}, "a refused order is not a fill")
+
+    def test_a_buy_it_can_cover_fills_and_a_sale_needs_no_money(self) -> None:
+        paper, _ = self._paper(20.0)
+        quote = paper.get_quote(outcome_id="t", side="BUY", amount="12", fee_bps=30)
+        self.assertEqual(paper.place_order(quote_id=quote["quoteId"], order_type="MARKET", price_limit=None)["status"], "FILLED")
+        broke, _ = self._paper(0.0)
+        sale = broke.get_quote(outcome_id="t", side="SELL", amount="5", fee_bps=30)
+        self.assertEqual(broke.place_order(quote_id=sale["quoteId"], order_type="MARKET", price_limit=None)["status"], "FILLED")
+
+    def test_what_the_account_reports_is_what_is_left_not_what_was_declared(self) -> None:
+        from prediction_market_agent.core.domain import AccountState
+
+        plugin = SimpleNamespace(
+            name="p", capabilities=None,
+            account_funds=lambda: SimpleNamespace(available=0.0, currency="USDC"),
+            create_write_gateway=lambda state: SimpleNamespace(write_transport=FakeTransport()),
+        )
+        api = PaperMarketApi(plugin, 100.0)
+        self.assertEqual(api.account_funds().available, 100.0, "before trading, the declared figure")
+        state = AccountState(starting_capital=100.0, cash=100.0)
+        api.create_write_gateway(state)
+        state.cash = 30.0
+        funds = api.account_funds()
+        self.assertEqual(funds.available, 30.0)
+        self.assertEqual(funds.detail["declared"], 100.0)
+        self.assertEqual(api.ensure_funds(25.0, "USDC").state, "satisfied")
+        self.assertEqual(api.ensure_funds(40.0, "USDC").state, "refused")
+
+
+class APaperRunKeepsItsOwnBookTests(unittest.TestCase):
+    def test_the_paper_book_never_shares_the_live_file(self) -> None:
+        from pathlib import Path
+        from prediction_market_agent.plugin_system.contracts import platform_state_path
+
+        live = Path("agent_state.json")
+        self.assertEqual(platform_state_path(live, "polymarket", False), live)
+        self.assertEqual(platform_state_path(live, "polymarket", False, paper=True), Path("agent_state.paper.json"))
+        self.assertEqual(
+            platform_state_path(live, "polymarket", True, paper=True), Path("agent_state-polymarket.paper.json")
+        )
+
+    def test_an_existing_book_opens_whatever_the_platform_reports_today(self) -> None:
+        """The balance moves with every trade; the book's opening figure does not."""
+        import tempfile
+        from pathlib import Path
+        from prediction_market_agent.core.state import StateStore
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "state.json"
+            store = StateStore(path, 0.0)
+            store.save(store.load())
+            reopened = StateStore(path, 250.0).load()
+            self.assertEqual(reopened.starting_capital, 0.0)

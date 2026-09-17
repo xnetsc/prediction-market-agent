@@ -144,7 +144,9 @@ def main() -> None:
         )
         multiple = len(config.market_api_plugins) > 1
         state_files = {
-            name: platform_state_path(config.state_file, name, multiple)
+            name: platform_state_path(
+                config.state_file, name, multiple, paper=bool(config.paper_trading)
+            )
             for name in config.market_api_plugins
         }
         print(

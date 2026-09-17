@@ -38,8 +38,11 @@ class PaperWriteTransport:
     calls that change something at the venue are answered locally.
     """
 
-    def __init__(self, real: Any):
+    def __init__(self, real: Any, state: Any = None):
         self._real = real
+        # The simulated account, so a buy can be refused the way the venue would refuse it.
+        self._state = state
+        self._quoted: dict[str, tuple[str, float, int]] = {}
         self.orders: dict[str, dict[str, Any]] = {}
 
     def __getattr__(self, item: str) -> Any:
@@ -48,7 +51,17 @@ class PaperWriteTransport:
 
     def get_quote(self, **values: Any) -> dict[str, Any]:
         """The venue's real price. Guessing it would make every number downstream fiction."""
-        return self._real.get_quote(**values)
+        quote = self._real.get_quote(**values)
+        if isinstance(quote, dict) and quote.get("quoteId"):
+            try:
+                self._quoted[str(quote["quoteId"])] = (
+                    str(values.get("side", "")).upper(),
+                    float(values.get("amount") or 0),
+                    int(values.get("fee_bps") or 0),
+                )
+            except (TypeError, ValueError):
+                pass
+        return quote
 
     def place_order(self, **values: Any) -> dict[str, Any]:
         """Fill at the quote, immediately and completely - and never at a better price.
@@ -57,6 +70,17 @@ class PaperWriteTransport:
         slippage. Being explicit about that is the point. What it must not also do is improve on the
         price the venue quoted, which would turn the exercise into a machine for encouraging numbers.
         """
+        # A venue checks the money when the order arrives and refuses what it cannot cover; the
+        # decision that sent it is not the place for that check. The simulation has to refuse in the
+        # same place, or every trade the account could never have paid for shows up as a fill.
+        side, amount, fee_bps = self._quoted.pop(str(values.get("quote_id", "")), ("", 0.0, 0))
+        if side == "BUY" and self._state is not None:
+            cost = amount * (1 + fee_bps / 10_000)
+            spendable = float(self._state.cash)
+            if cost > spendable + 1e-9:
+                raise RuntimeError(
+                    f"纸面交易：模拟资金不足，这笔买入需要 {cost:.2f}，可用 {max(0.0, spendable):.2f}"
+                )
         order_id = f"paper-{uuid.uuid4().hex[:12]}"
         order = {
             "orderId": order_id,
@@ -100,6 +124,11 @@ class PaperMarketApi:
     def __init__(self, plugin: Any, declared_funds: float):
         self._plugin = plugin
         self._declared = float(declared_funds)
+        self._state: Any = None
+
+    def _spendable(self) -> float:
+        """What the simulated account has left: the declared figure until trading starts moving it."""
+        return float(self._state.cash) if self._state is not None else self._declared
 
     @property
     def name(self) -> str:
@@ -122,8 +151,9 @@ class PaperMarketApi:
         from ..plugin_system.contracts import AccountFunds
 
         detail: dict[str, Any] = {
-            "why": "纸面交易模式：这是你填的模拟金额，不是真钱，也不是平台余额",
+            "why": "纸面交易模式：这是模拟账户里剩下的钱，不是真钱，也不是平台余额",
             "paper_trading": True,
+            "declared": self._declared,
         }
         try:
             real = self._plugin.account_funds()
@@ -133,11 +163,11 @@ class PaperMarketApi:
             detail["platform_balance_error"] = str(error)[:200]
             currency = ""
         return AccountFunds(
-            available=self._declared, currency=currency, source=SIMULATED, detail=detail
+            available=self._spendable(), currency=currency, source=SIMULATED, detail=detail
         )
 
     def ensure_funds(self, amount: float, currency: str, **options: Any) -> Any:
-        """Granted on the spot, up to the declared figure, and refused beyond it.
+        """Granted on the spot, up to what the simulated account still holds, and refused beyond it.
 
         The operator already answered this question by choosing a number. Asking them again per
         request would test their patience rather than the robot, and silently granting any amount
@@ -147,22 +177,25 @@ class PaperMarketApi:
         from ..plugin_system.contracts import FundingResult
 
         del options
-        satisfied = amount <= self._declared
+        spendable = self._spendable()
+        satisfied = amount <= spendable + 1e-9
         return FundingResult(
             request_id="",
             state="satisfied" if satisfied else "refused",
             requested=amount,
             currency=currency,
-            available=self._declared,
+            available=spendable,
             action="paper_trading",
             detail=(
-                "纸面交易模式：模拟金额已满足，没有真实资金变动"
+                "纸面交易模式：模拟账户里的钱够用，没有真实资金变动"
                 if satisfied
-                else f"纸面交易模式：模拟金额上限是 {self._declared}，本次请求超出，未满足"
+                else f"纸面交易模式：模拟账户只剩 {spendable:.2f}，不够 {amount:.2f}；"
+                     "要继续模拟，到程序设置里调高纸面交易金额"
             ),
         )
 
     def create_write_gateway(self, state: Any) -> Any:
         gateway = self._plugin.create_write_gateway(state)
-        gateway.write_transport = PaperWriteTransport(gateway.write_transport)
+        gateway.write_transport = PaperWriteTransport(gateway.write_transport, state)
+        self._state = state
         return gateway
