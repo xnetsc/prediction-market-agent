@@ -66,7 +66,10 @@ def bootstrap_engine(
     catalog = catalog or load_plugin_catalog(config)
     try:
         strategy_name = config.decision_strategy_name.strip().lower()
-        decision_strategy = BuiltInDecisionStrategy()
+        decision_strategy = BuiltInDecisionStrategy(
+            horizon_days=config.strategy_horizon_days,
+            max_trade_usdt=config.strategy_max_trade_usdt,
+        )
         if strategy_name:
             try:
                 decision_strategy = catalog.get(
@@ -178,7 +181,7 @@ def _discovery_strategy(config: Config, catalog: PluginCatalog) -> Any:
                 name,
                 error,
             )
-    return BuiltInMarketDiscovery()
+    return BuiltInMarketDiscovery(horizon_days=config.strategy_horizon_days)
 
 
 def _optional_research(config: Config, catalog: PluginCatalog) -> list[Any]:

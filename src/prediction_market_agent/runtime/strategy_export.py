@@ -114,12 +114,15 @@ def export_strategies(
                     overlay_key=DISCOVERY_EVOLUTION_KEY,
                     memory=store,
                 )
-                builtin = BuiltInMarketDiscovery()
+                builtin = BuiltInMarketDiscovery(horizon_days=config.strategy_horizon_days)
             else:
                 active = (
                     engine.decision_evolution.strategy
                     if engine is not None
-                    else BuiltInDecisionStrategy()
+                    else BuiltInDecisionStrategy(
+                        horizon_days=config.strategy_horizon_days,
+                        max_trade_usdt=config.strategy_max_trade_usdt,
+                    )
                 )
                 runner = DecisionEvolution(
                     memory=store,
@@ -141,7 +144,10 @@ def export_strategies(
                     overlay_key=DECISION_EVOLUTION_KEY,
                     memory=store,
                 )
-                builtin = BuiltInDecisionStrategy()
+                builtin = BuiltInDecisionStrategy(
+                    horizon_days=config.strategy_horizon_days,
+                    max_trade_usdt=config.strategy_max_trade_usdt,
+                )
 
             if view["source"] != "built-in":
                 # The built-in keeps evolving underneath an operator plugin, so report it too.

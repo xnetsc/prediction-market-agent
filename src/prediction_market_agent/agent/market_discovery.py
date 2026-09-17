@@ -44,8 +44,10 @@ resolution source and the wording, follow the page that states it. Spend that ef
 candidates that would actually earn a slot if they checked out, not evenly across the shortlist.
 Say "unverifiable" only about something you tried to verify and could not, and then say what you
 tried - that is a finding. "No data" about something you never looked up is not a reason.
-- Time gate. An expiry too near for the runtime to act before resolution, and an expiry so far
-  that capital would sit idle across the whole horizon, are both poor uses of a decision slot.
+- Time gate. This runtime works a small amount of money through quick trades, so only markets
+  settling within {horizon} are candidates; anything dated further out has already been dropped
+  from your shortlist, and a decision would refuse it anyway. An expiry too near for a decision to
+  be acted on before it resolves is no better a use of a slot.
 - Status gate. Closed, halted, or non-accepting markets are never candidates.
 
 ROTATION AND BUDGET DISCIPLINE
@@ -209,8 +211,15 @@ class BuiltInMarketDiscovery:
     """
 
     name: str = "built_in"
-    instructions: str = DISCOVERY_CORE_INSTRUCTIONS
     evolution_switchable: bool = False
+    horizon_days: int = 3
+    """Settlements further out than this are not candidates; the operator sets it in settings."""
+
+    @property
+    def instructions(self) -> str:
+        """The text with the operator's horizon written into it, which is what its hash covers."""
+        horizon = f"{int(self.horizon_days)} day" + ("" if int(self.horizon_days) == 1 else "s")
+        return DISCOVERY_CORE_INSTRUCTIONS.replace("{horizon}", horizon)
 
     @property
     def sha256(self) -> str:

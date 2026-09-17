@@ -511,12 +511,29 @@ class DiscoveryEngine:
             }
             for topic in shortlist
         ]
+        # Candidates that settle past the horizon are dropped here rather than argued about by the
+        # model: it costs nothing to leave them out, and a shortlist made mostly of them wastes the
+        # round on markets no decision would be allowed to trade anyway. How many went, and why, is
+        # part of what the round is told, so an empty shortlist is not a mystery.
+        horizon_days = int(getattr(self.strategy, "horizon_days", 0) or 0)
+        too_far = 0
+        if horizon_days > 0:
+            limit = horizon_days * 86400
+            kept = []
+            for candidate in candidates:
+                seconds = candidate.get("seconds_remaining")
+                if isinstance(seconds, (int, float)) and seconds > limit:
+                    too_far += 1
+                    continue
+                kept.append(candidate)
+            candidates = kept
         request = {
             "platform": platform,
             "platform_capabilities": plugin.capabilities.to_dict(),
             "maximum_selections": maximum_topics,
             "discovery_strategy": prompt_json_payload(payload),
             "candidates": candidates,
+            **({"dropped_settling_after_horizon": too_far} if too_far else {}),
         }
         # Every call to a model leaves a row, this one included. It used to leave none: a discovery
         # round that failed, or that judged nothing worth a slot, produced no ledger entry at all,

@@ -472,6 +472,11 @@ class TheVenueNotTheDecisionChecksTheMoneyTests(unittest.TestCase):
                 self.assertIn(expected, text)
         self.assertIn("The balance never decides the trade", text)
         self.assertIn("a request still waiting does not turn a BUY into a HOLD", text)
+        # Asked for after the size is decided, and for that size - one run asked for the whole
+        # depth of the book before it had settled on a trade at all.
+        self.assertIn("Size the trade first", text)
+        self.assertIn("call ENSURE_FUNDS for exactly that", text)
+        self.assertIn("Not for what the book could absorb", text)
         for gone in ("Do not propose a buy larger than ACCOUNT_FUNDS", "A pending request is not funding"):
             with self.subTest(removed=gone):
                 self.assertNotIn(gone, text)

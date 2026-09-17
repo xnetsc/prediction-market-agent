@@ -122,6 +122,20 @@ APPLICATION_FIELDS = (
         1000, 0, 100000000,
     ),
     ApplicationConfigField(
+        "strategy_horizon_days", "内置策略：只做多少天内揭标的标的", "integer",
+        "内置策略只把这个天数内结算的标的当作机会：钱压在一个要等几个月的标的上，就没法去做下一笔，"
+        "而短周期标的的对错很快就能看见，机器人也才学得快。发现阶段直接不把更远的标的交给决策，"
+        "决策阶段也不会买它们。换成你自己的策略插件时，这个值不再起作用。",
+        3, 1, 365,
+    ),
+    ApplicationConfigField(
+        "strategy_max_trade_usdt", "内置策略：单笔最多买多少", "integer",
+        "内置策略给单笔买入的上限（计价货币单位，通常是 USDT/USDC）。它要的是小额多次、快进快出，"
+        "不是一次压很多。注意这是策略自己的约束，不是框架强制的风控：要真正的硬上限，"
+        "请在插件中心启用业务风控插件。",
+        25, 1, 100000000,
+    ),
+    ApplicationConfigField(
         "agent_max_tool_steps", "Agent 工具步骤上限", "integer",
         "每次最终决策前允许 Agent 自主调用研究工具的最大次数。它手上有二十多个工具（盘口、K 线、跨平台比价、"
         "网页搜索、抓取页面、历史召回、查账），四步连把结算条款读完都不够，于是结论会普遍变成「信息不足，"
@@ -304,6 +318,12 @@ class Config:
     paper_trading_funds: float = 0.0
     """What the account is told it holds while paper trading. Meaningless when that is off."""
 
+    strategy_horizon_days: int = 3
+    """How far out the built-in strategy will look. Beyond it, capital is committed for too long."""
+
+    strategy_max_trade_usdt: float = 25.0
+    """The built-in strategy's own ceiling on one buy. Not a framework limit; a risk plugin is that."""
+
     agent_max_tool_steps: int = 12
     agent_tool_result_chars: int = 12_000
     context_window_chars: int = 60_000
@@ -345,6 +365,8 @@ class Config:
             agent_language=str(values["agent_language"]),
             paper_trading=str(values["paper_trading"]) == "on",
             paper_trading_funds=float(values["paper_trading_funds"]),
+            strategy_horizon_days=int(values["strategy_horizon_days"]),
+            strategy_max_trade_usdt=float(values["strategy_max_trade_usdt"]),
             agent_max_tool_steps=int(values["agent_max_tool_steps"]),
             agent_tool_result_chars=int(values["agent_tool_result_chars"]),
             context_window_chars=int(values["context_window_chars"]),

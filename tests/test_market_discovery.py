@@ -3,6 +3,7 @@ from __future__ import annotations
 import tempfile
 import time
 import unittest
+from dataclasses import replace
 from types import SimpleNamespace
 from pathlib import Path
 
@@ -936,3 +937,79 @@ class DeadlineLadderTests(unittest.TestCase):
         self.assertEqual([m["status"] for m in detail["markets"][:2]], ["OPEN", "OPEN"])
         self.assertEqual(detail["markets_total"], 12)
         self.assertEqual(detail["markets_open"], 2)
+
+
+class ShortDatedSmallAndOutAgainTests(unittest.TestCase):
+    """The built-in strategy works a small amount of money through quick trades."""
+
+    def test_both_strategies_carry_the_operators_horizon(self) -> None:
+        from prediction_market_agent.agent.market_discovery import BuiltInMarketDiscovery
+        from prediction_market_agent.agent.strategy import BuiltInDecisionStrategy
+
+        discovery = BuiltInMarketDiscovery(horizon_days=3)
+        self.assertIn("settling within 3 days", discovery.instructions)
+        decision = BuiltInDecisionStrategy(horizon_days=3, max_trade_usdt=25)
+        self.assertIn("Only outcomes settling within 3 days", decision.instructions)
+        self.assertIn("Size each buy at or under 25 USDT", decision.instructions)
+        self.assertIn("Settling later than 3 days is a HOLD", decision.instructions)
+        self.assertIn("Never propose a buy larger than 25 USDT", decision.instructions)
+
+    def test_changing_the_setting_changes_the_text_and_its_hash(self) -> None:
+        """The hash is what the ledger records, so it has to follow what the model was told."""
+        from prediction_market_agent.agent.strategy import BuiltInDecisionStrategy
+
+        near, far = BuiltInDecisionStrategy(), BuiltInDecisionStrategy(horizon_days=30, max_trade_usdt=500)
+        self.assertIn("30 days", far.instructions)
+        self.assertIn("500 USDT", far.instructions)
+        self.assertNotEqual(near.sha256, far.sha256)
+
+    def test_the_settings_reach_the_strategies_that_run(self) -> None:
+        source = Path("src/prediction_market_agent/runtime/bootstrap.py").read_text()
+        self.assertIn("horizon_days=config.strategy_horizon_days", source)
+        self.assertIn("max_trade_usdt=config.strategy_max_trade_usdt", source)
+
+    def test_a_settlement_past_the_horizon_never_reaches_the_round(self) -> None:
+        """Arguing with the model about markets it may not trade spends a call to be refused."""
+        from prediction_market_agent.agent.market_discovery import BuiltInMarketDiscovery
+
+        provider = RecordingProvider()
+        DiscoveryEngine(
+            memory=self.memory, provider=provider,
+            strategy=BuiltInMarketDiscovery(horizon_days=3), evolution_enabled=False,
+        ).discover(platform="fake", plugin=_HorizonPlatform(), maximum_topics=2)
+        request = provider.requests[0]
+        self.assertEqual({item["topic_id"] for item in request["candidates"]}, {"1", "2"},
+                         "the near-dated ones are what a quick trade can use")
+        for item in request["candidates"]:
+            self.assertLessEqual(item["seconds_remaining"], 3 * 86400)
+        self.assertEqual(request["dropped_settling_after_horizon"], 2)
+
+    def test_a_strategy_without_a_horizon_is_left_alone(self) -> None:
+        from prediction_market_agent.agent.market_discovery import BuiltInMarketDiscovery
+
+        provider = RecordingProvider()
+        DiscoveryEngine(
+            memory=self.memory, provider=provider,
+            strategy=BuiltInMarketDiscovery(horizon_days=0), evolution_enabled=False,
+        ).discover(platform="fake", plugin=_HorizonPlatform(), maximum_topics=2)
+        self.assertEqual(len(provider.requests[0]["candidates"]), 4)
+        self.assertNotIn("dropped_settling_after_horizon", provider.requests[0])
+
+    def setUp(self) -> None:
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.memory = SessionMemory(Path(self.temp.name) / "m.sqlite3")
+
+
+_HORIZONS = {"1": 2 * 86400, "2": 12 * 3600, "3": 40 * 86400, "4": 400 * 86400}
+
+
+class _HorizonPlatform(FakePlugin):
+    """Two markets settling within days, two settling months out."""
+
+    def __init__(self) -> None:
+        super().__init__(topics=4)
+
+    def get_topic(self, topic_id: str):
+        detail = super().get_topic(topic_id)
+        return replace(detail, end_time_ms=int(time.time() * 1000) + _HORIZONS[topic_id] * 1000)
