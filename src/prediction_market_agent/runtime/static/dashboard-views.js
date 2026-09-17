@@ -989,6 +989,7 @@ async function hydrateDecisionEntry(entry){
 async function requestReadable(entry){
     if(!entry||entry.dataset.readable==='1'||entry.dataset.readableAsked==='1')return;
     if(entry.dataset.slim==='1')return; // the full record arrives first and asks again
+    if(entry.dataset.prose!=='1')return; // nothing written in prose here to restate
     entry.dataset.readableAsked='1';
     const note=entry.querySelector('.ledger-readable-note');
     if(note){note.hidden=false;note.textContent='正在让 AI 把这条整理成要点…'}
@@ -1254,6 +1255,16 @@ function resultHtml(r){
     return html;
 }
 
+function hasProse(r){
+    /* Whether there is anything a restatement could improve on. A round that failed before it
+       reached a conclusion has an error and nothing else: the card already says what happened, and
+       asking a model to rephrase it spends a call to produce the same sentence. */
+    const d=r.final_decision||r.proposed_decision||{};
+    return Boolean(cleanReason(d.rationale)||cleanReason(d.skipped_reason)||cleanReason(d.pacing_reason)
+        ||(d.selections||[]).some(p=>cleanReason(p&&p.reason))
+        ||cleanReason(r.risk_decision&&r.risk_decision.reason));
+}
+
 function headlineText(r){
     return cleanReason(r.readable?.headline)||cleanReason((r.final_decision||{}).headline)||'';
 }
@@ -1309,7 +1320,7 @@ function decisionEntriesHtml(rows){
         const headline=headlineText(r);
         const kind=isDiscovery(r)?'发现':'决策';
         const title=isDiscovery(r)?'发现轮次':marketTitle(r);
-        return '<details class="decision-entry" data-id="'+esc(r.id)+'" data-created="'+esc(r.created_at)+'" data-result="'+esc(String(r.result||r.status||'').toUpperCase())+'"'+(r.slim?' data-slim="1"':'')+(readable?' data-readable="1"':'')+' '+(opened.has(String(r.id))?'open':'')+'>'
+        return '<details class="decision-entry" data-id="'+esc(r.id)+'" data-created="'+esc(r.created_at)+'" data-result="'+esc(String(r.result||r.status||'').toUpperCase())+'"'+(r.slim?' data-slim="1"':'')+(readable?' data-readable="1"':'')+(hasProse(r)?' data-prose="1"':'')+' '+(opened.has(String(r.id))?'open':'')+'>'
             +'<summary><input type="checkbox" class="decision-pick" aria-label="选中这条" data-pick="'+esc(r.id)+'"'+(LEDGER_PICKED.has(String(r.id))?' checked':'')+' onclick="event.stopPropagation()" onchange="pickDecision(this)"><span class="decision-meta">'+esc(new Date(r.created_at).toLocaleString())+' · '+esc(r.platform)+' · '+kind+'</span>'
             +'<span class="decision-title">'+esc(title)+'</span>'
             +'<span class="decision-outcome">'+conclusionHtml(r)+'</span>'

@@ -113,6 +113,15 @@ if (title(quotaOnly) !== '机器人已暂停：AI 额度用完') failures.push('
 const unknownWhen = vm.runInContext('aiPauseHtml(setup, now)', Object.assign(context, { setup: quotaOnly, now }));
 expect('ai pause (no stated time)', unknownWhen, ['没说何时恢复，会定期免费查询额度']);
 
+// A record with nothing written in prose is not sent to a model to be rephrased.
+const proseChecks = [[hold, true], [discoveryFull, true], [discoveryFailed, false], [failed, false]];
+for (const [row, expected] of proseChecks) {
+  const marked = render([row]).includes('data-prose="1"');
+  if (marked !== expected) failures.push('prose gate: record ' + row.id + ' marked ' + marked);
+}
+if (!vm.runInContext('String(requestReadable)', context).includes("dataset.prose!=='1'"))
+  failures.push('prose gate: a record without prose would still cost a model call');
+
 // A restatement that arrived with markup around it is not printed with the markup.
 const restated = { ...hold, id: 10, readable: { headline: '观望', found: '<found>买一 0.12</found>', analysis: '看过资料。</analysi' } };
 const restatedHtml = render([restated]);
