@@ -856,6 +856,17 @@ class SessionMemory:
             return self._cancel_key(decision_id) in _CANCELLED
 
     IN_PROGRESS = "STARTED"
+
+    VENUE_ACTION_SQL = (
+        "NOT (COALESCE(json_extract(result_json, '$.status'), '') IN ('NO_ACTION', 'NO_POSITION')"
+        " OR action = 'RISK_REJECTED' OR action LIKE '%\\_FAILED' ESCAPE '\\')"
+    )
+    """Whether an execution row records something a venue actually did.
+
+    A decision that held, found nothing to sell, was refused by a rule, or failed before the order
+    was accepted changed nothing anywhere - deleting its record leaves no effect behind and no
+    balance to disagree with. A fill, a cancellation or a redemption did, and is what this protects.
+    """
     """The status a decision carries while the code that opened it is still running.
 
     Something is holding that id and will come back to complete it. Removing the row makes that
@@ -904,6 +915,10 @@ class SessionMemory:
         are kept as their own state rather than derived from these rows, so deleting an executed
         action would take away the record while leaving its effect - a ledger that disagrees with
         the balance is worse than an untidy one. Those rows are reported and left alone.
+
+        Every decision writes an execution row, including the ones that decided to do nothing, so
+        "has an execution row" protected all of them: every hold in the ledger refused to be
+        deleted, which is not what the protection is for.
         """
         selected = self._decisions_to_forget(decision_ids, status, platform)
         if not selected:
@@ -927,13 +942,15 @@ class SessionMemory:
         for decision_id in running:
             self.cancel_decision(decision_id)
         executed = self.connection.execute(
-            f"SELECT COUNT(*) FROM execution_actions WHERE decision_id IN ({marks})",
+            f"SELECT COUNT(*) FROM execution_actions "
+            f"WHERE decision_id IN ({marks}) AND {self.VENUE_ACTION_SQL}",
             selected,
         ).fetchone()[0]
         keep = [
             row[0]
             for row in self.connection.execute(
-                f"SELECT DISTINCT decision_id FROM execution_actions WHERE decision_id IN ({marks})",
+                f"SELECT DISTINCT decision_id FROM execution_actions "
+                f"WHERE decision_id IN ({marks}) AND {self.VENUE_ACTION_SQL}",
                 selected,
             )
         ]

@@ -594,11 +594,28 @@ class DeletingManyAtOnceTests(unittest.TestCase):
         self.data.forget_matching({"group": "failed"}, dry_run=False, until_id=preview["until_id"])
         self.assertEqual(self._remaining(), {later})
 
+    def test_deciding_to_do_nothing_is_not_a_trade_to_protect(self) -> None:
+        """Every decision writes an execution row, so protecting all of them protected every hold."""
+        held = self._row("NO_ACTION", "HOLD")
+        rejected = self._row("RISK_REJECTED", "BUY")
+        failed = self._row("EXECUTION_ERROR", "BUY")
+        for decision_id, action, result in (
+            (held, "HOLD", {"status": "NO_ACTION"}),
+            (rejected, "RISK_REJECTED", {"status": "REJECT", "reason": "over the limit"}),
+            (failed, "BUY_FAILED", {"status": "EXECUTION_ERROR", "error": "venue refused"}),
+        ):
+            self.memory.record_action(platform="polymarket", market_topic_id="t", token_id=str(decision_id),
+                                      action=action, request={}, result=result, decision_id=decision_id)
+        answer = self.data.forget_decisions([held, rejected, failed], "", "")
+        self.assertEqual((answer["decisions"], answer["kept_executed"]), (3, 0))
+        self.assertEqual(self._remaining(), set())
+
     def test_executed_trades_are_kept_and_named(self) -> None:
         traded = self._row("COMPLETED", "BUY")
         self._row("COMPLETED", "BUY")
-        self.memory.record_action(platform="polymarket", market_topic_id="t", token_id="x", action="PLACE_ORDER",
-                                  request={}, result={}, decision_id=traded)
+        self.memory.record_action(platform="polymarket", market_topic_id="t", token_id="x", action="BUY",
+                                  request={}, result={"status": "FILLED", "order": {"order_id": "o-1"}},
+                                  decision_id=traded)
         preview = self.data.forget_matching({"group": "concluded", "results": "BUY"}, dry_run=True)
         self.assertEqual((preview["matching"], preview["kept_executed"]), (2, 1))
         answer = self.data.forget_matching({"group": "concluded", "results": "BUY"}, dry_run=False)

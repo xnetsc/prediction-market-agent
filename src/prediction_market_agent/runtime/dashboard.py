@@ -637,7 +637,7 @@ class AuditData:
                     marks = ",".join("?" for _ in chunk)
                     executed += connection.execute(
                         f"SELECT COUNT(DISTINCT decision_id) FROM execution_actions "
-                        f"WHERE decision_id IN ({marks})", chunk,
+                        f"WHERE decision_id IN ({marks}) AND {SessionMemory.VENUE_ACTION_SQL}", chunk,
                     ).fetchone()[0]
                     running += connection.execute(
                         f"SELECT COUNT(*) FROM decision_ledger WHERE id IN ({marks}) AND status = ?",
