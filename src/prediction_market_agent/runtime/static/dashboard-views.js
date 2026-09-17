@@ -1155,7 +1155,10 @@ function foundText(r){
         const total=r.context?.candidate_count??candidates?.length;
         const priced=r.context?.priced_count??(candidates?candidates.filter(c=>c&&'spread' in c).length:undefined);
         if(total===undefined)return '这一轮的候选市场没有存下来';
-        return total+' 个候选市场'+(priced!==undefined?'，其中 '+priced+' 个读到了真实价差':'');
+        const dropped=r.context?.dropped_settling_after_horizon;
+        const days=r.context?.horizon_days;
+        return total+' 个候选市场'+(priced!==undefined?'，其中 '+priced+' 个读到了真实价差':'')
+            +(dropped?'；另有 '+dropped+' 个结算太远'+(days?'（超过 '+days+' 天）':'')+'，没进这一轮':'');
     }
     const market=marketTitle(r);
     const side=r.context?.outcome?.name;

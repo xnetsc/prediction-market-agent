@@ -546,8 +546,12 @@ class DiscoveryEngine:
             token_id="",
             strategy_name=f"{self.strategy.name}:discovery",
             strategy_sha256=self.strategy.sha256,
+            # What the round was working from, including what it never saw: a shortlist of one is
+            # a different story depending on whether five were dropped for settling too far out.
             context={"stage": "discovery", "candidates": candidates,
-                     "maximum_selections": maximum_topics},
+                     "maximum_selections": maximum_topics,
+                     **({"dropped_settling_after_horizon": too_far,
+                         "horizon_days": horizon_days} if too_far else {})},
         )
         try:
             result = self.provider.run(

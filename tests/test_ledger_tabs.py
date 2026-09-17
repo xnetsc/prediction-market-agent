@@ -311,6 +311,18 @@ class ListRowsAreLightTests(unittest.TestCase):
         self.assertTrue(slim["slim"])
         self.assertLess(len(json.dumps(slim)), len(json.dumps(heavy)) / 20)
 
+    def test_a_discovery_row_keeps_what_it_never_saw(self) -> None:
+        """A shortlist of one reads differently when five were dropped for settling too far out."""
+        from prediction_market_agent.runtime.dashboard import _slim_decision
+
+        slim = _slim_decision({
+            "id": 2,
+            "context": {"stage": "discovery", "candidates": [{"topic_id": "1", "title": "t"}],
+                        "dropped_settling_after_horizon": 5, "horizon_days": 3},
+        })
+        self.assertEqual(slim["context"]["dropped_settling_after_horizon"], 5)
+        self.assertEqual(slim["context"]["horizon_days"], 3)
+
     def test_an_opened_row_fetches_its_full_record(self) -> None:
         shell = self._shell()
         self.assertIn('if path == "/api/decisions/detail":', shell)

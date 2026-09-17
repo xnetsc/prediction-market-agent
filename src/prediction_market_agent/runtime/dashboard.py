@@ -448,6 +448,9 @@ def _slim_decision(item: dict[str, Any]) -> dict[str, Any]:
             for c in candidates if isinstance(c, dict)
         }
         kept["priced_count"] = sum(1 for c in candidates if isinstance(c, dict) and "spread" in c)
+        for key in ("dropped_settling_after_horizon", "horizon_days"):
+            if key in context:
+                kept[key] = context[key]
     slim["context"] = kept
     research = item.get("research")
     slim["research_count"] = len(research) if isinstance(research, list) else 0
