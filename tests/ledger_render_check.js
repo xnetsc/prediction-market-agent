@@ -113,6 +113,13 @@ if (title(quotaOnly) !== '机器人已暂停：AI 额度用完') failures.push('
 const unknownWhen = vm.runInContext('aiPauseHtml(setup, now)', Object.assign(context, { setup: quotaOnly, now }));
 expect('ai pause (no stated time)', unknownWhen, ['没说何时恢复，会定期免费查询额度']);
 
+// A restatement that arrived with markup around it is not printed with the markup.
+const restated = { ...hold, id: 10, readable: { headline: '观望', found: '<found>买一 0.12</found>', analysis: '看过资料。</analysi' } };
+const restatedHtml = render([restated]);
+if (/&lt;\/?(analysi|found)/.test(restatedHtml))
+  failures.push('restated: markup from the model reached the card');
+if (!restatedHtml.includes('买一 0.12')) failures.push('restated: the restatement itself was lost');
+
 // Selecting rows to delete: the tick is part of the row and survives the row being redrawn.
 if (!render([hold]).includes('class="decision-pick"')) failures.push('pick: rows carry no checkbox');
 vm.runInContext('LEDGER_PICKED.add("1")', context);

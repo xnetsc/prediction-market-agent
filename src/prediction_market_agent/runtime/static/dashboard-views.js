@@ -1001,8 +1001,8 @@ async function requestReadable(entry){
         }
         const found=entry.querySelector('[data-slot="found"]');
         const analysis=entry.querySelector('[data-slot="analysis"]');
-        if(found&&answer.found)found.textContent=answer.found;
-        if(analysis&&answer.analysis)analysis.textContent=answer.analysis;
+        if(found&&answer.found)found.textContent=cleanReason(answer.found);
+        if(analysis&&answer.analysis)analysis.textContent=cleanReason(answer.analysis);
         if(answer.headline){
             const summary=entry.querySelector('summary');
             let line=summary&&summary.querySelector('.decision-reason');
@@ -1014,7 +1014,7 @@ async function requestReadable(entry){
             if(line)line.textContent=answer.headline;
         }
         entry.dataset.readable='1';
-        if(note)note.hidden=true;
+        if(note){note.hidden=true;note.textContent=''}
     }catch(e){
         if(note)note.textContent='没有整理：'+(e&&e.message||e);
         delete entry.dataset.readableAsked;
@@ -1088,8 +1088,9 @@ const TOOL_LABEL={
     SEARCH_WEB:'网页搜索',SEARCH_MARKETS:'搜其他预测市场',FETCH_URL:'读网页',REFRESH_MARKET:'刷新行情',GET_KLINES:'看价格走势',RECALL_HISTORY:'回看这个市场的记录',
 };
 const stepLabel=step=>step.tool?(TOOL_LABEL[String(step.tool).toUpperCase()]||String(step.tool)):(step.consulted_by?'回答反问':'查询');
-/* Model reasons sometimes arrive wrapped in the tag they were asked to write. */
-const cleanReason=text=>String(text||'').replace(/<\/?[a-z_]+>/gi,'').trim();
+/* Models sometimes wrap an answer in the tag they were asked for, and a length limit can cut the
+   closing tag in half - which is how "</analysi" reached a card. */
+const cleanReason=text=>String(text||'').replace(/<\/?[a-zA-Z_][\w-]*\s*\/?>|<\/[a-zA-Z_][\w-]*$/g,'').trim();
 
 function stepSubject(r,step){
     const a=step.arguments||{};
@@ -1254,7 +1255,7 @@ function resultHtml(r){
 }
 
 function headlineText(r){
-    return r.readable?.headline||(r.final_decision||{}).headline||'';
+    return cleanReason(r.readable?.headline)||cleanReason((r.final_decision||{}).headline)||'';
 }
 
 function keyNumbersHtml(r){
@@ -1320,8 +1321,8 @@ function decisionEntriesHtml(rows){
             +'<button class="decision-forget" title="删除这条记录" aria-label="删除这条记录" onclick="forgetDecision(event,'+esc(r.id)+')">×</button></summary>'
             +'<div class="ledger-card">'
             +'<dl class="ledger-four">'
-            +'<dt>发现了什么</dt><dd data-slot="found">'+esc(readable?.found||foundText(r))+'</dd>'
-            +'<dt>怎么分析的</dt><dd data-slot="analysis">'+esc(readable?.analysis||analysisText(r))+'</dd>'
+            +'<dt>发现了什么</dt><dd data-slot="found">'+esc(cleanReason(readable?.found)||foundText(r))+'</dd>'
+            +'<dt>怎么分析的</dt><dd data-slot="analysis">'+esc(cleanReason(readable?.analysis)||analysisText(r))+'</dd>'
             +'<dt>结论</dt><dd>'+conclusionHtml(r)+'</dd>'
             +'<dt>结果</dt><dd>'+resultHtml(r)+'</dd>'
             +'</dl>'

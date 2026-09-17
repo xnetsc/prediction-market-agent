@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import sqlite3
 import threading
 import time
@@ -338,10 +339,16 @@ READABLE_MISSION = (
     "Two short plain-language answers - what was found (the market, the price, what stood out) and "
     "how it was analysed (what was checked and what that showed) - plus a one-line headline stating "
     "the conclusion and the one fact it turned on. Do not restate the trade itself or its execution; "
+    "the card shows those, as recorded, right underneath - repeating them there wastes the one line "
+    "a scanning reader gives this. Write plain sentences with no markup or tags around them; "
     "those are shown separately exactly as recorded. Keep every number exactly as recorded. Use only "
     "what the record says, and where it says nothing, say so briefly rather than filling the gap. No "
     "field names, no JSON, no jargon a trader would not use."
 )
+
+
+_TAGS = re.compile(r"</?[a-zA-Z_][\w-]*\s*/?>|</[a-zA-Z_][\w-]*$")
+"""Markup a model wrapped its own answer in, including a closing tag the length limit cut short."""
 
 
 def _readable_brief(record: dict[str, Any]) -> dict[str, Any]:
@@ -791,7 +798,13 @@ class AuditData:
             )
         except Exception as error:
             return {"available": False, "reason": f"模型整理失败：{str(error)[:200]}"}
-        value = {key: str(result.value.get(key, "")).strip() for key in READABLE_SCHEMA["required"]}
+        # Models sometimes wrap an answer in the tag it was asked for, and the closing tag then rides
+        # along inside the value - or is cut off by the length limit, which is how "</analysi" reached
+        # the page.
+        value = {
+            key: _TAGS.sub("", str(result.value.get(key, ""))).strip()
+            for key in READABLE_SCHEMA["required"]
+        }
         memory = SessionMemory(self.config.session_db)
         try:
             memory.save_readable(decision_id, value)

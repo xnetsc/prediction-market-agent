@@ -470,6 +470,19 @@ class ReadableRecordTests(unittest.TestCase):
         self.assertFalse(answer["available"])
         self.assertIn("没有可用的 AI 模型服务", answer["reason"])
 
+    def test_markup_a_model_wrapped_its_answer_in_does_not_reach_the_page(self) -> None:
+        """A closing tag cut short by the length limit is how "</analysi" turned up on a card."""
+        provider = self._Provider()
+        provider.run = lambda payload, **options: SimpleNamespace(value={
+            "headline": "<headline>观望</headline>", "found": "BTC 买一 0.39",
+            "analysis": "理由充分。</analysi",
+        })
+        data, decision_id = self._audit(provider)
+        answer = data.readable(decision_id)
+        self.assertEqual(answer["headline"], "观望")
+        self.assertEqual(answer["analysis"], "理由充分。")
+        self.assertEqual(data.readable(decision_id)["analysis"], "理由充分。", "stored clean, not cleaned each read")
+
     def test_only_the_prose_is_restated(self) -> None:
         """Conclusion and result are recorded facts; a paraphrase can only make them less exact."""
         from prediction_market_agent.runtime.dashboard import READABLE_SCHEMA
