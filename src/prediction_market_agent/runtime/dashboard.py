@@ -54,7 +54,7 @@ HTML = r"""<!doctype html><html lang="zh-CN"><head><meta charset="utf-8">
 <section data-view="settings" hidden class="advanced-section"><details><summary>插件文件位置 <span>开发与自定义部署时修改</span></summary><p class="muted">程序从这些目录发现插件，每行一个目录。普通使用者无需改动；新增插件可在插件中心安装。</p><div id="pluginDirectories" class="plugin-grid"></div><div class="toolbar"><button class="primary" onclick="savePluginDirectories()">保存插件目录</button><button class="danger" onclick="resetPluginDirectories()">恢复默认目录</button></div></details></section>
 <section data-view="plugins" hidden id="pluginWorkspace"><div id="pluginCategoryHome"></div><nav id="pluginCategoryNav" class="subnav" aria-label="插件分类"></nav><div id="pluginCategoryGuide"></div><div class="toolbar plugin-management-tools"><button onclick="refreshPlugins()">重新扫描插件文件</button><span class="muted">新增、删除或更新文件后使用；不会替你启用插件。</span></div><div id="pluginManager"></div><div class="toolbar plugin-management-tools"><button class="primary" onclick="saveSelection()">保存启用与顺序</button><span id="manageStatus" class="status" role="status"></span></div></section>
 <section data-view="plugins" hidden><details><summary>安装新的自定义插件</summary><p class="muted">把受信任的 Python 插件源码写入已配置的类别目录。新插件安装后保持禁用，只扫描文件名；启用后才会导入并调用初始化函数。</p><div class="plugin-grid"><label class="field"><b>类别</b><select id="installKind" onchange="renderInstallTargets()"></select></label><label class="field"><b>安装目录</b><select id="installTarget"></select></label><label class="field"><b>插件名</b><input id="installName" placeholder="example_plugin"></label></div><label class="field"><b>Python 源码</b><textarea id="installSource" rows="14" placeholder="def initialize_plugin(context): ..."></textarea></label><div class="toolbar"><button class="primary" onclick="installPlugin()">安装并刷新</button><span id="installStatus" class="status muted"></span></div></details></section>
-<section data-view="decisions" hidden><h3>查看机器人为什么这样做</h3><p class="muted">一条记录是一次判断，不等于一笔成交。先看“最终动作”和“执行状态”，再展开查看证据与规则检查；没有后续观察时不能判断盈亏。</p><ol class="process-strip"><li>发现市场</li><li>收集证据</li><li>模型判断</li><li>风险检查</li><li>执行与跟踪</li></ol><div class="toolbar ledger-toolbar"><button class="primary" onclick="refreshAudit()" title="重新读取决策记录">↻ 刷新</button><span class="muted" id="ledgerStamp">尚未读取</span><span class="muted">这里不自动刷新——展开的记录不会在你读的时候被收起。</span><label class="ledger-language">决策依据语言 <select id="ledgerLanguage" onchange="saveLedgerLanguage(this.value)"><option value="zh">中文</option><option value="en">English</option></select></label><span class="status" id="ledgerLanguageStatus" role="status"></span></div><div class="ledger-tabs" role="tablist"><button role="tab" data-group="concluded" aria-selected="true" onclick="selectLedgerTab('concluded')">有结论 <span class="tab-count" id="tabCount_concluded"></span></button><button role="tab" data-group="running" aria-selected="false" onclick="selectLedgerTab('running')">分析中 <span class="tab-count" id="tabCount_running"></span></button><button role="tab" data-group="failed" aria-selected="false" onclick="selectLedgerTab('failed')">出错 <span class="tab-count" id="tabCount_failed"></span></button></div><p class="muted" id="ledgerTabNote"></p><div class="filter-bar"><label>平台<input id="platform" placeholder="全部平台"></label><label>模型服务<input id="providerFilter" placeholder="全部服务"></label><label>记录状态<select id="statusFilter"><option value="">全部状态</option><option value="STARTED">分析中</option><option value="PROVIDER_ERROR">模型调用失败</option><option value="RISK_REJECTED">规则拒绝，未执行</option><option value="EXECUTION_ERROR">执行失败</option><option value="COMPLETED">流程已完成</option></select></label><label>最终动作<select id="actionFilter"><option value="">全部动作</option><option value="BUY">买入</option><option value="SELL">卖出</option><option value="HOLD">观望</option><option value="CANCEL">撤单</option></select></label><button class="primary" onclick="refreshAudit()">查询记录</button></div></section>
+<section data-view="decisions" hidden><h3>查看机器人为什么这样做</h3><p class="muted">一条记录是一次判断，不等于一笔成交。先看“最终动作”和“执行状态”，再展开查看证据与规则检查；没有后续观察时不能判断盈亏。</p><ol class="process-strip"><li>发现市场</li><li>收集证据</li><li>模型判断</li><li>风险检查</li><li>执行与跟踪</li></ol><div class="toolbar ledger-toolbar"><button class="primary" onclick="refreshAudit()" title="重新读取决策记录">↻ 刷新</button><span class="muted" id="ledgerStamp">尚未读取</span><span class="muted">这里不自动刷新——展开的记录不会在你读的时候被收起。</span><label class="ledger-language">决策依据语言 <select id="ledgerLanguage" onchange="saveLedgerLanguage(this.value)"><option value="zh">中文</option><option value="en">English</option></select></label><span class="status" id="ledgerLanguageStatus" role="status"></span></div><div class="ledger-tabs" role="tablist"><button role="tab" data-group="concluded" aria-selected="true" onclick="selectLedgerTab('concluded')">有结论 <span class="tab-count" id="tabCount_concluded"></span></button><button role="tab" data-group="running" aria-selected="false" onclick="selectLedgerTab('running')">分析中 <span class="tab-count" id="tabCount_running"></span></button><button role="tab" data-group="failed" aria-selected="false" onclick="selectLedgerTab('failed')">出错 <span class="tab-count" id="tabCount_failed"></span></button></div><p class="muted" id="ledgerTabNote"></p><div class="result-chips" id="ledgerResultChips" role="group" aria-label="按结果筛选"></div><div class="filter-bar"><label>平台<input id="platform" placeholder="全部平台"></label><label>模型服务<input id="providerFilter" placeholder="全部服务"></label><label>记录状态<select id="statusFilter"><option value="">全部状态</option><option value="STARTED">分析中</option><option value="PROVIDER_ERROR">模型调用失败</option><option value="RISK_REJECTED">规则拒绝，未执行</option><option value="EXECUTION_ERROR">执行失败</option><option value="COMPLETED">流程已完成</option></select></label><button class="primary" onclick="refreshAudit()">查询记录</button></div></section>
 <section data-view="decisions" hidden><div class="section-heading"><div><h3>决策记录</h3><p>先显示最近 10 条，向下滚动每次再加载 5 条。点开一条记录才会读取它的完整证据。</p></div></div><div id="decisions"></div></section>
 <section data-view="decisions" hidden class="advanced-section"><details><summary>平台操作明细 <span>排查问题时展开</span></summary><p class="muted">发送给平台的操作和返回结果；请求失败不代表成交。</p><div id="actions"></div></details></section>
 <section data-view="decisions" hidden class="advanced-section"><details><summary>模型对话明细 <span>排查问题时展开</span></summary><p class="muted">一次决策可能多次询问模型。这里用于排查模型调用失败。</p><div id="turns"></div></details></section>
@@ -185,8 +185,8 @@ async function deletePasskey(id){if(!confirm('删除这个 Passkey？关联登�
 async function kickSessions(ids){let current=ids.includes(SESSION_ID);await post('/api/auth/sessions/kick',{ids});if(current){await dropKey();location='/api/auth/clear'}else await refreshSecurity()}
 async function kickSelectedSessions(){await kickSessions([...document.querySelectorAll('.sessionPick:checked')].map(e=>e.value))}
 async function logout(){try{await post('/api/auth/logout',{})}finally{await dropKey();location='/'}}
-async function refreshAudit(){setLedgerLoading(true);try{let p=document.getElementById('platform').value,q=p?'&platform='+encodeURIComponent(p):'',dq=q+'&provider='+encodeURIComponent(document.getElementById('providerFilter').value)+'&status='+encodeURIComponent(document.getElementById('statusFilter').value)+'&action='+encodeURIComponent(document.getElementById('actionFilter').value);dq+='&group='+encodeURIComponent(LEDGER_TAB);LEDGER_QUERY=dq;LEDGER_PLATFORM_QUERY=q;let [s,d,m]=await Promise.all([get('/api/summary'),get('/api/decisions?limit='+LEDGER_FIRST_PAGE+'&offset=0'+dq),get('/api/manifest')]);let ag=s.aggregate_account||{},cards=[['权益',ag.equity],['决策',s.summary?.decisions],['模型调用错误',s.summary?.provider_errors],['信息收集步骤',s.summary?.agent_steps]];document.getElementById('cards').innerHTML=cards.map(x=>'<div class=card><div class=muted>'+esc(x[0])+'</div><h2>'+esc(x[1]??'—')+'</h2></div>').join('');renderDecisionLedger(d.items);refreshLedgerTabCounts(q);resetDiagnosticPanels();document.getElementById('manifest').textContent=JSON.stringify(m,null,2);document.getElementById('stamp').textContent='更新 '+new Date().toLocaleTimeString();document.getElementById('ledgerStamp').textContent='读取于 '+new Date().toLocaleTimeString()}catch(e){document.getElementById('stamp').textContent='错误: '+e;document.getElementById('decisions').innerHTML='<div class="empty-state"><strong>没能读到决策记录</strong><p>'+esc(String(e&&e.message||e))+'</p></div>'}finally{setLedgerLoading(false)}}
-document.addEventListener('toggle',()=>activateChoiceLists(),true);document.getElementById('platform').onchange=refreshAudit;Promise.all([refreshSecurity(),refreshManager(),refreshConfiguration(),refreshAudit()]);setInterval(()=>Promise.all([refreshRuntime(),refreshClientControls()]),REFRESH_MS);
+async function refreshAudit(){setLedgerLoading(true);try{let p=document.getElementById('platform').value,q=p?'&platform='+encodeURIComponent(p):'',dq=q+'&provider='+encodeURIComponent(document.getElementById('providerFilter').value)+'&status='+encodeURIComponent(document.getElementById('statusFilter').value);dq+='&group='+encodeURIComponent(LEDGER_TAB);LEDGER_QUERY=dq;LEDGER_PLATFORM_QUERY=q;let [s,d,m]=await Promise.all([get('/api/summary'),get('/api/decisions?limit='+LEDGER_FIRST_PAGE+'&offset=0'+dq+ledgerResultsQuery()),get('/api/manifest')]);let ag=s.aggregate_account||{},cards=[['权益',ag.equity],['决策',s.summary?.decisions],['模型调用错误',s.summary?.provider_errors],['信息收集步骤',s.summary?.agent_steps]];document.getElementById('cards').innerHTML=cards.map(x=>'<div class=card><div class=muted>'+esc(x[0])+'</div><h2>'+esc(x[1]??'—')+'</h2></div>').join('');renderDecisionLedger(d.items);refreshLedgerTabCounts(q);resetDiagnosticPanels();document.getElementById('manifest').textContent=JSON.stringify(m,null,2);document.getElementById('stamp').textContent='更新 '+new Date().toLocaleTimeString();document.getElementById('ledgerStamp').textContent='读取于 '+new Date().toLocaleTimeString()}catch(e){document.getElementById('stamp').textContent='错误: '+e;document.getElementById('decisions').innerHTML='<div class="empty-state"><strong>没能读到决策记录</strong><p>'+esc(String(e&&e.message||e))+'</p></div>'}finally{setLedgerLoading(false)}}
+document.addEventListener('toggle',()=>activateChoiceLists(),true);document.getElementById('platform').onchange=refreshAudit;renderResultChips();Promise.all([refreshSecurity(),refreshManager(),refreshConfiguration(),refreshAudit()]);setInterval(()=>Promise.all([refreshRuntime(),refreshClientControls()]),REFRESH_MS);
 </script><script src="/assets/dashboard-shell.js"></script><script src="/assets/environment.js"></script></body></html>"""
 
 
@@ -209,6 +209,23 @@ def _midpoint(book: dict[str, Any]) -> float | None:
         return (float(book["best_bid"]) + float(book["best_ask"])) / 2
     except (KeyError, TypeError, ValueError):
         return None
+
+
+RESULT_SQL = (
+    "CASE WHEN status = 'RISK_REJECTED' THEN 'RISK_REJECTED' "
+    "WHEN json_extract(final_decision_json, '$.action') IS NOT NULL "
+    "THEN upper(json_extract(final_decision_json, '$.action')) "
+    "ELSE status END"
+)
+"""What a row ended in, as one word: the action taken, a rule's refusal, or else its status.
+
+Computed in SQL so the ordering and the value handed to the page are the same expression - a page
+that re-derived it in JavaScript could disagree with the order the rows arrived in.
+"""
+
+
+def _result_codes(results: str) -> list[str]:
+    return [code.strip().upper() for code in str(results or "").split(",") if code.strip()][:12]
 
 
 def _slim_decision(item: dict[str, Any]) -> dict[str, Any]:
@@ -380,6 +397,7 @@ class AuditData:
         *,
         full: bool = False,
         only_id: int | None = None,
+        results: str = "",
     ) -> dict[str, Any]:
         columns = [
             "id", "created_at", "updated_at", "platform", "provider",
@@ -414,12 +432,21 @@ class AuditData:
             filters.append(f"status NOT IN ({','.join('?' * (len(failed) + 1))})")
             params.extend([*failed, SessionMemory.IN_PROGRESS])
         where = " WHERE " + " AND ".join(filters) if filters else ""
-        params.extend([limit, offset])
+        # A result filter reorders rather than excludes: rows ending in a selected result come first,
+        # newest first, and everything else follows. The page hides what does not match, but the
+        # rows are still there to be shown the moment the selection widens - and because matches
+        # lead, a page that contains a non-match is proof there are no matches left to fetch.
+        codes = _result_codes(results)
+        order = "created_at DESC, id DESC"
+        order_params: list[Any] = []
+        if codes:
+            order = f"({RESULT_SQL}) IN ({','.join('?' * len(codes))}) DESC, " + order
+            order_params = codes
         connection = sqlite3.connect(self.config.session_db)
         rows = connection.execute(
-            f"SELECT {','.join(columns)} FROM decision_ledger{where} "
-            "ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?",
-            params,
+            f"SELECT {','.join(columns)}, {RESULT_SQL} AS result FROM decision_ledger{where} "
+            f"ORDER BY {order} LIMIT ? OFFSET ?",
+            [*params, *order_params, limit, offset],
         ).fetchall()
         items: list[dict[str, Any]] = []
         json_columns = {
@@ -427,8 +454,9 @@ class AuditData:
             "risk_decision_json", "final_decision_json", "execution_json",
         }
         for row in rows:
-            item = dict(zip(columns, row))
+            item = dict(zip([*columns, "result"], row))
             item["group"] = SessionMemory.decision_group(item.get("status", ""))
+            item["matches_results"] = (not codes) or item.get("result") in codes
             for column in json_columns:
                 item[column.removesuffix("_json")] = _json_value(item.pop(column))
             later = connection.execute(
@@ -735,6 +763,7 @@ def create_app(config: Config, *, start_robot: bool = True) -> FastAPI:
                 query_value(query, "platform"), query_value(query, "provider"),
                 query_value(query, "status"), query_value(query, "action"),
                 query_value(query, "group"),
+                results=query_value(query, "results"),
             )
         if path == "/api/records":
             return data.records(

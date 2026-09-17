@@ -103,3 +103,10 @@ dialog{background:var(--surface)!important;color:var(--ink)!important;border:1px
 @keyframes skeleton-sweep{0%{background-position:100% 50%}100%{background-position:0 50%}}
 /* Motion is the signal here, not decoration; without it the shape alone still reads as a placeholder. */
 @media (prefers-reduced-motion: reduce){.skeleton-bar{animation:none;background:rgba(128,128,128,.18)}}
+
+/* Result filter. A pressed chip is the only state that needs to stand out; an empty selection means
+   "show everything", which the hint says so nobody reads a bare row of chips as a hidden filter. */
+.result-chips{display:flex;flex-wrap:wrap;gap:.35rem;align-items:center;margin:.25rem 0 .5rem}
+.result-chip{border:1px solid var(--border,#d6d6d6);background:none;border-radius:999px;padding:.2rem .7rem;font:inherit;font-size:.9em;cursor:pointer;color:inherit}
+.result-chip[aria-pressed="true"]{background:var(--accent,#1f5c4b);border-color:var(--accent,#1f5c4b);color:#fff}
+.result-chip-hint{font-size:.85em}

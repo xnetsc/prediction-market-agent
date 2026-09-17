@@ -519,6 +519,38 @@ let LEDGER_EXHAUSTED=false;
 let LEDGER_FETCHING=false;
 let LEDGER_WATCHER=null;
 
+/* Filtering by result. Selecting results reorders what the server sends - matches first - rather
+   than excluding the rest, and hides non-matches on the page; selecting none shows everything. */
+let LEDGER_RESULTS=new Set();
+let LEDGER_SERVER_OFFSET=0;
+const RESULT_CHIPS={
+    concluded:[['HOLD','观望'],['BUY','买入'],['SELL','卖出'],['CANCEL','撤单'],['RISK_REJECTED','规则拒绝'],['OK','选出标的'],['NO_ACTION','本轮跳过']],
+    failed:[['PROVIDER_ERROR','模型调用失败'],['EXECUTION_ERROR','执行失败'],['ERROR','出现错误']],
+    running:[],
+};
+
+function resultMatches(result,selected){
+    return !selected.size||selected.has(String(result||'').toUpperCase());
+}
+
+function ledgerCompare(a,b){
+    /* Newest first, and by id when two share a timestamp - the same order the server uses, so a row
+       never jumps position between a refresh and a scroll. */
+    return (Number(b.created)-Number(a.created))||(Number(b.id)-Number(a.id));
+}
+
+function pageExhausts(rows,pageSize,filtering){
+    /* With no filter, a short page is the end. With one, matches arrive first, so the first
+       non-matching row proves there are no matches left: fetching on would only bring rows the page
+       is going to hide. */
+    if(rows.length<pageSize)return true;
+    return filtering&&rows.some(row=>row.matches_results===false);
+}
+
+function ledgerResultsQuery(){
+    return LEDGER_RESULTS.size?'&results='+encodeURIComponent([...LEDGER_RESULTS].join(',')):'';
+}
+
 /* Which way the reader is going. The sentinel keeps intersecting while they scroll back up through
    what they just loaded, and fetching - never mind animating a placeholder - because somebody is
    reading upward is the opposite of what they asked for. Older rows are wanted on the way down. */
@@ -583,8 +615,34 @@ function setLedgerLoading(busy){
     }
 }
 
+function renderResultChips(){
+    const host=document.getElementById('ledgerResultChips');
+    if(!host)return;
+    const chips=RESULT_CHIPS[LEDGER_TAB]||[];
+    host.hidden=!chips.length;
+    host.innerHTML=chips.length
+        ?'<span class="muted">按结果：</span>'+chips.map(([code,label])=>
+            '<button class="result-chip" data-result="'+esc(code)+'" aria-pressed="'+String(LEDGER_RESULTS.has(code))+'" onclick="toggleResultChip(\''+esc(code)+'\')">'+esc(label)+'</button>').join('')
+            +'<span class="muted result-chip-hint">不选等于不筛选</span>'
+        :'';
+}
+
+async function toggleResultChip(code){
+    if(LEDGER_RESULTS.has(code))LEDGER_RESULTS.delete(code);else LEDGER_RESULTS.add(code);
+    renderResultChips();
+    /* Instant on what is already here, then fetched again from the top in the new order: rows
+       loaded under a narrower selection may be missing ones the wider one wants, and the server's
+       order has changed underneath the old position. Anything already on the page is skipped. */
+    applyLedgerFilter();
+    LEDGER_SERVER_OFFSET=0;
+    LEDGER_EXHAUSTED=false;
+    await fillLedger();
+}
+
 function selectLedgerTab(group){
     LEDGER_TAB=group;
+    LEDGER_RESULTS=new Set();
+    renderResultChips();
     for(const tab of document.querySelectorAll('.ledger-tabs [role="tab"]'))
         tab.setAttribute('aria-selected',String(tab.dataset.group===group));
     document.getElementById('ledgerTabNote').textContent=LEDGER_TAB_NOTE[group]||'';
@@ -609,23 +667,64 @@ async function refreshLedgerTabCounts(platformQuery){
     }
 }
 
-async function loadMoreDecisions(){
+async function loadMoreDecisions(options){
     /* Appending rather than redrawing: a rebuild would close whatever the reader has open, which
-       is the whole reason this view stopped refreshing itself. */
-    if(LEDGER_FETCHING||LEDGER_EXHAUSTED||!LEDGER_SCROLL_DOWN)return;
+       is the whole reason this view stopped refreshing itself. Scrolling only loads on the way down;
+       a filter change loads whichever way the reader was last scrolling. */
+    const forced=Boolean(options&&options.force);
+    if(LEDGER_FETCHING||LEDGER_EXHAUSTED||(!forced&&!LEDGER_SCROLL_DOWN))return 0;
     LEDGER_FETCHING=true;
     const more=document.getElementById('ledgerMore');
     if(more)more.textContent='';
     showLedgerSkeleton(LEDGER_PAGE);
+    let shown=0;
     try{
-        const answer=await get('/api/decisions?limit='+LEDGER_PAGE+'&offset='+LEDGER_LOADED+LEDGER_QUERY);
+        const answer=await get('/api/decisions?limit='+LEDGER_PAGE+'&offset='+LEDGER_SERVER_OFFSET+LEDGER_QUERY+ledgerResultsQuery());
         const rows=answer.items||[];
-        if(rows.length)appendDecisionEntries(rows);
-        if(rows.length<LEDGER_PAGE)LEDGER_EXHAUSTED=true;
-        if(more)more.textContent=LEDGER_EXHAUSTED?'没有更多记录了':'';
+        LEDGER_SERVER_OFFSET+=rows.length;
+        if(rows.length)shown=appendDecisionEntries(rows);
+        LEDGER_EXHAUSTED=pageExhausts(rows,LEDGER_PAGE,LEDGER_RESULTS.size>0);
+        if(more)more.textContent=LEDGER_EXHAUSTED?(LEDGER_RESULTS.size?'没有更多符合所选结果的记录了':'没有更多记录了'):'';
     }catch(e){
         if(more)more.textContent='加载更多失败：'+(e&&e.message||e);
+        LEDGER_EXHAUSTED=true;
     }finally{clearLedgerSkeleton();LEDGER_FETCHING=false}
+    return shown;
+}
+
+async function fillLedger(){
+    /* Keep fetching until a first page's worth is showing or there is nothing left to show. Bounded:
+       each round either shows something, advances past rows already on the page, or ends. */
+    while(!LEDGER_EXHAUSTED&&visibleLedgerCount()<LEDGER_FIRST_PAGE){
+        if(LEDGER_FETCHING){await new Promise(resolve=>setTimeout(resolve,50));continue}
+        await loadMoreDecisions({force:true});
+    }
+    applyLedgerFilter();
+}
+
+function visibleLedgerCount(){
+    return document.querySelectorAll('#decisions .decision-entry:not([hidden])').length;
+}
+
+function sortLedgerEntries(){
+    const list=document.querySelector('#decisions .decision-list');
+    if(!list)return;
+    const entries=[...list.querySelectorAll(':scope > .decision-entry')];
+    entries.sort((a,b)=>ledgerCompare(
+        {created:a.dataset.created,id:a.dataset.id},{created:b.dataset.created,id:b.dataset.id}));
+    // Moving an existing node keeps it - including whether it is open - so the reader loses nothing.
+    for(const entry of entries)list.appendChild(entry);
+}
+
+function applyLedgerFilter(){
+    let visible=0;
+    for(const entry of document.querySelectorAll('#decisions .decision-entry')){
+        entry.hidden=!resultMatches(entry.dataset.result,LEDGER_RESULTS);
+        if(!entry.hidden)visible+=1;
+    }
+    const empty=document.getElementById('ledgerFilterEmpty');
+    if(empty)empty.hidden=!(LEDGER_RESULTS.size&&!visible&&LEDGER_EXHAUSTED);
+    return visible;
 }
 
 function watchLedgerEnd(){
@@ -640,11 +739,17 @@ function watchLedgerEnd(){
 }
 
 function appendDecisionEntries(rows){
+    /* Returns how many of the new rows are showing, which is what decides whether to keep loading. */
     const root=document.getElementById('decisions');
-    if(!root)return;
+    if(!root)return 0;
     const list=root.querySelector('.decision-list')||root;
-    list.insertAdjacentHTML('beforeend',decisionEntriesHtml(rows));
-    LEDGER_LOADED+=rows.length;
+    const present=new Set([...list.querySelectorAll('.decision-entry')].map(e=>String(e.dataset.id)));
+    const fresh=rows.filter(row=>!present.has(String(row.id)));
+    if(fresh.length)list.insertAdjacentHTML('beforeend',decisionEntriesHtml(fresh));
+    LEDGER_LOADED+=fresh.length;
+    sortLedgerEntries();
+    applyLedgerFilter();
+    return fresh.filter(row=>resultMatches(row.result,LEDGER_RESULTS)).length;
 }
 
 function renderDecisionLedger(rows){
@@ -652,11 +757,16 @@ function renderDecisionLedger(rows){
     if(!rows.length){root.innerHTML='<div class="empty-state"><strong>'+esc({concluded:'还没有得出结论的记录',running:'此刻没有正在分析的记录',failed:'没有出错的记录'}[LEDGER_TAB]||'还没有符合条件的决策')+'</strong><p>'+esc({concluded:'机器人可能正在分析，或者这一轮没有标的通过筛选。看看「分析中」和「出错」两个标签。',running:'没有正在跑的分析——上一轮已经结束，下一轮还没开始。',failed:'一次都没失败过，或者失败记录已经被删掉了。'}[LEDGER_TAB]||'配置模型和平台后，机器人收到市场事件才会形成记录。')+'</p><a href="#overview">查看运行状态 →</a></div>';return}
     rememberOpenDetails();
     LEDGER_LOADED=rows.length;
-    LEDGER_EXHAUSTED=rows.length<LEDGER_FIRST_PAGE;
+    LEDGER_SERVER_OFFSET=rows.length;
+    LEDGER_EXHAUSTED=pageExhausts(rows,LEDGER_FIRST_PAGE,LEDGER_RESULTS.size>0);
     root.innerHTML='<div class="decision-list">'+decisionEntriesHtml(rows)+'</div>'
+        +'<div class="empty-state" id="ledgerFilterEmpty" hidden><strong>没有符合所选结果的记录</strong><p>取消一些结果标签，或者全部取消来显示所有记录。</p></div>'
         +'<p class="muted" id="ledgerMore">'+(LEDGER_EXHAUSTED?'没有更多记录了':'')+'</p>'
         +'<div id="ledgerSentinel"></div>';
+    sortLedgerEntries();
+    applyLedgerFilter();
     watchLedgerEnd();
+    if(LEDGER_RESULTS.size)fillLedger();
 }
 
 /* The language the model writes its reasoning in follows the reader's browser until somebody chooses
@@ -814,7 +924,7 @@ function decisionEntriesHtml(rows){
         ['模型如何判断',reason(r.proposed_decision),{decision:r.proposed_decision,model_output:r.model_raw_output}],
         ['规则检查后',r.risk_decision?reason(r.risk_decision):'没有记录规则检查结果',{risk:r.risk_decision,final:r.final_decision}],
         ['实际执行与后续',r.error?String(r.error):r.execution?'已记录执行处理结果，请查看详情；这可能是跳过操作的记录，不代表已向平台下单':'未记录平台执行结果',{execution:r.execution,subsequent_observation:r.subsequent_observation}]
-    ];return '<details class="decision-entry" data-id="'+esc(r.id)+'"'+(r.slim?' data-slim="1"':'')+' '+(opened.has(String(r.id))?'open':'')+'><summary><span class="decision-meta">'+esc(new Date(r.created_at).toLocaleString())+' · '+esc(r.platform)+' · #'+esc(r.id)+'</span><span class="decision-title">'+esc(r.context?.market?.title||r.market_topic_id||'未记录市场')+'</span><span class="decision-outcome"><span class="badge">'+esc((r.final_decision?'最终：':'建议：')+actionTitle(d.action))+'</span><span>'+esc(decisionStatusTitle(r.status))+'</span></span><span class="decision-reason">'+esc(reason(d))+'</span><span class="text-link">查看决策过程</span>'
+    ];return '<details class="decision-entry" data-id="'+esc(r.id)+'" data-created="'+esc(r.created_at)+'" data-result="'+esc(String(r.result||r.status||'').toUpperCase())+'"'+(r.slim?' data-slim="1"':'')+' '+(opened.has(String(r.id))?'open':'')+'><summary><span class="decision-meta">'+esc(new Date(r.created_at).toLocaleString())+' · '+esc(r.platform)+' · #'+esc(r.id)+'</span><span class="decision-title">'+esc(r.context?.market?.title||r.market_topic_id||'未记录市场')+'</span><span class="decision-outcome"><span class="badge">'+esc((r.final_decision?'最终：':'建议：')+actionTitle(d.action))+'</span><span>'+esc(decisionStatusTitle(r.status))+'</span></span><span class="decision-reason">'+esc(reason(d))+'</span><span class="text-link">查看决策过程</span>'
         /* Measurements are read off these rows - which provider gets asked first, how the strategy
            calibrates - so an entry recording a fault since fixed keeps arguing its case until it is
            removed. On the row itself, because deciding a record is junk does not require reading it

@@ -249,8 +249,10 @@ class OnlyDownwardsLoadsMoreTests(unittest.TestCase):
         self.assertIn("if(!LEDGER_SCROLL_DOWN)clearLedgerSkeleton()", self._views())
 
     def test_the_fetch_itself_also_declines_when_going_up(self) -> None:
-        """Belt and braces: the observer is not the only caller."""
-        self.assertIn("LEDGER_EXHAUSTED||!LEDGER_SCROLL_DOWN", self._views())
+        """Belt and braces: the observer is not the only caller. A filter change is the exception."""
+        views = self._views()
+        self.assertIn("(!forced&&!LEDGER_SCROLL_DOWN)", views)
+        self.assertIn("loadMoreDecisions({force:true})", views)
 
 
 class TheRowMarkupActuallyRunsTests(unittest.TestCase):
@@ -314,3 +316,76 @@ class ListRowsAreLightTests(unittest.TestCase):
 
     def test_the_page_no_longer_promises_a_hundred_rows(self) -> None:
         self.assertNotIn("显示最近 100 条匹配记录", self._shell())
+
+
+class ResultFilterTests(unittest.TestCase):
+    """Selecting results reorders what arrives - matches first - and hides the rest on the page."""
+
+    def _audit(self):
+        import tempfile
+
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        root = Path(directory.name)
+        config = Config(
+            working_directory=root, session_db=root / "s.sqlite3", auth_db=root / "a.sqlite3",
+            management_file=root / "m.json", plugin_directories_file=root / "d.json",
+            application_config_file=root / "app.json",
+        )
+        memory = SessionMemory(config.session_db)
+        ids = {}
+        for index, (action, status) in enumerate((
+            ("HOLD", "NO_ACTION"), ("BUY", "COMPLETED"), (None, "RISK_REJECTED"),
+            ("HOLD", "NO_ACTION"), ("SELL", "COMPLETED"),
+        )):
+            decision_id = memory.begin_decision(
+                platform="p", market_topic_id="t", market_id="m", token_id=f"o{index}",
+                strategy_name="s", strategy_sha256="x", context={},
+            )
+            memory.connection.execute(
+                "UPDATE decision_ledger SET created_at = ? WHERE id = ?", (1000 + index, decision_id)
+            )
+            memory.connection.commit()
+            memory.complete_decision(
+                decision_id, provider="x", status=status,
+                final_decision=({"action": action} if action else None),
+            )
+            ids[index] = decision_id
+        from prediction_market_agent.runtime.dashboard import AuditData
+
+        data = AuditData(config)
+        self.addCleanup(data.management.shutdown)
+        return data, ids
+
+    def test_without_a_selection_it_is_plain_newest_first(self) -> None:
+        data, ids = self._audit()
+        rows = data.decisions(10, 0, "", "", "", "", "concluded")["items"]
+        self.assertEqual([r["id"] for r in rows], [ids[4], ids[3], ids[2], ids[1], ids[0]])
+        self.assertTrue(all(r["matches_results"] for r in rows))
+
+    def test_selected_results_come_first_and_nothing_is_excluded(self) -> None:
+        data, ids = self._audit()
+        rows = data.decisions(10, 0, "", "", "", "", "concluded", results="HOLD")["items"]
+        self.assertEqual([r["id"] for r in rows[:2]], [ids[3], ids[0]], "matches first, newest first")
+        self.assertEqual(len(rows), 5, "the rest still arrive, after the matches")
+        self.assertEqual([r["matches_results"] for r in rows], [True, True, False, False, False])
+
+    def test_a_rules_refusal_is_its_own_result(self) -> None:
+        data, ids = self._audit()
+        rows = data.decisions(10, 0, "", "", "", "", "concluded", results="RISK_REJECTED")["items"]
+        self.assertEqual(rows[0]["id"], ids[2])
+        self.assertEqual(rows[0]["result"], "RISK_REJECTED")
+
+    def test_the_page_rules_execute(self) -> None:
+        import shutil
+        import subprocess
+
+        node = shutil.which("node")
+        if node is None:
+            self.skipTest("node is not installed; this check needs a JavaScript engine")
+        completed = subprocess.run(
+            [node, "tests/ledger_filter_check.js",
+             "src/prediction_market_agent/runtime/static/dashboard-views.js"],
+            capture_output=True, text=True, timeout=60,
+        )
+        self.assertEqual(completed.returncode, 0, completed.stderr or completed.stdout)
