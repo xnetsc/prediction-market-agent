@@ -3,7 +3,7 @@ const fs = require('fs');
 const vm = require('vm');
 const source = fs.readFileSync(process.argv[2], 'utf8');
 const context = {
-  console, navigator: {}, window: { scrollY: 0, addEventListener() {} },
+  console, navigator: {}, URLSearchParams, window: { scrollY: 0, addEventListener() {} },
   IntersectionObserver: function () { return { observe() {}, disconnect() {} }; },
   document: { getElementById() { return null; }, querySelectorAll() { return []; },
     querySelector() { return null; }, addEventListener() {},

@@ -61,7 +61,7 @@ HTML = r"""<!doctype html><html lang="zh-CN"><head><meta charset="utf-8">
 <section data-view="settings" hidden class="advanced-section"><details><summary>插件文件位置 <span>开发与自定义部署时修改</span></summary><p class="muted">程序从这些目录发现插件，每行一个目录。普通使用者无需改动；新增插件可在插件中心安装。</p><div id="pluginDirectories" class="plugin-grid"></div><div class="toolbar"><button class="primary" onclick="savePluginDirectories()">保存插件目录</button><button class="danger" onclick="resetPluginDirectories()">恢复默认目录</button></div></details></section>
 <section data-view="plugins" hidden id="pluginWorkspace"><div id="pluginCategoryHome"></div><nav id="pluginCategoryNav" class="subnav" aria-label="插件分类"></nav><div id="pluginCategoryGuide"></div><div class="toolbar plugin-management-tools"><button onclick="refreshPlugins()">重新扫描插件文件</button><span class="muted">新增、删除或更新文件后使用；不会替你启用插件。</span></div><div id="pluginManager"></div><div class="toolbar plugin-management-tools"><button class="primary" onclick="saveSelection()">保存启用与顺序</button><span id="manageStatus" class="status" role="status"></span></div></section>
 <section data-view="plugins" hidden><details><summary>安装新的自定义插件</summary><p class="muted">把受信任的 Python 插件源码写入已配置的类别目录。新插件安装后保持禁用，只扫描文件名；启用后才会导入并调用初始化函数。</p><div class="plugin-grid"><label class="field"><b>类别</b><select id="installKind" onchange="renderInstallTargets()"></select></label><label class="field"><b>安装目录</b><select id="installTarget"></select></label><label class="field"><b>插件名</b><input id="installName" placeholder="example_plugin"></label></div><label class="field"><b>Python 源码</b><textarea id="installSource" rows="14" placeholder="def initialize_plugin(context): ..."></textarea></label><div class="toolbar"><button class="primary" onclick="installPlugin()">安装并刷新</button><span id="installStatus" class="status muted"></span></div></details></section>
-<section data-view="decisions" hidden><h3>查看机器人为什么这样做</h3><p class="muted">一条记录是一次判断，不等于一笔成交。点开一条先看四项：发现了什么、怎么分析的、结论（观望 / 买入 / 卖出）、结果（下单成交情况，揭标后的盈亏）；需要时再看“细节”和“原始数据”。</p><ol class="process-strip"><li>发现市场</li><li>收集证据</li><li>模型判断</li><li>风险检查</li><li>执行与跟踪</li></ol><div class="toolbar ledger-toolbar"><button class="primary" onclick="refreshAudit()" title="重新读取决策记录">↻ 刷新</button><span class="muted" id="ledgerStamp">尚未读取</span><span class="muted">这里不自动刷新——展开的记录不会在你读的时候被收起。</span><label class="ledger-language">决策依据语言 <select id="ledgerLanguage" onchange="saveLedgerLanguage(this.value)"><option value="zh">中文</option><option value="en">English</option></select></label><span class="status" id="ledgerLanguageStatus" role="status"></span></div><div class="ledger-tabs" role="tablist"><button role="tab" data-group="concluded" aria-selected="true" onclick="selectLedgerTab('concluded')">有结论 <span class="tab-count" id="tabCount_concluded"></span></button><button role="tab" data-group="running" aria-selected="false" onclick="selectLedgerTab('running')">分析中 <span class="tab-count" id="tabCount_running"></span></button><button role="tab" data-group="failed" aria-selected="false" onclick="selectLedgerTab('failed')">出错 <span class="tab-count" id="tabCount_failed"></span></button></div><p class="muted" id="ledgerTabNote"></p><div class="result-chips" id="ledgerResultChips" role="group" aria-label="按结果筛选"></div><div class="filter-bar"><label>平台<input id="platform" placeholder="全部平台"></label><label>模型服务<input id="providerFilter" placeholder="全部服务"></label><label>记录状态<select id="statusFilter"><option value="">全部状态</option><option value="STARTED">分析中</option><option value="PROVIDER_ERROR">模型调用失败</option><option value="RISK_REJECTED">规则拒绝，未执行</option><option value="EXECUTION_ERROR">执行失败</option><option value="COMPLETED">流程已完成</option></select></label><button class="primary" onclick="refreshAudit()">查询记录</button></div></section>
+<section data-view="decisions" hidden><h3>查看机器人为什么这样做</h3><p class="muted">一条记录是一次判断，不等于一笔成交。点开一条先看四项：发现了什么、怎么分析的、结论（观望 / 买入 / 卖出）、结果（下单成交情况，揭标后的盈亏）；需要时再看“细节”和“原始数据”。</p><ol class="process-strip"><li>发现市场</li><li>收集证据</li><li>模型判断</li><li>风险检查</li><li>执行与跟踪</li></ol><div class="toolbar ledger-toolbar"><button class="primary" onclick="refreshAudit()" title="重新读取决策记录">↻ 刷新</button><span class="muted" id="ledgerStamp">尚未读取</span><span class="muted">这里不自动刷新——展开的记录不会在你读的时候被收起。</span><label class="ledger-language">决策依据语言 <select id="ledgerLanguage" onchange="saveLedgerLanguage(this.value)"><option value="zh">中文</option><option value="en">English</option></select></label><span class="status" id="ledgerLanguageStatus" role="status"></span></div><div class="ledger-tabs" role="tablist"><button role="tab" data-group="concluded" aria-selected="true" onclick="selectLedgerTab('concluded')">有结论 <span class="tab-count" id="tabCount_concluded"></span></button><button role="tab" data-group="running" aria-selected="false" onclick="selectLedgerTab('running')">分析中 <span class="tab-count" id="tabCount_running"></span></button><button role="tab" data-group="failed" aria-selected="false" onclick="selectLedgerTab('failed')">出错 <span class="tab-count" id="tabCount_failed"></span></button></div><p class="muted" id="ledgerTabNote"></p><div class="result-chips" id="ledgerResultChips" role="group" aria-label="按结果筛选"></div><div class="ledger-bulk" id="ledgerBulk"><label class="ledger-pick-all"><input type="checkbox" id="ledgerPickAll" onchange="pickAllShown(this.checked)"> 全选当前显示的</label><span class="muted" id="ledgerPickCount">勾选记录可以一起删除</span><button id="ledgerForgetPicked" onclick="forgetPicked()" disabled>删除所选</button><button class="ledger-forget-category" id="ledgerForgetCategory" onclick="forgetCategory()">删除本类全部…</button></div><div class="filter-bar"><label>平台<input id="platform" placeholder="全部平台"></label><label>模型服务<input id="providerFilter" placeholder="全部服务"></label><label>记录状态<select id="statusFilter"><option value="">全部状态</option><option value="STARTED">分析中</option><option value="PROVIDER_ERROR">模型调用失败</option><option value="RISK_REJECTED">规则拒绝，未执行</option><option value="EXECUTION_ERROR">执行失败</option><option value="COMPLETED">流程已完成</option></select></label><button class="primary" onclick="refreshAudit()">查询记录</button></div></section>
 <section data-view="decisions" hidden><div class="section-heading"><div><h3>决策记录</h3><p>先显示最近 10 条，向下滚动每次再加载 5 条。点开一条记录才会读取它的完整证据。</p></div></div><div id="decisions"></div></section>
 <section data-view="decisions" hidden class="advanced-section"><details><summary>平台操作明细 <span>排查问题时展开</span></summary><p class="muted">发送给平台的操作和返回结果；请求失败不代表成交。</p><div id="actions"></div></details></section>
 <section data-view="decisions" hidden class="advanced-section"><details><summary>模型对话明细 <span>排查问题时展开</span></summary><p class="muted">一次决策可能多次询问模型。这里用于排查模型调用失败。</p><div id="turns"></div></details></section>
@@ -288,6 +288,35 @@ that re-derived it in JavaScript could disagree with the order the rows arrived 
 
 def _result_codes(results: str) -> list[str]:
     return [code.strip().upper() for code in str(results or "").split(",") if code.strip()][:12]
+
+
+def _ledger_filters(
+    platform: str, provider: str, status: str, action: str, group: str
+) -> tuple[list[str], list[Any]]:
+    """The WHERE clauses behind one view of the ledger, shared by reading it and deleting it."""
+    filters: list[str] = []
+    params: list[Any] = []
+    for column, value in (("platform", platform), ("provider", provider), ("status", status)):
+        if value:
+            filters.append(f"{column} = ?")
+            params.append(value)
+    if action:
+        filters.append("json_extract(final_decision_json, '$.action') = ?")
+        params.append(action.upper())
+    # Grouping is a property of the status, so it filters in SQL rather than after paging -
+    # otherwise asking for a hundred concluded rows would return however many of the most
+    # recent hundred rows happened to be concluded.
+    failed = sorted(SessionMemory.FAILED_STATUSES)
+    if group == "running":
+        filters.append("status = ?")
+        params.append(SessionMemory.IN_PROGRESS)
+    elif group == "failed":
+        filters.append(f"status IN ({','.join('?' * len(failed))})")
+        params.extend(failed)
+    elif group == "concluded":
+        filters.append(f"status NOT IN ({','.join('?' * (len(failed) + 1))})")
+        params.extend([*failed, SessionMemory.IN_PROGRESS])
+    return filters, params
 
 
 READABLE_SCHEMA: dict[str, Any] = {
@@ -564,6 +593,73 @@ class AuditData:
         finally:
             memory.connection.close()
 
+    FORGET_BATCH = 400
+    """Ids per delete statement, well inside what any SQLite build accepts as parameters."""
+
+    def forget_matching(
+        self, match: dict[str, Any], *, dry_run: bool, until_id: int | None = None
+    ) -> dict[str, Any]:
+        """Every record under one tab and filter, as the operator sees them on the page.
+
+        The category is exactly what the page shows: the tab, any platform, service or status
+        filter, and the selected results. On the page a result filter only reorders, because
+        rows the selection hides may be wanted a moment later; here it selects, because deleting
+        "the holds" means the holds. A dry run counts first, so what gets confirmed is a number,
+        and the deletion is then bounded to the rows that existed at that count: a round that
+        finishes while the operator reads the dialog is not swept into a decision nobody made
+        about it.
+        """
+        group = str(match.get("group", ""))
+        if group not in {"concluded", "running", "failed"}:
+            raise ValueError("Name the tab whose records are to be deleted")
+        filters, params = _ledger_filters(
+            str(match.get("platform", "")), str(match.get("provider", "")),
+            str(match.get("status", "")), "", group,
+        )
+        codes = _result_codes(str(match.get("results", "")))
+        if codes:
+            filters.append(f"({RESULT_SQL}) IN ({','.join('?' * len(codes))})")
+            params.extend(codes)
+        if until_id is not None:
+            filters.append("id <= ?")
+            params.append(int(until_id))
+        connection = sqlite3.connect(self.config.session_db)
+        try:
+            ids = [
+                int(row[0]) for row in connection.execute(
+                    f"SELECT id FROM decision_ledger WHERE {' AND '.join(filters)} ORDER BY id", params
+                )
+            ]
+            if dry_run:
+                executed = running = 0
+                for start in range(0, len(ids), self.FORGET_BATCH):
+                    chunk = ids[start:start + self.FORGET_BATCH]
+                    marks = ",".join("?" for _ in chunk)
+                    executed += connection.execute(
+                        f"SELECT COUNT(DISTINCT decision_id) FROM execution_actions "
+                        f"WHERE decision_id IN ({marks})", chunk,
+                    ).fetchone()[0]
+                    running += connection.execute(
+                        f"SELECT COUNT(*) FROM decision_ledger WHERE id IN ({marks}) AND status = ?",
+                        [*chunk, SessionMemory.IN_PROGRESS],
+                    ).fetchone()[0]
+                return {
+                    "matching": len(ids), "kept_executed": int(executed),
+                    "in_progress": int(running), "until_id": max(ids) if ids else 0,
+                }
+        finally:
+            connection.close()
+        total: dict[str, Any] = {
+            "decisions": 0, "provider_turns": 0, "agent_steps": 0,
+            "kept_executed": 0, "cancelled_in_progress": 0, "kept_ids": [],
+        }
+        for start in range(0, len(ids), self.FORGET_BATCH):
+            answer = self.forget_decisions(ids[start:start + self.FORGET_BATCH], "", "")
+            for key in ("decisions", "provider_turns", "agent_steps", "kept_executed", "cancelled_in_progress"):
+                total[key] += int(answer.get(key, 0))
+            total["kept_ids"].extend(answer.get("kept_ids", []))
+        return {**total, "matching": len(ids)}
+
     def decisions(
         self,
         limit: int,
@@ -585,31 +681,10 @@ class AuditData:
             "proposed_decision_json", "risk_decision_json", "final_decision_json",
             "execution_json", "status", "error", "readable_json",
         ]
-        filters: list[str] = []
-        params: list[Any] = []
-        for column, value in (("platform", platform), ("provider", provider), ("status", status)):
-            if value:
-                filters.append(f"{column} = ?")
-                params.append(value)
-        if action:
-            filters.append("json_extract(final_decision_json, '$.action') = ?")
-            params.append(action.upper())
+        filters, params = _ledger_filters(platform, provider, status, action, group)
         if only_id is not None:
             filters.append("id = ?")
             params.append(int(only_id))
-        # Grouping is a property of the status, so it filters in SQL rather than after paging -
-        # otherwise asking for a hundred concluded rows would return however many of the most
-        # recent hundred rows happened to be concluded.
-        failed = sorted(SessionMemory.FAILED_STATUSES)
-        if group == "running":
-            filters.append("status = ?")
-            params.append(SessionMemory.IN_PROGRESS)
-        elif group == "failed":
-            filters.append(f"status IN ({','.join('?' * len(failed))})")
-            params.extend(failed)
-        elif group == "concluded":
-            filters.append(f"status NOT IN ({','.join('?' * (len(failed) + 1))})")
-            params.extend([*failed, SessionMemory.IN_PROGRESS])
         where = " WHERE " + " AND ".join(filters) if filters else ""
         # A result filter reorders rather than excludes: rows ending in a selected result come first,
         # newest first, and everything else follows. The page hides what does not match, but the
@@ -1062,6 +1137,12 @@ def create_app(config: Config, *, start_robot: bool = True) -> FastAPI:
             return data.decision(int(query_value(query, "id", "0")))
         if path == "/api/decisions/counts":
             return data.decision_counts(query_value(query, "platform"))
+        if path == "/api/decisions/forget" and isinstance(payload.get("match"), dict):
+            until = payload.get("until_id")
+            return data.forget_matching(
+                payload["match"], dry_run=bool(payload.get("dry_run")),
+                until_id=None if until is None else int(until),
+            )
         if path == "/api/decisions/forget":
             ids = payload.get("decision_ids") or []
             if not isinstance(ids, list):

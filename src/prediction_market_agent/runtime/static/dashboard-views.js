@@ -695,6 +695,7 @@ function setLedgerLoading(busy){
 }
 
 function renderResultChips(){
+    renderLedgerBulk();
     const host=document.getElementById('ledgerResultChips');
     if(!host)return;
     const chips=RESULT_CHIPS[LEDGER_TAB]||[];
@@ -721,6 +722,7 @@ async function toggleResultChip(code){
 function selectLedgerTab(group){
     LEDGER_TAB=group;
     LEDGER_RESULTS=new Set();
+    LEDGER_PICKED.clear();
     renderResultChips();
     for(const tab of document.querySelectorAll('.ledger-tabs [role="tab"]'))
         tab.setAttribute('aria-selected',String(tab.dataset.group===group));
@@ -800,7 +802,13 @@ function applyLedgerFilter(){
     for(const entry of document.querySelectorAll('#decisions .decision-entry')){
         entry.hidden=!resultMatches(entry.dataset.result,LEDGER_RESULTS);
         if(!entry.hidden)visible+=1;
+        // A selection is of rows on screen; one the filter just hid is not something anyone is looking at.
+        else if(LEDGER_PICKED.delete(String(entry.dataset.id))){
+            const box=entry.querySelector('.decision-pick');
+            if(box)box.checked=false;
+        }
     }
+    renderLedgerBulk();
     const empty=document.getElementById('ledgerFilterEmpty');
     if(empty)empty.hidden=!(LEDGER_RESULTS.size&&!visible&&LEDGER_EXHAUSTED);
     return visible;
@@ -838,6 +846,7 @@ function renderDecisionLedger(rows){
     LEDGER_LOADED=rows.length;
     LEDGER_SERVER_OFFSET=rows.length;
     LEDGER_EXHAUSTED=pageExhausts(rows,LEDGER_FIRST_PAGE,LEDGER_RESULTS.size>0);
+    for(const id of [...LEDGER_PICKED])if(!rows.some(row=>String(row.id)===id))LEDGER_PICKED.delete(id);
     root.innerHTML='<div class="decision-list">'+decisionEntriesHtml(rows)+'</div>'
         +'<div class="empty-state" id="ledgerFilterEmpty" hidden><strong>没有符合所选结果的记录</strong><p>取消一些结果标签，或者全部取消来显示所有记录。</p></div>'
         +'<p class="muted" id="ledgerMore">'+(LEDGER_EXHAUSTED?'没有更多记录了':'')+'</p>'
@@ -1300,7 +1309,7 @@ function decisionEntriesHtml(rows){
         const kind=isDiscovery(r)?'发现':'决策';
         const title=isDiscovery(r)?'发现轮次':marketTitle(r);
         return '<details class="decision-entry" data-id="'+esc(r.id)+'" data-created="'+esc(r.created_at)+'" data-result="'+esc(String(r.result||r.status||'').toUpperCase())+'"'+(r.slim?' data-slim="1"':'')+(readable?' data-readable="1"':'')+' '+(opened.has(String(r.id))?'open':'')+'>'
-            +'<summary><span class="decision-meta">'+esc(new Date(r.created_at).toLocaleString())+' · '+esc(r.platform)+' · '+kind+'</span>'
+            +'<summary><input type="checkbox" class="decision-pick" aria-label="选中这条" data-pick="'+esc(r.id)+'"'+(LEDGER_PICKED.has(String(r.id))?' checked':'')+' onclick="event.stopPropagation()" onchange="pickDecision(this)"><span class="decision-meta">'+esc(new Date(r.created_at).toLocaleString())+' · '+esc(r.platform)+' · '+kind+'</span>'
             +'<span class="decision-title">'+esc(title)+'</span>'
             +'<span class="decision-outcome">'+conclusionHtml(r)+'</span>'
             +(headline?'<span class="decision-reason">'+esc(headline)+'</span>':'')
@@ -1327,6 +1336,106 @@ function decisionEntriesHtml(rows){
 }
 
 
+/* ---- Deleting many at once ----
+   Two ways, for two situations. Ticking rows is for "these ones": whatever is ticked on screen, no
+   more. The category button is for "all of this": everything under the current tab and filters,
+   loaded or not, counted first so the confirmation names a number, and bounded to the rows that
+   existed when it was counted. Executed trades are kept either way, and a running analysis that is
+   deleted is told to stop - the same rules as deleting one. */
+let LEDGER_PICKED=new Set();
+const LEDGER_TAB_TITLE={concluded:'有结论',running:'分析中',failed:'出错'};
+
+function ledgerCategoryMatch(){
+    const applied=new URLSearchParams(String(typeof LEDGER_QUERY==='string'?LEDGER_QUERY:'').replace(/^&/,''));
+    return {group:LEDGER_TAB,results:[...LEDGER_RESULTS].join(','),
+        platform:applied.get('platform')||'',provider:applied.get('provider')||'',status:applied.get('status')||''};
+}
+function ledgerCategoryLabel(match){
+    const chosen=(RESULT_CHIPS[match.group]||[]).filter(([code])=>LEDGER_RESULTS.has(code)).map(([,label])=>label);
+    const parts=[LEDGER_TAB_TITLE[match.group]||match.group];
+    if(chosen.length)parts.push(chosen.join('、'));
+    if(match.platform)parts.push('平台 '+match.platform);
+    if(match.provider)parts.push('模型服务 '+match.provider);
+    if(match.status)parts.push('状态 '+decisionStatusTitle(match.status));
+    return parts.join(' · ');
+}
+function shownEntries(){
+    return [...document.querySelectorAll('#decisions .decision-entry')].filter(entry=>!entry.hidden);
+}
+function renderLedgerBulk(){
+    if(typeof document==='undefined'||!document.getElementById)return;
+    const count=document.getElementById('ledgerPickCount');
+    const button=document.getElementById('ledgerForgetPicked');
+    const all=document.getElementById('ledgerPickAll');
+    const category=document.getElementById('ledgerForgetCategory');
+    if(count)count.textContent=LEDGER_PICKED.size?'已选 '+LEDGER_PICKED.size+' 条':'勾选记录可以一起删除';
+    if(button){button.disabled=!LEDGER_PICKED.size;button.textContent=LEDGER_PICKED.size?'删除所选 '+LEDGER_PICKED.size+' 条':'删除所选'}
+    if(all){
+        const shown=shownEntries();
+        const picked=shown.filter(entry=>LEDGER_PICKED.has(String(entry.dataset.id))).length;
+        all.checked=Boolean(shown.length)&&picked===shown.length;
+        all.indeterminate=picked>0&&picked<shown.length;
+    }
+    if(category)category.textContent='删除「'+ledgerCategoryLabel(ledgerCategoryMatch())+'」全部…';
+}
+function pickDecision(box){
+    if(box.checked)LEDGER_PICKED.add(String(box.dataset.pick));else LEDGER_PICKED.delete(String(box.dataset.pick));
+    renderLedgerBulk();
+}
+function pickAllShown(checked){
+    for(const entry of shownEntries()){
+        const box=entry.querySelector('.decision-pick');
+        if(box)box.checked=checked;
+        if(checked)LEDGER_PICKED.add(String(entry.dataset.id));else LEDGER_PICKED.delete(String(entry.dataset.id));
+    }
+    renderLedgerBulk();
+}
+function forgetSummary(answer){
+    const parts=['已删除 '+answer.decisions+' 条记录'];
+    if(answer.cancelled_in_progress)parts.push(answer.cancelled_in_progress+' 条正在分析的已让它停下，不会再花模型调用，也不会据此下单');
+    if(answer.kept_executed)parts.push(answer.kept_executed+' 条在平台上真实交易过，保留没删（删掉会让账本和余额对不上）');
+    return parts.join('；')+'。';
+}
+async function forgetPicked(){
+    const ids=[...LEDGER_PICKED].map(Number).filter(Number.isFinite);
+    if(!ids.length)return;
+    if(!confirm('删除选中的 '+ids.length+' 条记录？\n\n这些记录参与模型服务排名和策略校准，删掉后这些统计会变。在平台上真实交易过的记录会保留；正在分析的会让它停下。'))return;
+    try{
+        const answer=await post('/api/decisions/forget',{decision_ids:ids});
+        const kept=new Set((answer.kept_ids||[]).map(String));
+        let removed=0;
+        // Taken out where they stand, so the reader keeps their place and whatever they have open.
+        for(const id of ids){
+            if(kept.has(String(id)))continue;
+            const entry=document.querySelector('#decisions .decision-entry[data-id="'+id+'"]');
+            if(entry){entry.remove();removed+=1}
+        }
+        LEDGER_SERVER_OFFSET=Math.max(0,LEDGER_SERVER_OFFSET-removed);
+        LEDGER_PICKED=new Set([...LEDGER_PICKED].filter(id=>kept.has(id)));
+        renderLedgerBulk();
+        refreshLedgerTabCounts(typeof LEDGER_PLATFORM_QUERY==='string'?LEDGER_PLATFORM_QUERY:'');
+        showOperationFeedback(forgetSummary(answer),answer.decisions?'good':'danger',!answer.decisions);
+    }catch(e){showOperationFeedback('删除失败：'+e.message,'danger',true)}
+}
+async function forgetCategory(){
+    const match=ledgerCategoryMatch(),label=ledgerCategoryLabel(match);
+    let preview;
+    try{preview=await post('/api/decisions/forget',{match,dry_run:true})}
+    catch(e){showOperationFeedback('没能统计「'+label+'」：'+e.message,'danger',true);return}
+    if(!preview.matching){showOperationFeedback('「'+label+'」下没有记录。');return}
+    const lines=['删除「'+label+'」下的全部 '+preview.matching+' 条记录？',''];
+    if(preview.kept_executed)lines.push('其中 '+preview.kept_executed+' 条在平台上真实交易过，会保留。');
+    if(preview.in_progress)lines.push('其中 '+preview.in_progress+' 条正在分析，会让它停下。');
+    lines.push('只删现在已有的记录，确认之后才产生的记录不受影响。这些记录参与模型服务排名和策略校准，删掉后这些统计会变。');
+    if(!confirm(lines.join('\n')))return;
+    try{
+        const answer=await post('/api/decisions/forget',{match,until_id:preview.until_id});
+        LEDGER_PICKED.clear();
+        showOperationFeedback(forgetSummary(answer),answer.decisions?'good':'danger',!answer.decisions);
+        refreshAudit();
+    }catch(e){showOperationFeedback('删除失败：'+e.message,'danger',true)}
+}
+
 async function forgetDecision(event,id){
     /* Inside a <summary>, a click opens the entry unless it is stopped - so the confirm would be
        answered behind a panel that had just sprung open. */
@@ -1338,6 +1447,7 @@ async function forgetDecision(event,id){
             showOperationFeedback('没有删除：这次决策已经产生 '+answer.kept_executed+' 条真实平台动作，删掉记录会让账本与余额对不上。','danger',true);
         else
             showOperationFeedback('已删除决策 '+answer.decisions+' 条、模型往返 '+answer.provider_turns+' 条、工具步骤 '+answer.agent_steps+' 条'+(answer.cancelled_in_progress?'；其中 '+answer.cancelled_in_progress+' 条正在分析，已让它停下，不会再花模型调用、也不会据此下单':'')+'。');
+        LEDGER_PICKED.delete(String(id));
         refreshAudit();
     }catch(e){showOperationFeedback('删除失败：'+e.message,'danger',true)}
 }

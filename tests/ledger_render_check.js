@@ -5,7 +5,7 @@ const vm = require('vm');
 const source = fs.readFileSync(process.argv[2], 'utf8');
 const options = [];
 const context = {
-  console, navigator: {}, window: { scrollY: 0, addEventListener() {} },
+  console, navigator: {}, URLSearchParams, window: { scrollY: 0, addEventListener() {} },
   IntersectionObserver: function () { return { observe() {}, disconnect() {} }; },
   document: {
     getElementById(id) { return id === 'statusFilter' ? { options } : null; },
@@ -112,6 +112,17 @@ const quotaOnly = { decision_capacity: { providers: { claude: { ready: false, ki
 if (title(quotaOnly) !== '机器人已暂停：AI 额度用完') failures.push('ai pause: quota titled ' + title(quotaOnly));
 const unknownWhen = vm.runInContext('aiPauseHtml(setup, now)', Object.assign(context, { setup: quotaOnly, now }));
 expect('ai pause (no stated time)', unknownWhen, ['没说何时恢复，会定期免费查询额度']);
+
+// Selecting rows to delete: the tick is part of the row and survives the row being redrawn.
+if (!render([hold]).includes('class="decision-pick"')) failures.push('pick: rows carry no checkbox');
+vm.runInContext('LEDGER_PICKED.add("1")', context);
+if (!render([hold]).includes('data-pick="1" checked')) failures.push('pick: a ticked row lost its tick when redrawn');
+vm.runInContext('LEDGER_PICKED.clear(); LEDGER_TAB="concluded"; LEDGER_RESULTS=new Set(["HOLD","BUY"]); LEDGER_QUERY="&platform=polymarket&provider=&status=&group=concluded"', context);
+const label = vm.runInContext('ledgerCategoryLabel(ledgerCategoryMatch())', context);
+if (label !== '有结论 · 观望、买入 · 平台 polymarket') failures.push('category label: ' + label);
+const match = vm.runInContext('JSON.stringify(ledgerCategoryMatch())', context);
+if (match !== JSON.stringify({ group: 'concluded', results: 'HOLD,BUY', platform: 'polymarket', provider: '', status: '' }))
+  failures.push('category match: ' + match);
 
 if (failures.length) { console.error('FAIL:\n' + failures.join('\n')); process.exit(1); }
 console.log('OK');

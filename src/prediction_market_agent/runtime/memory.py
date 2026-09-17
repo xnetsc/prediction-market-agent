@@ -942,6 +942,7 @@ class SessionMemory:
             return {
                 "decisions": 0, "provider_turns": 0, "agent_steps": 0,
                 "kept_executed": int(executed), "cancelled_in_progress": len(running),
+                "kept_ids": [int(item) for item in keep],
             }
         marks = ",".join("?" for _ in removable)
         turns = self.connection.execute(
@@ -960,6 +961,7 @@ class SessionMemory:
             "agent_steps": int(steps),
             "kept_executed": int(executed),
             "cancelled_in_progress": len(running),
+            "kept_ids": [int(item) for item in keep],
         }
 
     def _decisions_to_forget(

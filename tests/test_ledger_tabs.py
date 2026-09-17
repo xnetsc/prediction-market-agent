@@ -41,11 +41,16 @@ class TheTabsAreServedNotGuessedTests(unittest.TestCase):
         return Path("src/prediction_market_agent/runtime/static/dashboard-views.js").read_text()
 
     def test_the_group_filters_in_sql_not_after_paging(self) -> None:
+        """Reading a tab and deleting one build the same clauses, so they cannot disagree."""
         source = self._dashboard()
-        body = source[source.index("def decisions("):]
+        body = source[source.index("def _ledger_filters("):source.index("READABLE_SCHEMA")]
         self.assertIn('if group == "running"', body)
         self.assertIn("filters.append", body)
         self.assertIn("SessionMemory.FAILED_STATUSES", body)
+        for user in ("def decisions(", "def forget_matching("):
+            with self.subTest(caller=user):
+                after = source[source.index(user):]
+                self.assertIn("_ledger_filters(", after[:after.index("\n    def ", 10)])
 
     def test_each_row_says_which_group_it_is_in(self) -> None:
         self.assertIn('item["group"] = SessionMemory.decision_group', self._dashboard())
@@ -524,3 +529,100 @@ class HeadlineContractTests(unittest.TestCase):
             "limit_price": None, "confidence": 0.5, "estimated_probability": 0.5, "rationale": "r",
         })
         self.assertEqual(decision.headline, "")
+
+
+class DeletingManyAtOnceTests(unittest.TestCase):
+    """Ticked rows, or everything under one tab and filter - with the same protections as one."""
+
+    def setUp(self) -> None:
+        import tempfile
+
+        from prediction_market_agent.runtime.dashboard import AuditData
+
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        root = Path(directory.name)
+        self.config = Config(
+            working_directory=root, session_db=root / "s.sqlite3", auth_db=root / "a.sqlite3",
+            management_file=root / "m.json", plugin_directories_file=root / "d.json",
+            application_config_file=root / "app.json",
+        )
+        self.memory = SessionMemory(self.config.session_db)
+        self.addCleanup(self.memory.close)
+        self.data = AuditData(self.config)
+        self.addCleanup(self.data.management.shutdown)
+
+    def _row(self, status: str, action: str | None = None, platform: str = "polymarket") -> int:
+        decision_id = self.memory.begin_decision(
+            platform=platform, market_topic_id="t", market_id="m", token_id=f"o{status}{action}",
+            strategy_name="built_in", strategy_sha256="x", context={},
+        )
+        if status != SessionMemory.IN_PROGRESS:
+            self.memory.complete_decision(
+                decision_id, provider="claude", status=status,
+                final_decision={"action": action, "rationale": "r"} if action else None,
+            )
+        return decision_id
+
+    def _remaining(self) -> set[int]:
+        return {int(row[0]) for row in self.memory.connection.execute("SELECT id FROM decision_ledger")}
+
+    def test_the_category_is_the_tab_and_its_selected_results(self) -> None:
+        hold_a, hold_b = self._row("NO_ACTION", "HOLD"), self._row("NO_ACTION", "HOLD")
+        buy = self._row("COMPLETED", "BUY")
+        failed = self._row("PROVIDER_ERROR")
+        match = {"group": "concluded", "results": "HOLD"}
+        preview = self.data.forget_matching(match, dry_run=True)
+        self.assertEqual(preview["matching"], 2, "on the page a result reorders; deleting it selects")
+        self.assertEqual(self._remaining(), {hold_a, hold_b, buy, failed}, "a dry run deletes nothing")
+        answer = self.data.forget_matching(match, dry_run=False, until_id=preview["until_id"])
+        self.assertEqual(answer["decisions"], 2)
+        self.assertEqual(self._remaining(), {buy, failed})
+
+    def test_a_tab_without_a_result_filter_means_the_whole_tab(self) -> None:
+        kept = self._row("NO_ACTION", "HOLD")
+        first, second = self._row("PROVIDER_ERROR"), self._row("EXECUTION_ERROR")
+        answer = self.data.forget_matching({"group": "failed"}, dry_run=False)
+        self.assertEqual(answer["matching"], 2)
+        self.assertEqual(self._remaining(), {kept})
+        del first, second
+
+    def test_rows_written_after_the_count_are_not_swept_up(self) -> None:
+        self._row("PROVIDER_ERROR")
+        preview = self.data.forget_matching({"group": "failed"}, dry_run=True)
+        later = self._row("PROVIDER_ERROR")
+        self.data.forget_matching({"group": "failed"}, dry_run=False, until_id=preview["until_id"])
+        self.assertEqual(self._remaining(), {later})
+
+    def test_executed_trades_are_kept_and_named(self) -> None:
+        traded = self._row("COMPLETED", "BUY")
+        self._row("COMPLETED", "BUY")
+        self.memory.record_action(platform="polymarket", market_topic_id="t", token_id="x", action="PLACE_ORDER",
+                                  request={}, result={}, decision_id=traded)
+        preview = self.data.forget_matching({"group": "concluded", "results": "BUY"}, dry_run=True)
+        self.assertEqual((preview["matching"], preview["kept_executed"]), (2, 1))
+        answer = self.data.forget_matching({"group": "concluded", "results": "BUY"}, dry_run=False)
+        self.assertEqual(answer["decisions"], 1)
+        self.assertEqual(answer["kept_ids"], [traded])
+        self.assertEqual(self._remaining(), {traded})
+
+    def test_other_filters_on_the_page_narrow_it_too(self) -> None:
+        mine = self._row("PROVIDER_ERROR", platform="polymarket")
+        other = self._row("PROVIDER_ERROR", platform="binance")
+        self.data.forget_matching({"group": "failed", "platform": "binance"}, dry_run=False)
+        self.assertEqual(self._remaining(), {mine})
+        del other
+
+    def test_a_request_that_names_no_tab_is_refused(self) -> None:
+        self._row("PROVIDER_ERROR")
+        with self.assertRaises(ValueError):
+            self.data.forget_matching({}, dry_run=False)
+
+    def test_the_page_offers_both_ways(self) -> None:
+        shell = Path("src/prediction_market_agent/runtime/dashboard.py").read_text()
+        views = Path("src/prediction_market_agent/runtime/static/dashboard-views.js").read_text()
+        self.assertIn('if path == "/api/decisions/forget" and isinstance(payload.get("match"), dict):', shell)
+        for fragment in ('id="ledgerPickAll"', 'onclick="forgetPicked()"', 'onclick="forgetCategory()"'):
+            self.assertIn(fragment, shell)
+        self.assertIn("{match,dry_run:true}", views)
+        self.assertIn("{match,until_id:preview.until_id}", views)
