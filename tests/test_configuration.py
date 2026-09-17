@@ -151,3 +151,23 @@ class SavingOneSettingKeepsTheRestTests(unittest.TestCase):
         values = store.values()
         self.assertEqual(values["paper_trading"], "off")
         self.assertEqual(values["agent_language"], "en")
+
+
+class TradingStyleIsNotBuriedTests(unittest.TestCase):
+    """The two numbers an operator actually tunes do not belong with database paths."""
+
+    def test_the_settings_exist_with_short_and_small_defaults(self) -> None:
+        from prediction_market_agent.core.config import Config
+
+        with tempfile.TemporaryDirectory() as directory:
+            config = Config.load(Path(directory) / "app.json")
+        self.assertEqual(config.strategy_horizon_days, 3)
+        self.assertEqual(config.strategy_max_trade_usdt, 25.0)
+
+    def test_they_have_their_own_place_on_the_settings_page(self) -> None:
+        shell = Path("src/prediction_market_agent/runtime/dashboard.py").read_text()
+        self.assertIn('id="strategySettings"', shell)
+        self.assertIn("styleNames=new Set(['strategy_horizon_days','strategy_max_trade_usdt'])", shell)
+        panel = shell[shell.index("<h2>交易风格</h2>"):shell.index("统一网络代理")]
+        self.assertIn("只做这么多天内揭标的标的", panel)
+        self.assertIn("业务风控", panel, "a hard limit is a filter plugin's job, and the page should say so")
