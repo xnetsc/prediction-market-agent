@@ -848,3 +848,91 @@ class TheAgentSetsTheNextLookTests(unittest.TestCase):
         text = BuiltInMarketDiscovery().instructions
         self.assertIn("SET THE NEXT LOOK", text)
         self.assertIn("never to come back sooner", text)
+
+
+class DeadlineLadderTests(unittest.TestCase):
+    """An event asked across deadlines lists its earliest - usually closed - market first."""
+
+    def setUp(self) -> None:
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.memory = SessionMemory(Path(self.temp.name) / "m.sqlite3")
+
+    def _ladder_plugin(self, open_markets: int = 1, total: int = 10):
+        plugin = FakePlugin(4)
+        asked: list[str] = []
+
+        def get_topic(topic_id):
+            plugin.detail_calls += 1
+            topic = next(item for item in plugin.topics if item.topic_id == topic_id)
+            markets = []
+            for index in range(total):
+                is_open = index >= total - open_markets
+                markets.append(Market(
+                    f"m{topic_id}-{index}", f"by month {index}", f"by month {index}?",
+                    "OPEN" if is_open else "CLOSED",
+                    50.0 * (index + 1), 50.0,
+                    (Outcome(f"yes-{topic_id}-{index}", "Yes", 0.4),),
+                ))
+            return TopicDetail(
+                topic=topic, start_time_ms=0,
+                end_time_ms=int(time.time() * 1000) + 86_400_000, fee_bps=10,
+                markets=tuple(markets),
+            )
+
+        def get_order_book(market_id, outcome_id):
+            plugin.book_calls += 1
+            asked.append(market_id)
+            if not market_id.endswith(f"-{total - 1}") and open_markets == 1:
+                raise RuntimeError("Polymarket read HTTP 404: No orderbook exists")
+            return OrderBook((PriceLevel(0.39, 10),), (PriceLevel(0.41, 10),), 0)
+
+        plugin.get_topic = get_topic
+        plugin.get_order_book = get_order_book
+        return plugin, asked
+
+    def _candidates(self, plugin):
+        provider = RecordingProvider()
+        DiscoveryEngine(
+            memory=self.memory, provider=provider, strategy=BuiltInMarketDiscovery(),
+            evolution_enabled=True,
+        ).discover(platform="fake", plugin=plugin, maximum_topics=2)
+        return provider.requests[0]["candidates"]
+
+    def test_the_open_market_is_priced_even_when_it_is_listed_last(self) -> None:
+        plugin, asked = self._ladder_plugin(open_markets=1, total=10)
+        candidates = self._candidates(plugin)
+        priced = [item for item in candidates if "spread" in item]
+        self.assertTrue(priced, "the live market was never priced")
+        self.assertFalse(any("book_error" in item for item in candidates),
+                         "a closed market was asked for a book")
+        self.assertTrue(all(market_id.endswith("-9") for market_id in asked))
+
+    def test_it_says_which_deadline_the_price_belongs_to(self) -> None:
+        plugin, _ = self._ladder_plugin(open_markets=1, total=10)
+        priced = next(item for item in self._candidates(plugin) if "spread" in item)
+        self.assertIn("by month 9", priced["priced_market"])
+        self.assertEqual(priced["markets"], 10)
+        self.assertEqual(priced["markets_open"], 1)
+
+    def test_an_event_with_nothing_open_says_so_instead_of_asking(self) -> None:
+        plugin, asked = self._ladder_plugin(open_markets=0, total=5)
+        candidates = self._candidates(plugin)
+        self.assertEqual(asked, [], "no closed market should ever be asked for a book")
+        verified = [item for item in candidates if item.get("verified")]
+        self.assertTrue(verified)
+        self.assertTrue(all(item.get("tradeable") is False for item in verified))
+
+    def test_the_agent_sees_live_markets_first_even_past_eight(self) -> None:
+        """Cutting the venue's order at eight dropped the live markets of a long ladder entirely."""
+        plugin, _ = self._ladder_plugin(open_markets=2, total=12)
+        from prediction_market_agent.runtime.market_discovery import _DiscoveryToolbox
+
+        toolbox = _DiscoveryToolbox(
+            plugin=plugin, memory=self.memory, platform="fake",
+            budget=BuiltInMarketDiscovery().budget(), cross_platform_search=None,
+        )
+        detail = toolbox.execute("TOPIC_DETAIL", {"topic_id": plugin.topics[0].topic_id})
+        self.assertEqual([m["status"] for m in detail["markets"][:2]], ["OPEN", "OPEN"])
+        self.assertEqual(detail["markets_total"], 12)
+        self.assertEqual(detail["markets_open"], 2)

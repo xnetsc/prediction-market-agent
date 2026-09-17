@@ -406,13 +406,28 @@ class DiscoveryEngine:
             if end_time:
                 entry["seconds_remaining"] = max(0, (int(end_time) - now_ms) // 1000)
             markets = detail.get("markets") or []
-            entry["markets"] = len(markets)
-            outcomes = (markets[0].get("outcomes") or []) if markets else []
+            entry["markets"] = int(detail.get("markets_total", len(markets)))
+            entry["markets_open"] = int(detail.get("markets_open", 0))
+            # Only an open market has a book. Asking for one on a closed market is a guaranteed 404
+            # that spends the allowance and tells the agent nothing - whereas "nothing here is open"
+            # is itself the fact a status gate needs.
+            priced = next(
+                (market for market in markets if str(market.get("status", "")).upper() == "OPEN"),
+                None,
+            )
+            if priced is None:
+                entry["tradeable"] = False
+                entry["why_not_priced"] = "no market in this event is open for trading"
+            outcomes = (priced.get("outcomes") or []) if priced else []
             if outcomes:
+                entry["tradeable"] = True
+                # Which market the price belongs to matters: in a ladder of deadlines, a spread on
+                # "by December" says nothing about "by June".
+                entry["priced_market"] = str(priced.get("question", ""))[:160]
                 entry["priced_outcome"] = outcomes[0].get("name")
                 try:
                     book = toolbox.execute("OUTCOME_BOOK", {
-                        "market_id": markets[0].get("market_id"),
+                        "market_id": priced.get("market_id"),
                         "outcome_id": outcomes[0].get("outcome_id"),
                     })
                 except Exception as error:
@@ -428,6 +443,13 @@ class DiscoveryEngine:
                         entry["spread_pct_of_mid"] = (
                             round((float(ask) - float(bid)) / mid * 100, 2) if mid else None
                         )
+                    else:
+                        # A book with one side has no spread to report, and saying nothing made it
+                        # look like a candidate nobody had checked. It is a finding: there is no
+                        # price to buy at, or none to sell at.
+                        entry["book_one_sided"] = (
+                            "nobody is selling" if not ask else "nobody is buying"
+                        ) if (bid or ask) else "the book is empty"
                 else:
                     entry["book_error"] = book.get("error", "")
             verified[topic.topic_id] = entry
@@ -798,12 +820,25 @@ class _DiscoveryToolbox:
             return {"ok": False, "error": "detail lookup budget exhausted for this cycle"}
         self._detail_calls += 1
         detail = self.plugin.get_topic(str(arguments["topic_id"]))
+        # Tradeable markets first, most liquid first, and only then cut to eight. Events that ladder
+        # one question across deadlines - "by June", "by September", "by December" - list the
+        # earliest first, and the earliest has usually already closed: reading them in the venue's
+        # order put dead markets at the front and, past eight, dropped the live ones entirely.
+        markets = sorted(
+            detail.markets,
+            key=lambda market: (
+                str(market.status).upper() != "OPEN",
+                -float(market.liquidity_usdt or 0.0),
+            ),
+        )
         return {
             "ok": True,
             "end_time_ms": detail.end_time_ms,
             "fee_bps": detail.fee_bps,
             "resolution": detail.resolution,
             "reference_symbol": detail.reference_symbol,
+            "markets_total": len(detail.markets),
+            "markets_open": sum(1 for market in detail.markets if str(market.status).upper() == "OPEN"),
             "markets": [
                 {
                     "market_id": market.market_id,
@@ -819,7 +854,7 @@ class _DiscoveryToolbox:
                         for outcome in market.outcomes
                     ],
                 }
-                for market in detail.markets[:8]
+                for market in markets[:8]
             ],
         }
 
