@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import threading
+import time
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
@@ -16,6 +17,14 @@ from .events import PlatformDiscoveryEvent, PlatformScanEvent, RobotEventLoop
 
 LOGGER = logging.getLogger(__name__)
 
+START_RETRY_SECONDS = 60
+"""How soon a robot that should be running, but could not start, looks again.
+
+What stops a start is usually settled somewhere this process is not told about: a model service
+signed in through its own page, a quota window reopening. Waiting for the next settings save to
+notice left the robot off after the reason was gone.
+"""
+
 
 class RobotRuntimeManager:
     """Reconcile readiness and pause state; schedules remain owned by API plugins."""
@@ -27,6 +36,7 @@ class RobotRuntimeManager:
         self._engine: TradingEngine | None = None
         self._events: RobotEventLoop | None = None
         self._capacity: DecisionCapacityWatch | None = None
+        self._retry: threading.Timer | None = None
         self._status: dict[str, Any] = {
             "running": False,
             "global_ready": False,
@@ -68,253 +78,297 @@ class RobotRuntimeManager:
 
     def stop(self) -> None:
         with self._lock:
+            self._cancel_retry_locked()
             self._stop_locked()
             self._status["running"] = False
 
-    def reconcile(self, *, start_runtimes: bool = True) -> dict[str, Any]:
+    def _cancel_retry_locked(self) -> None:
+        timer, self._retry = self._retry, None
+        if timer is not None:
+            timer.cancel()
+        self._status.pop("start_retry_at", None)
+
+    def _retry_start(self, timer: threading.Timer) -> None:
         with self._lock:
-            self._stop_locked()
+            # Anything done since this was scheduled - a pause, a start, a saved setting - already
+            # reconciled against the operator's latest choice, and replaced or cancelled this timer.
+            if self._retry is not timer:
+                return
+            self._retry = None
+            if self._status.get("running"):
+                return
             try:
-                config = Config.load(self.application_config_file)
-                managed = ManagedRuntimeConfig.load(config.management_file)
-                catalog = load_plugin_catalog(config)
-            except Exception as error:
-                self._status = {
-                    "running": False,
-                    "global_ready": False,
-                    "global_reasons": [str(error)],
-                    "global_plugins": {},
-                    "decision_providers": {},
-                    "robot_paused": False,
-                    "platforms": {},
-                }
-                return self.status()
-            self._catalog = catalog
-            global_reasons = list(config.robot_readiness_errors())
+                self.reconcile()
+            except Exception:
+                LOGGER.exception("retrying the robot start failed")
 
-            provider_states = {
-                name: self._safe_readiness(catalog, "decision_provider", name)
-                for name in config.decision_providers
-            }
-            if config.decision_providers and not any(
-                state.ready for state in provider_states.values()
-            ):
-                global_reasons.append("No enabled decision provider is ready")
+    def reconcile(self, *, start_runtimes: bool = True) -> dict[str, Any]:
+        """Bring the robot to the operator's saved choice, as far as conditions allow.
 
-            global_plugins: dict[str, dict[str, Any]] = {}
-            ready_optional: dict[str, list[str]] = {
-                "research_tool": [],
-                "risk": [],
-            }
-            ready_strategy = ""
-            for kind, names in (
-                ("decision_strategy", (config.decision_strategy_name,)),
-                ("research_tool", config.research_tool_plugins),
-                ("risk", config.risk_plugins),
-            ):
-                for name in names:
-                    if not name:
-                        continue
-                    readiness = self._safe_readiness(catalog, kind, name)
-                    global_plugins[f"{kind}:{name}"] = readiness.manifest()
-                    if readiness.ready:
-                        if kind == "decision_strategy":
-                            ready_strategy = name
-                        else:
-                            ready_optional[kind].append(name)
+        The choice - paused or running, per platform - is read from where the operator saved it,
+        every time. A pause that conditions forced (no model can answer, a service is signed out)
+        is never written there, so whatever the operator chose last is what the robot returns to
+        once the condition clears.
+        """
+        with self._lock:
+            self._cancel_retry_locked()
+            status = self._reconcile_locked(start_runtimes=start_runtimes)
+            wanted = not status.get("robot_paused") and any(
+                not platform.get("paused") for platform in status.get("platforms", {}).values()
+            )
+            if start_runtimes and wanted and not status.get("running"):
+                timer = threading.Timer(START_RETRY_SECONDS, lambda: self._retry_start(timer))
+                timer.daemon = True
+                self._retry = timer
+                self._status["start_retry_at"] = int(time.time()) + START_RETRY_SECONDS
+                timer.start()
+                status = self.status()
+            return status
 
-            platform_states: dict[str, dict[str, Any]] = {}
-            configured_platforms: list[str] = []
-            active_platforms: list[str] = []
-            for name in config.market_api_plugins:
-                readiness = self._safe_readiness(catalog, "api", name)
-                try:
-                    spec = catalog.get("api", name)
-                except ValueError:
-                    spec = None
-                if readiness.ready and (spec is None or spec.runtime is None):
-                    readiness = PluginReadiness(
-                        False,
-                        ("API plugin does not provide a runtime lifecycle",),
-                    )
-                paused = name in managed.paused_platforms
-                platform_states[name] = {
-                    "ready": readiness.ready,
-                    "startup_reasons": list(readiness.reasons),
-                    "paused": paused,
-                    "running": False,
-                    "runtime": None,
-                }
-                if readiness.ready:
-                    configured_platforms.append(name)
-                if readiness.ready and not paused:
-                    active_platforms.append(name)
-
-            if config.market_api_plugins and not configured_platforms:
-                global_reasons.append("No enabled API platform is ready to start")
-
-            global_ready = not global_reasons
+    def _reconcile_locked(self, *, start_runtimes: bool = True) -> dict[str, Any]:
+        self._stop_locked()
+        try:
+            config = Config.load(self.application_config_file)
+            managed = ManagedRuntimeConfig.load(config.management_file)
+            catalog = load_plugin_catalog(config)
+        except Exception as error:
             self._status = {
                 "running": False,
-                "global_ready": global_ready,
-                "global_reasons": global_reasons,
-                "global_plugins": global_plugins,
-                "decision_providers": {
-                    name: state.manifest() for name, state in provider_states.items()
-                },
-                "robot_paused": managed.robot_paused,
-                "platforms": platform_states,
+                "global_ready": False,
+                "global_reasons": [str(error)],
+                "global_plugins": {},
+                "decision_providers": {},
+                "robot_paused": False,
+                "platforms": {},
             }
-            if managed.robot_paused or not global_ready or not active_platforms:
-                return self.status()
+            return self.status()
+        self._catalog = catalog
+        global_reasons = list(config.robot_readiness_errors())
 
-            runtime_config = replace(
-                config,
-                decision_providers=tuple(
-                    name for name, state in provider_states.items() if state.ready
-                ),
-                market_api_plugins=tuple(configured_platforms),
-                decision_strategy_name=ready_strategy,
-                research_tool_plugins=tuple(ready_optional["research_tool"]),
-                risk_plugins=tuple(ready_optional["risk"]),
-            )
+        provider_states = {
+            name: self._safe_readiness(catalog, "decision_provider", name)
+            for name in config.decision_providers
+        }
+        if config.decision_providers and not any(
+            state.ready for state in provider_states.values()
+        ):
+            global_reasons.append("No enabled decision provider is ready")
+
+        global_plugins: dict[str, dict[str, Any]] = {}
+        ready_optional: dict[str, list[str]] = {
+            "research_tool": [],
+            "risk": [],
+        }
+        ready_strategy = ""
+        for kind, names in (
+            ("decision_strategy", (config.decision_strategy_name,)),
+            ("research_tool", config.research_tool_plugins),
+            ("risk", config.risk_plugins),
+        ):
+            for name in names:
+                if not name:
+                    continue
+                readiness = self._safe_readiness(catalog, kind, name)
+                global_plugins[f"{kind}:{name}"] = readiness.manifest()
+                if readiness.ready:
+                    if kind == "decision_strategy":
+                        ready_strategy = name
+                    else:
+                        ready_optional[kind].append(name)
+
+        platform_states: dict[str, dict[str, Any]] = {}
+        configured_platforms: list[str] = []
+        active_platforms: list[str] = []
+        for name in config.market_api_plugins:
+            readiness = self._safe_readiness(catalog, "api", name)
             try:
-                engine = TradingEngine(runtime_config, catalog=catalog)
-                self._engine = engine
-                if start_runtimes:
-                    def handle_business_event(event: Any) -> Any:
-                        if isinstance(event, PlatformDiscoveryEvent):
-                            return engine.discover_platform_topics(
-                                event.platform, event.maximum_topics
+                spec = catalog.get("api", name)
+            except ValueError:
+                spec = None
+            if readiness.ready and (spec is None or spec.runtime is None):
+                readiness = PluginReadiness(
+                    False,
+                    ("API plugin does not provide a runtime lifecycle",),
+                )
+            paused = name in managed.paused_platforms
+            platform_states[name] = {
+                "ready": readiness.ready,
+                "startup_reasons": list(readiness.reasons),
+                "paused": paused,
+                "running": False,
+                "runtime": None,
+            }
+            if readiness.ready:
+                configured_platforms.append(name)
+            if readiness.ready and not paused:
+                active_platforms.append(name)
+
+        if config.market_api_plugins and not configured_platforms:
+            global_reasons.append("No enabled API platform is ready to start")
+
+        global_ready = not global_reasons
+        self._status = {
+            "running": False,
+            "global_ready": global_ready,
+            "global_reasons": global_reasons,
+            "global_plugins": global_plugins,
+            "decision_providers": {
+                name: state.manifest() for name, state in provider_states.items()
+            },
+            "robot_paused": managed.robot_paused,
+            "platforms": platform_states,
+        }
+        if managed.robot_paused or not global_ready or not active_platforms:
+            return self.status()
+
+        runtime_config = replace(
+            config,
+            decision_providers=tuple(
+                name for name, state in provider_states.items() if state.ready
+            ),
+            market_api_plugins=tuple(configured_platforms),
+            decision_strategy_name=ready_strategy,
+            research_tool_plugins=tuple(ready_optional["research_tool"]),
+            risk_plugins=tuple(ready_optional["risk"]),
+        )
+        try:
+            engine = TradingEngine(runtime_config, catalog=catalog)
+            self._engine = engine
+            if start_runtimes:
+                def handle_business_event(event: Any) -> Any:
+                    if isinstance(event, PlatformDiscoveryEvent):
+                        return engine.discover_platform_topics(
+                            event.platform, event.maximum_topics
+                        )
+                    return engine.process_platform_scan(
+                        event.platform, event.topics, event.maximum_decisions
+                    )
+
+                events = RobotEventLoop(handle_business_event)
+                events.start()
+                self._events = events
+                started_platforms: list[str] = []
+                for name in active_platforms:
+                    spec = catalog.get("api", name)
+                    if spec.runtime is None:
+                        platform_states[name]["startup_reasons"] = [
+                            "API plugin does not provide a runtime lifecycle"
+                        ]
+                        continue
+
+                    def submit_scan(
+                        topics: tuple[Any, ...],
+                        maximum_decisions: int,
+                        *,
+                        platform: str = name,
+                    ) -> dict[str, Any]:
+                        return events.submit(
+                            PlatformScanEvent(
+                                platform=platform,
+                                topics=tuple(topics),
+                                maximum_decisions=maximum_decisions,
                             )
-                        return engine.process_platform_scan(
-                            event.platform, event.topics, event.maximum_decisions
                         )
 
-                    events = RobotEventLoop(handle_business_event)
-                    events.start()
-                    self._events = events
-                    started_platforms: list[str] = []
-                    for name in active_platforms:
-                        spec = catalog.get("api", name)
-                        if spec.runtime is None:
-                            platform_states[name]["startup_reasons"] = [
-                                "API plugin does not provide a runtime lifecycle"
-                            ]
-                            continue
-
-                        def submit_scan(
-                            topics: tuple[Any, ...],
-                            maximum_decisions: int,
-                            *,
-                            platform: str = name,
-                        ) -> dict[str, Any]:
-                            return events.submit(
-                                PlatformScanEvent(
-                                    platform=platform,
-                                    topics=tuple(topics),
-                                    maximum_decisions=maximum_decisions,
-                                )
+                    def discover_markets(
+                        maximum_topics: int, *, platform: str = name
+                    ) -> tuple[Any, ...]:
+                        """Framework-owned discovery; the plugin only decides when to ask."""
+                        return events.submit(
+                            PlatformDiscoveryEvent(
+                                platform=platform, maximum_topics=maximum_topics
                             )
-
-                        def discover_markets(
-                            maximum_topics: int, *, platform: str = name
-                        ) -> tuple[Any, ...]:
-                            """Framework-owned discovery; the plugin only decides when to ask."""
-                            return events.submit(
-                                PlatformDiscoveryEvent(
-                                    platform=platform, maximum_topics=maximum_topics
-                                )
-                            )
-
-                        def next_scan_delay(
-                            minimum_seconds: int, *, platform: str = name
-                        ) -> dict[str, Any]:
-                            """What the agent asked for after its last look at this platform.
-
-                            When to come back is a judgement about this venue right now - how fast
-                            its prices move, whether a catalyst is due - and the agent is the only
-                            thing here that has just read it. The plugin still owns the decision:
-                            this is a request, its own interval is the floor, and a plugin that
-                            does not ask never hears about it.
-                            """
-                            plan = engine.memory.survey_plan(platform)
-                            requested = int(plan.get("next_scan_seconds", 0) or 0)
-                            return {
-                                "seconds": max(int(minimum_seconds), requested),
-                                "requested_seconds": requested,
-                                "minimum_seconds": int(minimum_seconds),
-                                "reason": str(plan.get("reason", "")),
-                            }
-
-                        try:
-                            spec.runtime.start(
-                                {
-                                    "platform": name,
-                                    "submit_scan": submit_scan,
-                                    "discover_markets": discover_markets,
-                                    "next_scan_delay": next_scan_delay,
-                                }
-                            )
-                            runtime_status = spec.runtime.status()
-                            if not runtime_status.get("running", False):
-                                raise RuntimeError(
-                                    "API plugin runtime returned without entering running state"
-                                )
-                            platform_states[name]["running"] = True
-                            platform_states[name]["runtime"] = runtime_status
-                            started_platforms.append(name)
-                        except Exception as error:
-                            platform_states[name]["startup_reasons"] = [
-                                f"Runtime failed to start: {error}"
-                            ]
-                            try:
-                                spec.runtime.stop()
-                            except Exception:
-                                LOGGER.exception(
-                                    "failed to clean up API plugin runtime %s", name
-                                )
-                    if not started_platforms:
-                        self._status["global_ready"] = False
-                        self._status["global_reasons"].append(
-                            "No enabled API platform runtime started successfully"
                         )
-                        if events is not None:
-                            events.stop()
-                            self._events = None
-                        engine.close()
-                        self._engine = None
-                        return self.status()
-                if start_runtimes and started_platforms:
-                    # The one loop that has to keep running when nothing can answer, because it is
-                    # what tells the plugins standing down that they may start again. It watches
-                    # the robot; it must never be the reason the robot did not start, so a failure
-                    # here is reported and the run continues without it.
+
+                    def next_scan_delay(
+                        minimum_seconds: int, *, platform: str = name
+                    ) -> dict[str, Any]:
+                        """What the agent asked for after its last look at this platform.
+
+                        When to come back is a judgement about this venue right now - how fast
+                        its prices move, whether a catalyst is due - and the agent is the only
+                        thing here that has just read it. The plugin still owns the decision:
+                        this is a request, its own interval is the floor, and a plugin that
+                        does not ask never hears about it.
+                        """
+                        plan = engine.memory.survey_plan(platform)
+                        requested = int(plan.get("next_scan_seconds", 0) or 0)
+                        return {
+                            "seconds": max(int(minimum_seconds), requested),
+                            "requested_seconds": requested,
+                            "minimum_seconds": int(minimum_seconds),
+                            "reason": str(plan.get("reason", "")),
+                        }
+
                     try:
-                        self._capacity = DecisionCapacityWatch(
-                            engine.provider,
-                            lambda: [
-                                (name, catalog.get("api", name).runtime.notify)
-                                for name in started_platforms
-                                if catalog.get("api", name).runtime is not None
-                            ],
+                        spec.runtime.start(
+                            {
+                                "platform": name,
+                                "submit_scan": submit_scan,
+                                "discover_markets": discover_markets,
+                                "next_scan_delay": next_scan_delay,
+                            }
                         )
-                        self._capacity.start()
+                        runtime_status = spec.runtime.status()
+                        if not runtime_status.get("running", False):
+                            raise RuntimeError(
+                                "API plugin runtime returned without entering running state"
+                            )
+                        platform_states[name]["running"] = True
+                        platform_states[name]["runtime"] = runtime_status
+                        started_platforms.append(name)
                     except Exception as error:
-                        self._capacity = None
-                        LOGGER.exception("decision capacity watch could not start")
-                        self._status["global_reasons"].append(
-                            f"AI 可用性监控未启动，平台不会在模型不可用时自动停扫：{error}"
-                        )
-                self._status["running"] = bool(start_runtimes)
-                return self.status()
-            except Exception as error:
-                self._status["global_ready"] = False
-                self._status["global_reasons"].append(str(error))
-                self._stop_locked()
-                for platform in self._status["platforms"].values():
-                    platform["running"] = False
-                return self.status()
+                        platform_states[name]["startup_reasons"] = [
+                            f"Runtime failed to start: {error}"
+                        ]
+                        try:
+                            spec.runtime.stop()
+                        except Exception:
+                            LOGGER.exception(
+                                "failed to clean up API plugin runtime %s", name
+                            )
+                if not started_platforms:
+                    self._status["global_ready"] = False
+                    self._status["global_reasons"].append(
+                        "No enabled API platform runtime started successfully"
+                    )
+                    if events is not None:
+                        events.stop()
+                        self._events = None
+                    engine.close()
+                    self._engine = None
+                    return self.status()
+            if start_runtimes and started_platforms:
+                # The one loop that has to keep running when nothing can answer, because it is
+                # what tells the plugins standing down that they may start again. It watches
+                # the robot; it must never be the reason the robot did not start, so a failure
+                # here is reported and the run continues without it.
+                try:
+                    self._capacity = DecisionCapacityWatch(
+                        engine.provider,
+                        lambda: [
+                            (name, catalog.get("api", name).runtime.notify)
+                            for name in started_platforms
+                            if catalog.get("api", name).runtime is not None
+                        ],
+                        probe=engine.provider_quality.capacity,
+                    )
+                    self._capacity.start()
+                except Exception as error:
+                    self._capacity = None
+                    LOGGER.exception("decision capacity watch could not start")
+                    self._status["global_reasons"].append(
+                        f"AI 可用性监控未启动，平台不会在模型不可用时自动停扫：{error}"
+                    )
+            self._status["running"] = bool(start_runtimes)
+            return self.status()
+        except Exception as error:
+            self._status["global_ready"] = False
+            self._status["global_reasons"].append(str(error))
+            self._stop_locked()
+            for platform in self._status["platforms"].values():
+                platform["running"] = False
+            return self.status()
 
     def recheck_providers(self, name: str = "") -> dict[str, Any]:
         """Put cooled-down decision providers back in line immediately.
@@ -324,11 +378,16 @@ class RobotRuntimeManager:
         """
         with self._lock:
             engine = self._engine
+            capacity = self._capacity
         if engine is None:
             raise ValueError("机器人未运行，没有可重新检测的模型服务")
         cleared = engine.provider.health.recheck(name.strip())
         probed = engine.provider_quality.probe_recovering()
-        return {"cleared": cleared, "probed": probed, "health": engine.provider_quality.manifest()}
+        # Said at once rather than at the watch's next turn: whoever pressed this is looking at
+        # the screen, waiting to see the robot resume.
+        reading = capacity.check() if capacity is not None else engine.provider_quality.capacity()
+        return {"cleared": cleared, "probed": probed, "capacity": reading,
+                "health": engine.provider_quality.manifest()}
 
     def export_strategies(self, lane: str = "") -> dict[str, Any]:
         """Report what the discovery and decision strategies currently send to the model."""

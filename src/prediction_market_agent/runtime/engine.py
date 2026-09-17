@@ -109,9 +109,28 @@ class TradingEngine(MarketEvaluationMixin, ExecutionActionsMixin):
                 raise ValueError(f"Unknown active platform: {platform}") from error
             return tuple(self._collect_platform_topics(runtime, maximum_topics))
 
+    def can_decide(self, platform: str) -> bool:
+        """Whether work that exists to reach a decision should start now.
+
+        Every cycle pulls markets, builds a prompt and opens a ledger record for the sake of one
+        answer. With no model able to give it, all of that is spent for nothing and the ledger
+        fills with failures that only restate the outage - so the work is not started. The plugins
+        are told separately and stand down; this is the check that does not depend on them.
+        """
+        reading = self.provider_quality.capacity()
+        if not reading["available"]:
+            LOGGER.info(
+                "platform=%s holding: no decision provider can answer (%s)",
+                platform,
+                ", ".join(f"{name}={kind}" for name, kind in reading["waiting"].items()) or "none",
+            )
+        return bool(reading["available"])
+
     def _collect_platform_topics(
         self, runtime: PlatformRuntime, maximum_topics: int
     ) -> list[Topic]:
+        if not self.can_decide(runtime.plugin.name):
+            return []
         runtime.plugin.sync_time()
         for name, review in (
             ("discovery", self.discovery.review),
@@ -284,6 +303,12 @@ class TradingEngine(MarketEvaluationMixin, ExecutionActionsMixin):
     ) -> None:
         self._decisions_this_cycle = 0
         self._max_decisions_this_cycle = maximum_decisions
+        # Settling what is already held needs no model, and money already committed is owed its
+        # outcome whether or not anything can decide today.
+        if not self.can_decide(runtime.plugin.name):
+            self._settle_open_positions(runtime)
+            runtime.store.save(runtime.state)
+            return
         # Answers to funding requests come back between cycles, so this is where they are read.
         # An unclaimed answer is the same as no answer: nobody is sitting waiting for it.
         self._resume_funded_decisions(runtime)
@@ -298,6 +323,10 @@ class TradingEngine(MarketEvaluationMixin, ExecutionActionsMixin):
         )
         for topic in eligible:
             if self._decisions_this_cycle >= maximum_decisions:
+                break
+            # A limit reached on one topic is reached for all of them: the rest of the scan
+            # would only collect data and write a failed record apiece.
+            if not self.can_decide(runtime.plugin.name):
                 break
             try:
                 self._evaluate_topic(runtime, topic)

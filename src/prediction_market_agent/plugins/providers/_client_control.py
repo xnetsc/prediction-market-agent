@@ -21,6 +21,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
+from prediction_market_agent.agent.provider_health import parse_reset_time
 from prediction_market_agent.plugin_system.discovery import PluginConfigField, PluginControls
 from prediction_market_agent.plugin_system.managed_config import atomic_write_text
 from ._shared import resolve_executable, subprocess_environment
@@ -429,6 +430,37 @@ class ClientControl:
             "source": "claude · /usage",
         }
 
+    def quota(self) -> dict[str, Any]:
+        """Whether this account can serve a request now and, when it cannot, when it can again.
+
+        The same free reading as `usage`, turned into the two facts the runtime acts on. A request
+        needs every metered window open, so when several are exhausted the account recovers when
+        the last of them resets.
+        """
+        reading = self.usage()
+        windows = [w for w in reading.get("windows") or [] if isinstance(w, dict)]
+        available = reading.get("available")
+        if available is None:
+            signed_in = self.authenticated()
+            if signed_in is False:
+                return {"available": False, "kind": "auth", "recovers_at": 0.0,
+                        "detail": "客户端未登录或登录已失效，需要重新登录", "signed_in": False}
+            return {"available": None, "kind": "", "recovers_at": 0.0,
+                    "detail": str(reading.get("error") or ""), "signed_in": signed_in}
+        if available:
+            return {"available": True, "kind": "", "recovers_at": 0.0, "detail": "",
+                    "signed_in": True}
+        exhausted = [w for w in windows if _percent(w.get("used_percent")) >= 100] or windows
+        resets = [stamp for stamp in (_window_reset(w) for w in exhausted) if stamp]
+        detail = "；".join(
+            f"{w.get('label') or '额度'} 已用 {_percent(w.get('used_percent')):g}%"
+            + (f"，{w['resets_text']} 重置" if w.get("resets_text") else "")
+            for w in exhausted
+        )
+        return {"available": False, "kind": "rate_limit",
+                "recovers_at": max(resets) if resets else 0.0,
+                "detail": detail or "客户端报告额度已用完", "signed_in": True}
+
     def authenticated(self) -> bool | None:
         """What the client's own status command says about this session.
 
@@ -770,3 +802,19 @@ class ClientControl:
             self.update_thread.join(timeout=16)
         if self.monitor:
             self.monitor.join(timeout=31)
+
+
+def _percent(value: Any) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _window_reset(window: dict[str, Any]) -> float:
+    """When one metered window reopens: Codex gives a timestamp, Claude a phrase."""
+    stamp = window.get("resets_at")
+    if isinstance(stamp, (int, float)) and stamp > 0:
+        return float(stamp) / 1000 if stamp > 1e12 else float(stamp)
+    text = str(window.get("resets_text") or "").strip()
+    return parse_reset_time("resets " + text) or 0.0 if text else 0.0

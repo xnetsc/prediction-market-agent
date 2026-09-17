@@ -110,3 +110,29 @@ dialog{background:var(--surface)!important;color:var(--ink)!important;border:1px
 .result-chip{border:1px solid var(--border,#d6d6d6);background:none;border-radius:999px;padding:.2rem .7rem;font:inherit;font-size:.9em;cursor:pointer;color:inherit}
 .result-chip[aria-pressed="true"]{background:var(--accent,#1f5c4b);border-color:var(--accent,#1f5c4b);color:#fff}
 .result-chip-hint{font-size:.85em}
+
+/* The readable record. Four answers in a fixed order so the eye learns where each one sits; the
+   conclusion is a coloured word because it is the thing scanned for, and the result carries the
+   money, so gains and losses are the only other colour on the card. */
+.ledger-card{padding:.25rem 0 .5rem}
+.ledger-four{display:grid;grid-template-columns:max-content 1fr;gap:.45rem 1rem;margin:.5rem 0}
+.ledger-four dt{color:var(--muted,#6b6b6b);font-size:.9em;white-space:nowrap;padding-top:.05rem}
+.ledger-four dd{margin:0;line-height:1.55}
+.conclusion{display:inline-block;font-weight:600;padding:0 .45rem;border-radius:.3rem;font-size:.92em}
+.conclusion.hold{background:rgba(128,128,128,.14)}
+.conclusion.buy{background:rgba(31,122,76,.14);color:#1f7a4c}
+.conclusion.sell{background:rgba(176,64,40,.13);color:#b04028}
+.conclusion.cancel,.conclusion.none{background:rgba(128,128,128,.1);color:var(--muted,#6b6b6b)}
+.ledger-numbers{display:flex;flex-wrap:wrap;gap:.35rem 1.1rem;margin:.35rem 0 .6rem;padding:.5rem .7rem;border-radius:.4rem;background:rgba(128,128,128,.07)}
+.ledger-numbers span{display:flex;flex-direction:column;min-width:4rem}
+.ledger-numbers small{color:var(--muted,#6b6b6b);font-size:.78em}
+.ledger-numbers b{font-variant-numeric:tabular-nums}
+.ledger-more{margin:.35rem 0}
+.ledger-more>summary{cursor:pointer;color:var(--muted,#6b6b6b);font-size:.92em}
+.ledger-more h5{margin:.8rem 0 .3rem;font-size:.9em}
+.ledger-prose{white-space:pre-wrap;line-height:1.6}
+.ledger-steps{margin:.2rem 0;padding-left:1.3rem;line-height:1.55}
+.decision-entry .good{color:#1f7a4c}
+@media (max-width:640px){.ledger-four{grid-template-columns:1fr}.ledger-four dt{padding-top:.4rem}}
+.ai-pause-list{margin:.5rem 0;padding-left:1.2rem;display:flex;flex-direction:column;gap:.3rem}.ai-pause-list a{white-space:nowrap;font-weight:600}
+.console-update{display:flex;gap:1rem;align-items:center;justify-content:space-between;flex-wrap:wrap}

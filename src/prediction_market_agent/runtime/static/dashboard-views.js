@@ -11,7 +11,7 @@ const CATEGORY_HELP = {
 const SERVICE_TITLES = {codex:'Codex',claude:'Claude',openai_compatible:'兼容 API · OpenRouter / 自定义'};
 const PLUGIN_CENTER_KINDS = ['api','market_discovery','decision_strategy','research_tool','agent_policy','risk'];
 const STRATEGY_LANES = {market_discovery:'discovery', decision_strategy:'decision'};
-const serviceTitle = name => SERVICE_TITLES[name] || name || '未记录';
+const serviceTitle = name => SERVICE_TITLES[name] || name || '没有服务名';
 function downloadCredentialBundle(name,status){
     const bundle=status?.credential_export;
     if(!bundle)throw Error('服务端没有返回凭据内容');
@@ -64,7 +64,7 @@ async function exportStrategy(lane){
     }
 }
 const actionTitle = value => ({BUY:'买入',SELL:'卖出',HOLD:'观望',CANCEL:'撤单'}[value] || value || '尚未形成');
-const decisionStatusTitle = value => ({STARTED:'分析中',PROVIDER_ERROR:'模型调用失败',RISK_REJECTED:'规则拒绝，未执行',EXECUTION_ERROR:'执行失败',COMPLETED:'流程已完成',HOLD:'观望，未下单',ERROR:'出现错误',FAILED:'失败',PENDING:'处理中',EXECUTED:'已提交执行',REJECTED:'被拒绝'}[String(value).toUpperCase()]||'平台状态：'+(value||'未记录'));
+const decisionStatusTitle = value => ({STARTED:'分析中',PROVIDER_ERROR:'模型调用失败',RISK_REJECTED:'规则拒绝，未执行',EXECUTION_ERROR:'执行失败',COMPLETED:'流程已完成',HOLD:'观望，未下单',ERROR:'出现错误',FAILED:'失败',PENDING:'处理中',EXECUTED:'已提交执行',REJECTED:'被拒绝'}[String(value).toUpperCase()]||(value?'平台状态：'+value:'没有状态'));
 function managementFeedback(){return document.getElementById(location.hash.startsWith('#model')?'modelManageStatus':'manageStatus')}
 function processStrip(steps){return '<ol class="process-strip">'+steps.map(s=>'<li>'+esc(s)+'</li>').join('')+'</ol>'}
 function configLink(kind,name){return kind==='decision_provider'?'#model-config/'+encodeURIComponent(name):'#plugin_'+kind+'_'+name}
@@ -270,12 +270,23 @@ async function refreshClientControls(){try{const response=await get('/api/plugin
 
 async function installModelPlugin(){let s=document.getElementById('modelInstallStatus');try{let result=await post('/api/plugins/install',{kind:'decision_provider',target_directory:document.getElementById('modelInstallTarget').value,name:document.getElementById('modelInstallName').value,source:document.getElementById('modelInstallSource').value});renderManager(result.management);s.className='status good';s.textContent='已安装：'+result.installed+'；请在上方启用并保存'}catch(e){s.className='status danger';s.textContent=e.message}}
 
+/* An open tab keeps running the script it loaded. After an update it goes on drawing with it - a label
+   since fixed, a card since redesigned - with nothing on screen to say the page itself is out of date.
+   The server reports the version it serves now; a tab that was served a different one offers to reload. */
+function noticeConsoleUpdate(serving){
+    const banner=typeof document!=='undefined'&&document.getElementById('consoleUpdate');
+    if(!banner||typeof CONSOLE_VERSION==='undefined'||!serving)return false;
+    banner.hidden=serving===CONSOLE_VERSION;
+    return !banner.hidden;
+}
+
 function renderRuntime(r){
+    noticeConsoleUpdate(r.console_version);
     if(r.setup)renderSetupGuide(r.setup);
     const root=document.getElementById('runtimeControl');
     // Periodic status refresh must not erase an unsaved pause choice.
     if(!root.dataset.dirty){
-        root.innerHTML='<label class="pause-switch"><input id="pauseAll" type="checkbox" '+(r.robot_paused?'checked':'')+'> 暂停全部平台</label><div class="config-grid">'+Object.entries(r.platforms||{}).map(([name,p])=>'<article class="plugin"><div class="section-heading"><h4>'+esc(name)+'</h4><span class="badge '+(p.running?'ready':'')+'">'+(p.running?'运行中':p.paused?'已暂停':p.ready?'可启动但未运行':'插件报告未就绪')+'</span></div><label><input class="pausePlatform" type="checkbox" value="'+esc(name)+'" '+(p.paused?'checked':'')+'> 暂停此平台</label>'+(!p.ready?'<p><a href="'+configLink('api',name)+'">打开平台插件 →</a></p>':'')+(p.startup_reasons?.length?'<details class="diagnostic-detail"><summary>查看插件报告</summary><p>'+esc(p.startup_reasons.join('；'))+'</p></details>':'')+'</article>').join('')+'</div><p class="status '+(r.global_ready?'good':'muted')+'">'+(r.global_ready?'AI 服务和至少一个平台已报告可启动；是否正常运行以平台的“运行中”为准。':'机器人主链尚未满足：需要至少一个可用 AI 服务和一个可启动平台。')+'</p>'+(!r.global_ready?'<details><summary>查看具体原因</summary><p>'+esc((r.global_reasons||[]).join('；'))+'</p></details>':'');
+        root.innerHTML='<label class="pause-switch"><input id="pauseAll" type="checkbox" '+(r.robot_paused?'checked':'')+'> 暂停全部平台</label><div class="config-grid">'+Object.entries(r.platforms||{}).map(([name,p])=>'<article class="plugin"><div class="section-heading"><h4>'+esc(name)+'</h4><span class="badge '+(p.running?'ready':'')+'">'+(p.running?(p.runtime&&p.runtime.holding?'已暂停：AI 不可用':'运行中'):p.paused?'已暂停':p.ready?'可启动但未运行':'插件报告未就绪')+'</span></div><label><input class="pausePlatform" type="checkbox" value="'+esc(name)+'" '+(p.paused?'checked':'')+'> 暂停此平台</label>'+(!p.ready?'<p><a href="'+configLink('api',name)+'">打开平台插件 →</a></p>':'')+(p.startup_reasons?.length?'<details class="diagnostic-detail"><summary>查看插件报告</summary><p>'+esc(p.startup_reasons.join('；'))+'</p></details>':'')+'</article>').join('')+'</div><p class="status '+(r.global_ready?'good':'muted')+'">'+(r.global_ready?'AI 服务和至少一个平台已报告可启动；是否正常运行以平台的“运行中”为准。':'机器人主链尚未满足：需要至少一个可用 AI 服务和一个可启动平台。')+'</p>'+(!r.global_ready?'<details><summary>查看具体原因</summary><p>'+esc((r.global_reasons||[]).join('；'))+'</p></details>':'');
         root.onchange=()=>{root.dataset.dirty='true';document.getElementById('runtimeStatus').textContent='暂停选项尚未保存'};
     }
 }
@@ -298,17 +309,85 @@ function setupStepHtml(step,index){
     const actions=(step.actions||[]).map(a=>'<div class="setup-action"><a class="button-link" href="'+configLink(a.kind,a.name)+'">'+esc(a.label)+' →</a></div>').join('');
     return '<li class="'+(step.ready?'complete':'incomplete')+'"><span class="step-number">'+(step.ready?'✓':step.required===false?'·':index+1)+'</span><div><strong>'+esc(step.title)+'</strong><span class="badge">'+(step.ready?'已满足':step.required===false?'可选项未就绪':'需要处理')+'</span>'+(!step.ready?'<p>'+esc(step.description)+'</p><div class="toolbar">'+(actions||'<a class="button-link" href="'+defaultLink+'">前往设置 →</a>')+'</div>'+(step.issues.length?'<details class="diagnostic-detail"><summary>查看插件报告</summary><p>'+step.issues.map(esc).join('<br>')+'</p></details>':''):'')+'</div></li>';
 }
+/* ---- Nothing can decide: the robot is paused, and the overview says why and until when. ----
+   Platforms keep their threads while they hold, so "running" is technically true - but nothing is
+   collected and no record is written, which to the person watching is a pause. What they need is
+   the reason per service and, where the service said, when it comes back. */
+const PROVIDER_WAIT_TEXT={rate_limit:'额度用完',auth:'登录失效，需要重新登录',transient:'连接不稳定（超时或网络故障）',contract:'返回的内容不符合要求',unknown:'调用失败',unavailable:'没能启用'};
+let RECHECK_NOTE=null;
+
+function waitDurationText(seconds){
+    const s=Math.max(0,Math.round(seconds));
+    const d=Math.floor(s/86400),h=Math.floor(s%86400/3600),m=Math.floor(s%3600/60);
+    if(d)return d+' 天'+(h?' '+h+' 小时':'');
+    if(h)return h+' 小时'+(m?' '+m+' 分钟':'');
+    return Math.max(1,m)+' 分钟';
+}
+function clockText(epochSeconds){
+    const when=new Date(epochSeconds*1000),today=new Date();
+    const time=String(when.getHours()).padStart(2,'0')+':'+String(when.getMinutes()).padStart(2,'0');
+    return when.toDateString()===today.toDateString()?'今天 '+time:(when.getMonth()+1)+' 月 '+when.getDate()+' 日 '+time;
+}
+function providerWaitText(name,p,nowSeconds){
+    const now=nowSeconds??Date.now()/1000;
+    let text=serviceTitle(name)+'：'+(PROVIDER_WAIT_TEXT[p.kind]||'暂时不可用');
+    if(p.kind==='rate_limit'){
+        if(p.recovers_at&&p.recovers_at>now)text+='，预计 '+waitDurationText(p.recovers_at-now)+'后恢复（'+clockText(p.recovers_at)+'）';
+        else if(p.confirming)text+='，已到恢复时间，正在确认';
+        else text+='，没说何时恢复，会定期免费查询额度';
+    }else if(p.kind==='auth'){
+        return text;
+    }else{
+        if(p.kind==='unknown'&&p.error)text+='（'+String(p.error).slice(0,80)+'）';
+        if(p.next_check_at&&p.next_check_at>now)text+='，约 '+waitDurationText(p.next_check_at-now)+'后自动重试';
+        else if(p.confirming)text+='，正在确认是否恢复';
+    }
+    return text;
+}
+function aiPauseTitle(setup){
+    const kinds=Object.values(setup.decision_capacity?.providers||{}).filter(p=>!p.ready).map(p=>p.kind);
+    return kinds.length&&kinds.every(k=>k==='rate_limit')?'机器人已暂停：AI 额度用完':'机器人已暂停：没有可用的 AI 模型服务';
+}
+function aiPauseHtml(setup,nowSeconds){
+    const known=setup.decision_capacity?.providers||{};
+    const rows=Object.entries(known).filter(([,p])=>!p.ready)
+        .map(([name,p])=>'<li>'+esc(providerWaitText(name,p,nowSeconds))+(p.kind==='auth'||p.kind==='unavailable'?' <a href="#models">去处理 →</a>':'')+'</li>');
+    // A service that could not even start is not in the robot's own list, but it is still a reason.
+    for(const [name,p] of Object.entries(setup.decision_providers||{}))
+        if(!p.ready&&!known[name])rows.push('<li>'+esc(serviceTitle(name)+'：'+((p.reasons||[]).join('；')||'没有就绪'))+' <a href="#models">去处理 →</a></li>');
+    return '<ul class="ai-pause-list">'+rows.join('')+'</ul>'
+        +'<p>暂停期间不采集市场数据，也不产生决策记录；AI 恢复后自动继续，不需要操作。</p>'
+        +'<div class="toolbar"><button onclick="recheckProviders(this)">已换套餐或已充值？立即重新检测</button>'
+        +(RECHECK_NOTE?'<span class="status '+esc(RECHECK_NOTE.tone)+'" role="status">'+esc(RECHECK_NOTE.text)+'</span>':'')+'</div>';
+}
+async function recheckProviders(button){
+    if(button)button.disabled=true;
+    RECHECK_NOTE={tone:'muted',text:'正在向客户端查询额度…'};
+    try{
+        const result=await post('/api/providers/recheck',{});
+        RECHECK_NOTE=result.capacity&&result.capacity.available
+            ?{tone:'good',text:'已恢复，机器人继续运行'}
+            :{tone:'muted',text:'仍不可用，已按客户端的回答更新恢复时间（'+new Date().toLocaleTimeString()+'）'};
+    }catch(e){
+        RECHECK_NOTE={tone:'danger',text:e.message};
+    }finally{
+        if(button)button.disabled=false;
+    }
+    await refreshRuntime();
+}
+
 function renderSetupGuide(setup){
     const titles={management_only:'界面验收测试实例：未启动机器人进程',not_running:'机器人未运行',paused:'机器人已暂停',partial:'机器人正在运行，但部分平台未运行',running:'机器人正在运行'};
     const descriptions={management_only:'当前访问的是仅用于界面验收的测试实例，未启用机器人运行进程；这不是配置问题。正常启动的实例会在模型服务和至少一个平台就绪且未暂停后立即运行。',not_running:'先处理“启动必需”中的未完成项。AI 服务和至少一个平台报告可启动且未暂停时，平台会立即自动启动。若条件已满足仍未运行，请展开启动错误。',paused:'当前是用户主动暂停状态，不是缺少必备配置。到本页下方取消暂停并保存后，已就绪平台会立即启动。',partial:'正在运行的平台不受其他平台或可选增强项影响。你可以继续处理未运行的平台，或关闭不使用的平台。',running:'平台扫描已启动，等待市场事件。可选增强项不影响启动；运行中也不代表一定会产生交易或盈利。'};
     const root=document.getElementById('gettingStarted'),previous=root.querySelector('#setupChecklist');
-    const open=previous?previous.open:setup.state!=='running';
+    const aiPaused=setup.state==='ai_paused';
+    const open=previous?previous.open:setup.state!=='running'&&!aiPaused;
     const requiredSteps=setup.steps.filter(step=>step.required!==false),optionalSteps=setup.steps.filter(step=>step.required===false);
     const optionalRemaining=optionalSteps.filter(step=>!step.ready).length;
     const requiredSelected=SETUP_GUIDE_TAB!=='optional';
     const optionalList=optionalSteps.length?'<ol class="setup-checklist">'+optionalSteps.map(setupStepHtml).join('')+'</ol>':'<div class="empty-state compact"><strong>当前没有可选增强项</strong><p>无需处理，机器人仍可按启动必需项运行。</p></div>';
     root.className='readiness-panel '+(setup.state==='running'?'ready':'needs-attention');
-    root.innerHTML='<div class="section-heading"><div><span class="eyebrow">运行状态</span><h3>'+esc(titles[setup.state])+'</h3><p>'+esc(descriptions[setup.state])+'</p></div><button onclick="refreshManager()">重新检查</button></div><details id="setupChecklist" '+(open?'open':'')+'><summary>启动向导 · '+setup.remaining+' 项必须处理</summary><div class="setup-tabs" role="tablist" aria-label="启动向导分类"><button id="setupRequiredTab" type="button" role="tab" data-setup-tab="required" aria-controls="setupRequiredPanel" aria-selected="'+requiredSelected+'" tabindex="'+(requiredSelected?'0':'-1')+'" onclick="selectSetupGuideTab(\'required\')">启动必需 <span class="setup-tab-count">'+setup.remaining+'</span></button><button id="setupOptionalTab" type="button" role="tab" data-setup-tab="optional" aria-controls="setupOptionalPanel" aria-selected="'+(!requiredSelected)+'" tabindex="'+(requiredSelected?'-1':'0')+'" onclick="selectSetupGuideTab(\'optional\')">可选增强 <span class="setup-tab-count">'+optionalRemaining+'</span></button></div><div id="setupRequiredPanel" class="setup-panel" role="tabpanel" aria-labelledby="setupRequiredTab" data-setup-panel="required" '+(requiredSelected?'':'hidden')+'><p class="setup-tab-intro">这些条件决定机器人能否启动。顶部数字只统计尚未完成的必需项。</p><ol class="setup-checklist">'+requiredSteps.map(setupStepHtml).join('')+'</ol></div><div id="setupOptionalPanel" class="setup-panel" role="tabpanel" aria-labelledby="setupOptionalTab" data-setup-panel="optional" '+(requiredSelected?'hidden':'')+'><p class="setup-tab-intro">这些能力用于增强分析、研究，或对动作做过滤检查；未就绪不会阻止机器人启动。</p>'+optionalList+'</div></details>'+(setup.runtime_reasons?.length?'<details class="diagnostic-detail"><summary>查看启动错误 / 运行条件</summary><p>'+setup.runtime_reasons.map(esc).join('<br>')+'</p><a href="#settings">检查程序设置 →</a></details>':'');
+    root.innerHTML='<div class="section-heading"><div><span class="eyebrow">运行状态</span><h3>'+esc(aiPaused?aiPauseTitle(setup):titles[setup.state])+'</h3>'+(aiPaused?aiPauseHtml(setup):'<p>'+esc(descriptions[setup.state]+(setup.state==='not_running'&&setup.start_retry_at?' 不需要手动重启：条件满足后会自动启动（约每分钟检查一次）。':''))+'</p>')+'</div><button onclick="refreshManager()">重新检查</button></div><details id="setupChecklist" '+(open?'open':'')+'><summary>启动向导 · '+setup.remaining+' 项必须处理</summary><div class="setup-tabs" role="tablist" aria-label="启动向导分类"><button id="setupRequiredTab" type="button" role="tab" data-setup-tab="required" aria-controls="setupRequiredPanel" aria-selected="'+requiredSelected+'" tabindex="'+(requiredSelected?'0':'-1')+'" onclick="selectSetupGuideTab(\'required\')">启动必需 <span class="setup-tab-count">'+setup.remaining+'</span></button><button id="setupOptionalTab" type="button" role="tab" data-setup-tab="optional" aria-controls="setupOptionalPanel" aria-selected="'+(!requiredSelected)+'" tabindex="'+(requiredSelected?'-1':'0')+'" onclick="selectSetupGuideTab(\'optional\')">可选增强 <span class="setup-tab-count">'+optionalRemaining+'</span></button></div><div id="setupRequiredPanel" class="setup-panel" role="tabpanel" aria-labelledby="setupRequiredTab" data-setup-panel="required" '+(requiredSelected?'':'hidden')+'><p class="setup-tab-intro">这些条件决定机器人能否启动。顶部数字只统计尚未完成的必需项。</p><ol class="setup-checklist">'+requiredSteps.map(setupStepHtml).join('')+'</ol></div><div id="setupOptionalPanel" class="setup-panel" role="tabpanel" aria-labelledby="setupOptionalTab" data-setup-panel="optional" '+(requiredSelected?'hidden':'')+'><p class="setup-tab-intro">这些能力用于增强分析、研究，或对动作做过滤检查；未就绪不会阻止机器人启动。</p>'+optionalList+'</div></details>'+(setup.runtime_reasons?.length?'<details class="diagnostic-detail"><summary>查看启动错误 / 运行条件</summary><p>'+setup.runtime_reasons.map(esc).join('<br>')+'</p><a href="#settings">检查程序设置 →</a></details>':'');
 }
 
 const CHOICE_REQUESTS=new Map();
@@ -621,7 +700,7 @@ function renderResultChips(){
     const chips=RESULT_CHIPS[LEDGER_TAB]||[];
     host.hidden=!chips.length;
     host.innerHTML=chips.length
-        ?'<span class="muted">按结果：</span>'+chips.map(([code,label])=>
+        ?'<span class="muted">按结论：</span>'+chips.map(([code,label])=>
             '<button class="result-chip" data-result="'+esc(code)+'" aria-pressed="'+String(LEDGER_RESULTS.has(code))+'" onclick="toggleResultChip(\''+esc(code)+'\')">'+esc(label)+'</button>').join('')
             +'<span class="muted result-chip-hint">不选等于不筛选</span>'
         :'';
@@ -884,6 +963,7 @@ async function hydrateDecisionEntry(entry){
         if(fresh){
             fresh.open=true;
             entry.replaceWith(fresh);
+            requestReadable(fresh);
         }
     }catch(e){
         const note=entry.querySelector('.decision-hydrating');
@@ -894,11 +974,51 @@ async function hydrateDecisionEntry(entry){
     }
 }
 
+/* The first time a record without a plain-language restatement is opened, ask for one. It is made
+   once and stored, so the cost is paid per record rather than per look; while it is on its way the
+   card already shows the same facts assembled from the record itself, so nothing waits on it. */
+async function requestReadable(entry){
+    if(!entry||entry.dataset.readable==='1'||entry.dataset.readableAsked==='1')return;
+    if(entry.dataset.slim==='1')return; // the full record arrives first and asks again
+    entry.dataset.readableAsked='1';
+    const note=entry.querySelector('.ledger-readable-note');
+    if(note){note.hidden=false;note.textContent='正在让 AI 把这条整理成要点…'}
+    try{
+        const answer=await get('/api/decisions/readable?id='+encodeURIComponent(entry.dataset.id));
+        if(!answer.available){
+            if(note)note.textContent=answer.reason?'没有整理：'+answer.reason:'';
+            if(note&&!answer.reason)note.hidden=true;
+            return;
+        }
+        const found=entry.querySelector('[data-slot="found"]');
+        const analysis=entry.querySelector('[data-slot="analysis"]');
+        if(found&&answer.found)found.textContent=answer.found;
+        if(analysis&&answer.analysis)analysis.textContent=answer.analysis;
+        if(answer.headline){
+            const summary=entry.querySelector('summary');
+            let line=summary&&summary.querySelector('.decision-reason');
+            if(summary&&!line){
+                line=document.createElement('span');
+                line.className='decision-reason';
+                summary.insertBefore(line,summary.querySelector('.decision-forget'));
+            }
+            if(line)line.textContent=answer.headline;
+        }
+        entry.dataset.readable='1';
+        if(note)note.hidden=true;
+    }catch(e){
+        if(note)note.textContent='没有整理：'+(e&&e.message||e);
+        delete entry.dataset.readableAsked;
+    }
+}
+
 if(typeof document!=='undefined'&&document.addEventListener)
     document.addEventListener('toggle',event=>{
         const target=event.target;
-        if(target&&target.classList&&target.classList.contains('decision-entry')&&target.open)
+        if(target&&target.classList&&target.classList.contains('decision-entry')&&target.open){
             hydrateDecisionEntry(target);
+            requestReadable(target);
+        }
     },true);
 
 function registerSeenStatuses(rows){
@@ -912,26 +1032,300 @@ function registerSeenStatuses(rows){
         }
 }
 
+/* ---- Reading a record: four answers, the numbers, then the details, then the raw data. ----
+   A trader scanning the ledger needs, in order: what was found, how it was looked at, what was
+   concluded, and what came of it. The last two are recorded facts and are shown exactly as recorded;
+   only the first two are prose, and those are the parts an AI may restate. */
+
+const ACTION_LABEL={HOLD:'观望',BUY:'买入',SELL:'卖出',CANCEL:'撤单'};
+const pct=v=>(v===null||v===undefined||v==='')?null:Math.round(Number(v)*1000)/10;
+const num=v=>(v===null||v===undefined||v==='')?null:Number(v);
+const money=v=>num(v)===null?'—':(Math.round(Number(v)*100)/100).toString();
+
+function remainingText(seconds){
+    const s=num(seconds);
+    if(s===null)return '';
+    if(s<=0)return '已到期';
+    if(s<3600)return Math.max(1,Math.round(s/60))+' 分钟后结算';
+    if(s<172800)return Math.round(s/3600)+' 小时后结算';
+    return Math.round(s/86400)+' 天后结算';
+}
+
+function isDiscovery(r){
+    return r.context?.stage==='discovery'||String(r.strategy_name||'').endsWith(':discovery');
+}
+
+/* A row written while no strategy plugin was ready left its strategy empty: the runtime recorded
+   the configured name - empty in that case - rather than the built-in strategy it actually ran. */
+const STRATEGY_TITLES={'':'内置决策策略',built_in:'内置决策策略','built_in:discovery':'内置发现策略'};
+const strategyTitle=name=>STRATEGY_TITLES[name||'']??name;
+/* "codex>claude" is the order the services were tried in. */
+const providerTitle=name=>name?String(name).split('>').map(serviceTitle).join(' → '):'没有调用到模型';
+
+function marketTitle(r){
+    return r.context?.market?.title||(r.market_topic_id?'市场 #'+r.market_topic_id:'这条记录没有关联市场');
+}
+function candidateTitle(r,id){
+    const key=String(id);
+    const listed=(r.context?.candidates||[]).find(c=>c&&String(c.topic_id)===key);
+    return r.context?.candidate_titles?.[key]||listed?.title||('市场 #'+key);
+}
+
+const TOOL_LABEL={
+    SEARCH_OTHER_PLATFORMS:'跨平台搜同类市场',TOPIC_DETAIL:'看市场详情',OUTCOME_BOOK:'读订单簿',TOPIC_HISTORY:'看以往记录',RECALL_MEASUREMENTS:'回看效果统计',
+    GET_TOPIC:'看市场详情',GET_ORDER_BOOK:'读订单簿',COMPARE_OUTCOMES:'对比各结果价格',LIST_TOPICS:'列出市场',LIST_PLATFORMS:'查已连接的平台',
+    ACCOUNT_FUNDS:'查可用资金',ENSURE_FUNDS:'申请资金',FUNDING_STATUS:'查资金申请进度',OUTCOME_WON:'查揭标结果',SYNC_TIME:'对时',GET_QUOTE:'询价',
+    PLACE_ORDER:'下单',CANCEL_ORDERS:'撤单',REDEEM:'兑付',TRANSFER:'转账',READ_ACCOUNT:'查账户',
+    SEARCH_WEB:'网页搜索',SEARCH_MARKETS:'搜其他预测市场',FETCH_URL:'读网页',REFRESH_MARKET:'刷新行情',GET_KLINES:'看价格走势',RECALL_HISTORY:'回看这个市场的记录',
+};
+const stepLabel=step=>step.tool?(TOOL_LABEL[String(step.tool).toUpperCase()]||String(step.tool)):(step.consulted_by?'回答反问':'查询');
+/* Model reasons sometimes arrive wrapped in the tag they were asked to write. */
+const cleanReason=text=>String(text||'').replace(/<\/?[a-z_]+>/gi,'').trim();
+
+function stepSubject(r,step){
+    const a=step.arguments||{};
+    if(a.query)return '「'+a.query+'」';
+    if(a.topic_id)return candidateTitle(r,a.topic_id);
+    if(a.url)return a.url;
+    return '';
+}
+
+function toolsText(r){
+    /* What the model went and looked at, by name - not how many turns it took to answer. */
+    const steps=Array.isArray(r.research)?r.research:null;
+    const count=steps?steps.length:Number(r.research_count||0);
+    if(!count)return '';
+    if(!steps)return '查了 '+count+' 次';
+    const tally=new Map();
+    for(const step of steps){const label=stepLabel(step);tally.set(label,(tally.get(label)||0)+1)}
+    return '查了 '+count+' 次：'+[...tally].map(([label,n])=>label+(n>1?' ×'+n:'')).join('、');
+}
+
+const LIMIT_NAMES={session:'会话额度',weekly:'本周额度',usage:'用量额度',daily:'今日额度',monthly:'本月额度'};
+const FAILURE_KIND_TEXT={rate_limit:'额度用完或被限流',auth:'登录失效或没有权限',transient:'连接不稳定（超时或网络故障）',contract:'返回的内容不符合要求',unknown:'调用失败',unavailable:'没有可用的服务'};
+function providerFailureText(error){
+    /* "All decision providers failed: claude: [rate_limit] Claude failed: … session limit · resets 12:20pm (UTC)"
+       becomes "Claude：会话额度用完，12:20pm (UTC) 恢复". The full text stays under 细节. */
+    const text=String(error||'');
+    const body=text.replace(/^(All decision providers failed|No decision provider is (?:ready|available)):\s*/,'');
+    const parts=body===text?[]:[...body.matchAll(/(\w+): \[(\w+)\] ([\s\S]*?)(?=; \w+: \[\w+\] |$)/g)];
+    if(!parts.length)return text.slice(0,200);
+    return parts.map(([,name,kind,message])=>{
+        const limit=(message.match(/hit your ([\w -]+?) limit/i)||[])[1];
+        let line=serviceTitle(name)+'：'+(limit?(LIMIT_NAMES[limit.trim().toLowerCase()]||limit+' 额度')+'用完':(FAILURE_KIND_TEXT[kind]||'调用失败'));
+        const reset=(message.match(/(?:resets?|try again at)\s+([^\n]+?)(?:\.\s|\.$|\n|$)/i)||[])[1];
+        if((limit||kind==='rate_limit')&&reset)line+='，'+reset.trim()+' 恢复';
+        const waited=(message.match(/timed out after (\d+)s/i)||[])[1];
+        if(waited)line+='（等了 '+waited+' 秒没有响应）';
+        return line;
+    }).join('；');
+}
+
+function venueErrorText(text){
+    const s=String(text||'');
+    if(/No orderbook exists/i.test(s))return '平台上这个结果没有订单簿';
+    const code=(s.match(/HTTP (\d{3})/)||[])[1];
+    return code?'平台返回 HTTP '+code:s.slice(0,80);
+}
+function candidateStateText(c){
+    if(c.lookup_error)return '没读到详情：'+venueErrorText(c.lookup_error);
+    if(c.book_error)return '没读到价格：'+venueErrorText(c.book_error);
+    if(c.why_not_priced)return c.why_not_priced==='no market in this event is open for trading'?'这个事件下没有开放交易的市场':String(c.why_not_priced);
+    if(c.book_one_sided)return '只有单边报价';
+    if('spread' in c)return '读到了价格'+(c.priced_market?'（按「'+c.priced_market+'」）':'');
+    if(c.verified)return '读到了详情，没有读价格';
+    return '本轮没去核实';
+}
+const compactUsd=v=>{const n=num(v);if(n===null)return '—';if(n>=1e6)return '$'+Math.round(n/1e5)/10+'M';if(n>=1e3)return '$'+Math.round(n/100)/10+'k';return '$'+Math.round(n)};
+
+function foundText(r){
+    if(isDiscovery(r)){
+        const candidates=Array.isArray(r.context?.candidates)?r.context.candidates:null;
+        const total=r.context?.candidate_count??candidates?.length;
+        const priced=r.context?.priced_count??(candidates?candidates.filter(c=>c&&'spread' in c).length:undefined);
+        if(total===undefined)return '这一轮的候选市场没有存下来';
+        return total+' 个候选市场'+(priced!==undefined?'，其中 '+priced+' 个读到了真实价差':'');
+    }
+    const market=marketTitle(r);
+    const side=r.context?.outcome?.name;
+    const bid=r.context?.order_book?.best_bid,ask=r.context?.order_book?.best_ask;
+    const implied=pct(r.context?.outcome?.displayed_probability);
+    const parts=[market+(side?' · '+side:'')];
+    if(bid!==undefined||ask!==undefined)parts.push('买一 '+(bid??'—')+' / 卖一 '+(ask??'—'));
+    if(implied!==null)parts.push('市场隐含 '+implied+'%');
+    const left=remainingText(r.context?.seconds_remaining);
+    if(left)parts.push(left);
+    return parts.join('，');
+}
+
+function analysisText(r){
+    const failed=r.group==='failed';
+    const tools=toolsText(r);
+    if(isDiscovery(r)){
+        if(failed)return (tools?tools+'，':'')+'模型调用失败，没分析完';
+        return tools||'没有追加查询，直接从候选列表里挑';
+    }
+    const d=r.final_decision||r.proposed_decision||{};
+    const est=pct(d.estimated_probability),conf=pct(d.confidence);
+    const implied=pct(r.context?.outcome?.displayed_probability);
+    const parts=[];
+    if(est!==null)parts.push('模型估计 '+est+'%'+(implied!==null?'（市场 '+implied+'%）':''));
+    if(conf!==null)parts.push('信心 '+conf+'%');
+    if(tools)parts.push(tools);
+    if(failed)parts.push('模型调用失败，没分析完');
+    else if(r.status==='STARTED')parts.push('还在分析');
+    return parts.join('，')||'模型没有给出估计';
+}
+
+function conclusionHtml(r){
+    /* The decision itself, as a fact: which action and at what size. */
+    if(r.group==='failed'||r.status==='PROVIDER_ERROR')return '<span class="conclusion none">没能得出结论</span>';
+    if(r.status==='STARTED')return '<span class="conclusion none">还在分析</span>';
+    const d=r.final_decision||r.proposed_decision||{};
+    if(isDiscovery(r)){
+        const picks=d.selections||[];
+        if(!picks.length)return '<span class="conclusion hold">本轮不选</span>';
+        return '<span class="conclusion buy">选出 '+picks.length+' 个</span> '
+            +esc(picks.slice(0,3).map(p=>candidateTitle(r,p.topic_id)).join('、'))
+            +(picks.length>3?' 等':'');
+    }
+    const action=String(d.action||'').toUpperCase();
+    const label=ACTION_LABEL[action]||action||'没有给出动作';
+    const size=[];
+    if(action==='BUY'&&num(d.notional_usdt))size.push(money(d.notional_usdt)+' USDT');
+    if(action==='SELL'&&num(d.quantity_fraction))size.push('卖出持仓的 '+Math.round(Number(d.quantity_fraction)*100)+'%');
+    if((action==='BUY'||action==='SELL')&&d.order_type)
+        size.push(String(d.order_type).toUpperCase()==='LIMIT'?'限价 '+d.limit_price:'市价');
+    return '<span class="conclusion '+esc(action.toLowerCase())+'">'+esc(label)+'</span>'
+        +(size.length?' '+esc(size.join('，')):'');
+}
+
+function resultHtml(r){
+    /* What happened when the decision was carried out, and later, whether it was right. */
+    if(r.status==='STARTED')return '<span class="muted">还没有结果</span>';
+    if(r.status==='PROVIDER_ERROR')return '<span class="danger">没有执行：'+esc(providerFailureText(r.error)||'模型调用失败')+'</span>';
+    if(r.group==='failed')return '<span class="danger">'+esc(decisionStatusTitle(r.status))+(r.error?'：'+esc(String(r.error).slice(0,220)):'')+'</span>';
+    if(isDiscovery(r)){
+        const d=r.final_decision||{};
+        const picks=(d.selections||[]).length;
+        const next=num(d.next_scan_seconds);
+        const parts=[picks?'交给决策阶段分析 '+picks+' 个标的':'本轮没有标的进入决策'];
+        if(next)parts.push('约 '+Math.max(1,Math.round(next/60))+' 分钟后再看');
+        if((d.next_survey_queries||[]).length)parts.push('下次去搜：'+d.next_survey_queries.join('、'));
+        return esc(parts.join('；'));
+    }
+    if(r.status==='RISK_REJECTED')
+        return '<span class="danger">被规则拒绝，没有下单</span>'+(r.risk_decision?.reason?'：'+esc(r.risk_decision.reason):'');
+    const x=r.execution||{};
+    const status=String(x.status||'').toUpperCase();
+    if(status==='NO_ACTION')return '<span class="muted">按结论不下单</span>';
+    if(status==='NO_POSITION')return '<span class="muted">没有可卖的持仓，没有下单</span>';
+    if(x.canceled||x.failed){
+        const done=(x.canceled||[]).length,bad=(x.failed||[]).length;
+        return esc('撤掉 '+done+' 个挂单'+(bad?'，'+bad+' 个没撤掉':''))+(x.simulated?' <span class="badge">模拟</span>':'');
+    }
+    const order=x.order||{};
+    if(!order.order_id&&!status)return '<span class="muted">没有执行记录</span>';
+    const simulated=String(order.order_id||x.order_id||'').startsWith('paper-');
+    const side=ACTION_LABEL[String(order.side||x.action||'').toUpperCase()]||'';
+    const statusText={FILLED:'已成交',OPEN:'已挂单，尚未成交',CANCELED:'已撤销',REJECTED:'被平台拒绝',FAILED:'下单失败'}[status]||('平台状态 '+status);
+    let text=statusText;
+    if(status==='FILLED'||status==='OPEN')
+        text+='：'+side+' '+money(order.quantity)+' 份 @ '+order.price+'，金额 '+money(order.notional)+' USDT（手续费 '+money(order.fee)+'）';
+    let html=(simulated?'<span class="badge">模拟</span> ':'')+esc(text);
+    const settle=r.settlement;
+    if(settle&&settle.settled){
+        const profit=Number(settle.profit);
+        html+='<br><strong>揭标：'+(settle.won?'赢':'输')+'</strong>，回收 '+esc(money(settle.payout))
+            +' USDT，<span class="'+(profit>=0?'good':'danger')+'">盈亏 '+(profit>=0?'+':'')+esc(money(profit))+' USDT</span>';
+    }else if(settle&&settle.settled===false){
+        html+='<br><span class="muted">尚未揭标</span>';
+    }
+    return html;
+}
+
+function headlineText(r){
+    return r.readable?.headline||(r.final_decision||{}).headline||'';
+}
+
+function keyNumbersHtml(r){
+    if(isDiscovery(r))return '';
+    const d=r.final_decision||r.proposed_decision||{};
+    const cells=[
+        ['买一',r.context?.order_book?.best_bid],['卖一',r.context?.order_book?.best_ask],
+        ['市场隐含',pct(r.context?.outcome?.displayed_probability)!==null?pct(r.context?.outcome?.displayed_probability)+'%':null],
+        ['模型估计',pct(d.estimated_probability)!==null?pct(d.estimated_probability)+'%':null],
+        ['信心',pct(d.confidence)!==null?pct(d.confidence)+'%':null],
+    ].filter(([,v])=>v!==null&&v!==undefined);
+    if(!cells.length)return '';
+    return '<div class="ledger-numbers">'+cells.map(([k,v])=>'<span><small>'+esc(k)+'</small><b>'+esc(v)+'</b></span>').join('')+'</div>';
+}
+
+function detailsHtml(r){
+    /* Readable, but everything: the full reasoning, each step taken and why, what the rules said. */
+    const d=r.final_decision||r.proposed_decision||{};
+    const parts=[];
+    if(isDiscovery(r)){
+        const picks=d.selections||[];
+        if(picks.length)parts.push('<h5>为什么选这些</h5><ul>'+picks.map(p=>'<li><b>'+esc(candidateTitle(r,p.topic_id))+'</b>：'+esc(cleanReason(p.reason))+'</li>').join('')+'</ul>');
+        if(d.skipped_reason)parts.push('<h5>为什么没选</h5><p>'+esc(d.skipped_reason)+'</p>');
+        if(d.pacing_reason)parts.push('<h5>下次什么时候再看、为什么</h5><p>'+esc(d.pacing_reason)+'</p>');
+        const candidates=r.context?.candidates;
+        if(Array.isArray(candidates)&&candidates.length)
+            parts.push('<h5>候选市场</h5><div class="table-scroll"><table><thead><tr><th>市场</th><th>买一 / 卖一</th><th>价差占中间价</th><th>流动性</th><th>结算</th><th>情况</th></tr></thead><tbody>'
+                +candidates.map(c=>'<tr><td>'+esc(c.title||('市场 #'+c.topic_id))+'</td><td>'+esc(c.best_bid!==undefined||c.best_ask!==undefined?(c.best_bid??'—')+' / '+(c.best_ask??'—'):'—')+'</td><td>'+esc(c.spread_pct_of_mid!==undefined&&c.spread_pct_of_mid!==null?c.spread_pct_of_mid+'%':'—')+'</td><td>'+esc(compactUsd(c.liquidity_usdt))+'</td><td>'+esc(remainingText(c.seconds_remaining)||'—')+'</td><td>'+esc(candidateStateText(c))+'</td></tr>').join('')
+                +'</tbody></table></div>');
+    }else{
+        if(d.rationale)parts.push('<h5>模型的完整理由</h5><p class="ledger-prose">'+esc(cleanReason(d.rationale))+'</p>');
+        if(r.risk_decision)parts.push('<h5>规则检查</h5><p>'+esc(({ALLOW:'放行',REJECT:'拒绝',HALT:'停机',ADJUST:'调整'}[String(r.risk_decision.outcome||'').toUpperCase()]||r.risk_decision.outcome||'')+(r.risk_decision.reason?'：'+r.risk_decision.reason:''))+'</p>');
+        if(r.settlement&&r.settlement.settled)parts.push('<h5>盈亏怎么算的</h5><p>'+esc('持有到结算：回收 '+money(r.settlement.payout)+' − 成本 '+money(r.settlement.cost)+'（成交金额加手续费）= '+money(r.settlement.profit)+' USDT')+'</p>');
+    }
+    const steps=r.research;
+    if(Array.isArray(steps)&&steps.length)
+        parts.push('<h5>一步步查了什么</h5><ol class="ledger-steps">'+steps.map(step=>{const subject=stepSubject(r,step);return '<li><b>'+esc(stepLabel(step))+'</b>'+(subject?' · '+esc(subject):'')+(step.reason?'：'+esc(cleanReason(step.reason)):'')+'</li>'}).join('')+'</ol>');
+    else if(r.slim)parts.push('<p class="muted">正在读取完整记录…</p>');
+    if(r.error)parts.push('<h5>原始报错</h5><p class="ledger-prose">'+esc(r.error)+'</p>');
+    parts.push('<p class="muted">模型服务：'+esc(providerTitle(r.provider))+' · 策略：'+esc(strategyTitle(r.strategy_name))+'</p>');
+    return parts.join('');
+}
+
 function decisionEntriesHtml(rows){
     registerSeenStatuses(rows);
-    const reason=decisionReason;
     const opened=new Set(
         [...document.querySelectorAll('#decisions details.decision-entry[open]')].map(e=>e.dataset.id)
     );
-    return rows.map(r=>{const d=r.final_decision||r.proposed_decision||{},stages=[
-        ['发现了什么',r.context?.market?.title||r.market_topic_id||'没有记录市场标题',{context:r.context}],
-        ['参考了什么',String(r.research_count??r.research?.length??0)+' 条研究结果，'+String(r.agent_steps??0)+' 个工具步骤',{research:r.research}],
-        ['模型如何判断',reason(r.proposed_decision),{decision:r.proposed_decision,model_output:r.model_raw_output}],
-        ['规则检查后',r.risk_decision?reason(r.risk_decision):'没有记录规则检查结果',{risk:r.risk_decision,final:r.final_decision}],
-        ['实际执行与后续',r.error?String(r.error):r.execution?'已记录执行处理结果，请查看详情；这可能是跳过操作的记录，不代表已向平台下单':'未记录平台执行结果',{execution:r.execution,subsequent_observation:r.subsequent_observation}]
-    ];return '<details class="decision-entry" data-id="'+esc(r.id)+'" data-created="'+esc(r.created_at)+'" data-result="'+esc(String(r.result||r.status||'').toUpperCase())+'"'+(r.slim?' data-slim="1"':'')+' '+(opened.has(String(r.id))?'open':'')+'><summary><span class="decision-meta">'+esc(new Date(r.created_at).toLocaleString())+' · '+esc(r.platform)+' · #'+esc(r.id)+'</span><span class="decision-title">'+esc(r.context?.market?.title||r.market_topic_id||'未记录市场')+'</span><span class="decision-outcome"><span class="badge">'+esc((r.final_decision?'最终：':'建议：')+actionTitle(d.action))+'</span><span>'+esc(decisionStatusTitle(r.status))+'</span></span><span class="decision-reason">'+esc(reason(d))+'</span><span class="text-link">查看决策过程</span>'
-        /* Measurements are read off these rows - which provider gets asked first, how the strategy
-           calibrates - so an entry recording a fault since fixed keeps arguing its case until it is
-           removed. On the row itself, because deciding a record is junk does not require reading it
-           again. What the venue actually did is refused separately and stays. */
-        +'<button class="decision-forget" title="删除这条记录" aria-label="删除这条记录" onclick="forgetDecision(event,'+esc(r.id)+')">×</button></summary><p class="description">模型服务：'+esc(serviceTitle(r.provider))+' · 策略：'+esc(r.strategy_name||'未记录')+'。模型建议不等于成交，后续观察也不自动等于已实现盈亏。</p><ol class="decision-timeline">'+stages.map(([title,summary,raw],index)=>'<li><h4>'+title+'</h4><p>'+esc(summary)+'</p>'+detail(raw,r.id+':'+index)+'</li>').join('')+'</ol>'
-        +'</details>'}).join('');
+    return rows.map(r=>{
+        const readable=r.readable||null;
+        const headline=headlineText(r);
+        const kind=isDiscovery(r)?'发现':'决策';
+        const title=isDiscovery(r)?'发现轮次':marketTitle(r);
+        return '<details class="decision-entry" data-id="'+esc(r.id)+'" data-created="'+esc(r.created_at)+'" data-result="'+esc(String(r.result||r.status||'').toUpperCase())+'"'+(r.slim?' data-slim="1"':'')+(readable?' data-readable="1"':'')+' '+(opened.has(String(r.id))?'open':'')+'>'
+            +'<summary><span class="decision-meta">'+esc(new Date(r.created_at).toLocaleString())+' · '+esc(r.platform)+' · '+kind+'</span>'
+            +'<span class="decision-title">'+esc(title)+'</span>'
+            +'<span class="decision-outcome">'+conclusionHtml(r)+'</span>'
+            +(headline?'<span class="decision-reason">'+esc(headline)+'</span>':'')
+            /* Measurements are read off these rows - which provider gets asked first, how the strategy
+               calibrates - so an entry recording a fault since fixed keeps arguing its case until it
+               is removed. On the row itself, because deciding a record is junk does not require
+               reading it again. What the venue actually did is refused separately and stays. */
+            +'<button class="decision-forget" title="删除这条记录" aria-label="删除这条记录" onclick="forgetDecision(event,'+esc(r.id)+')">×</button></summary>'
+            +'<div class="ledger-card">'
+            +'<dl class="ledger-four">'
+            +'<dt>发现了什么</dt><dd data-slot="found">'+esc(readable?.found||foundText(r))+'</dd>'
+            +'<dt>怎么分析的</dt><dd data-slot="analysis">'+esc(readable?.analysis||analysisText(r))+'</dd>'
+            +'<dt>结论</dt><dd>'+conclusionHtml(r)+'</dd>'
+            +'<dt>结果</dt><dd>'+resultHtml(r)+'</dd>'
+            +'</dl>'
+            +(readable?'':'<p class="muted ledger-readable-note" hidden></p>')
+            +keyNumbersHtml(r)
+            +'<details class="ledger-more"><summary>细节</summary>'+detailsHtml(r)+'</details>'
+            +'<details class="ledger-more"><summary>原始数据</summary>'
+            +detail({context:r.context,research:r.research,final:r.final_decision,risk:r.risk_decision,execution:r.execution,settlement:r.settlement,model_output:r.model_raw_output},r.id+':raw')
+            +'</details>'
+            +'</div></details>';
+    }).join('');
 }
+
 
 async function forgetDecision(event,id){
     /* Inside a <summary>, a click opens the entry unless it is stopped - so the confirm would be

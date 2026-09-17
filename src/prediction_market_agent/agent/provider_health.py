@@ -4,7 +4,9 @@ import re
 import threading
 import time
 from dataclasses import dataclass, field
+from datetime import datetime, timedelta, timezone, tzinfo
 from typing import Any
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 
 RATE_LIMIT_PATTERNS = (
@@ -17,6 +19,10 @@ RATE_LIMIT_PATTERNS = (
     # minute of cooldown instead of the hours it actually needs - so the provider was retried all
     # the way through an outage it had already stated the end time of.
     r"session limit",
+    # The same again for every other window a subscription is metered in. "weekly limit" was left
+    # unknown, so through a week-long lockout the provider came back every minute and each round
+    # left another failed record in the ledger - 461 of them before anyone noticed.
+    r"hit your [\w -]*limit",
     r"capacity",
     r"overloaded",
     r"try again later",
@@ -59,16 +65,92 @@ COOLDOWN_SECONDS = {
     "unknown": 60,
 }
 COOLDOWN_CEILING = 900
-"""Longest any provider stays out of the rotation, whatever its failure kind.
+"""Longest a provider waits between checks when nothing says how long its outage lasts.
 
-A quota ceiling is not a fact about the world: the operator can change plan, buy credits, switch
-account, or the platform can widen a limit on its own. The provider's own "try again at" is a guess
-about one of those and would keep a provider sidelined for days, so it is not used as a floor. The
-cap bounds how stale that judgement can get instead.
+A provider that states when its limit lifts is taken at its word instead: every round started
+before then is market data pulled, a prompt built and a failed record written, for an answer that
+was never coming. That is what ran up hundreds of failed records through one weekly limit. The
+operator can still change plan, buy credits or swap account early - which is what the recheck
+action is for, and it puts a provider back in line at once.
 """
+
+RESET_HORIZON_SECONDS = 31 * 86400
+"""A stated reset further out than any subscription window is a misread, not a plan."""
 
 PROBE_INTERVAL_SECONDS = 300
 """Shortest gap between two out-of-band liveness probes of the same provider."""
+
+_MONTHS = ("jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec")
+_RESET_ANCHOR = re.compile(
+    r"(?:resets?|try again at|available again at|until)\s*(?:on\s+|at\s+)?", re.IGNORECASE
+)
+_RESET_MOMENT = re.compile(
+    r"(?:(?P<month>jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\.?\s+"
+    r"(?P<day>\d{1,2})(?:st|nd|rd|th)?,?\s*(?:(?P<year>\d{4}),?\s*)?(?:at\s+)?)?"
+    r"(?P<hour>\d{1,2})(?::(?P<minute>\d{2}))?\s*(?P<half>[ap])\.?\s*m\b\.?"
+    r"(?:\s*\((?P<zone>[^)]+)\))?",
+    re.IGNORECASE,
+)
+_RESET_AFTER = re.compile(
+    r"(?:try again|retry|resets?)\s+(?:in|after)\s+(?P<amount>\d+(?:\.\d+)?)\s*"
+    r"(?P<unit>seconds?|secs?|minutes?|mins?|hours?|hrs?|days?|[smhd])\b",
+    re.IGNORECASE,
+)
+
+
+def parse_reset_time(text: str, now: float | None = None) -> float | None:
+    """When a provider said its limit lifts, as a timestamp; None when it did not say.
+
+    Clients say it in their own words - "resets 12:20pm (UTC)", "resets Sep 21, 1pm (UTC)",
+    "try again at Sep 19th, 2026 8:13 AM", "try again in 20 minutes". A time without a date is its
+    next occurrence; a time without a zone is this machine's, because the client that printed it
+    runs here. Anything already past or implausibly far away is not an answer.
+    """
+    moment = time.time() if now is None else float(now)
+    source = str(text or "")
+    after = _RESET_AFTER.search(source)
+    if after:
+        unit = after.group("unit").lower()[0]
+        seconds = float(after.group("amount")) * {"s": 1, "m": 60, "h": 3600, "d": 86400}[unit]
+        return moment + seconds if 0 < seconds <= RESET_HORIZON_SECONDS else None
+    for anchor in _RESET_ANCHOR.finditer(source):
+        found = _RESET_MOMENT.match(source, anchor.end())
+        if not found:
+            continue
+        zone = _zone(found.group("zone"))
+        hour = int(found.group("hour")) % 12 + (12 if found.group("half").lower() == "p" else 0)
+        minute = int(found.group("minute") or 0)
+        if hour > 23 or minute > 59:
+            continue
+        today = datetime.fromtimestamp(moment, zone)
+        try:
+            if found.group("month"):
+                month = _MONTHS.index(found.group("month").lower()[:3]) + 1
+                year = int(found.group("year") or today.year)
+                when = datetime(year, month, int(found.group("day")), hour, minute, tzinfo=zone)
+                if not found.group("year") and when.timestamp() < moment - 86400:
+                    when = when.replace(year=year + 1)
+            else:
+                when = today.replace(hour=hour, minute=minute, second=0, microsecond=0)
+                if when.timestamp() <= moment:
+                    when += timedelta(days=1)
+        except ValueError:
+            continue
+        stamp = when.timestamp()
+        return stamp if moment < stamp <= moment + RESET_HORIZON_SECONDS else None
+    return None
+
+
+def _zone(name: str | None) -> tzinfo | None:
+    label = (name or "").strip()
+    if not label:
+        return None
+    if label.upper() in {"UTC", "GMT", "Z"}:
+        return timezone.utc
+    try:
+        return ZoneInfo(label)
+    except (ZoneInfoNotFoundError, ValueError):
+        return None
 
 
 def classify_error(message: str) -> str:
@@ -105,6 +187,8 @@ class ProviderState:
     successes: int = 0
     failures_by_kind: dict[str, int] = field(default_factory=dict)
     latency_total: float = 0.0
+    recovers_at: float = 0.0
+    """When the provider itself said it can answer again; 0 when it did not say."""
 
     @property
     def success_rate(self) -> float:
@@ -116,6 +200,15 @@ class ProviderState:
 
     def available_at(self, now: float) -> bool:
         return now >= self.cooldown_until
+
+    def ready(self, now: float) -> bool:
+        """Whether a decision may be put to this provider now.
+
+        A lapsed cooldown only says the window may have reopened. Until a check made away from the
+        decision path confirms it, a round started on the strength of it would collect market data
+        and write a record for an answer that may still not come.
+        """
+        return self.available_at(now) and not self.probation
 
     def needs_probe(self, now: float) -> bool:
         """Whether this provider should be tried out of band rather than on a decision.
@@ -135,6 +228,8 @@ class ProviderState:
             "provider": self.name,
             "available": self.available_at(now),
             "probation": self.probation,
+            "ready": self.ready(now),
+            "recovers_at": int(self.recovers_at),
             "cooldown_seconds_remaining": max(0, round(self.cooldown_until - now)),
             "consecutive_failures": self.consecutive_failures,
             "attempts": self.attempts,
@@ -211,24 +306,58 @@ class ProviderHealthRegistry:
             state.last_error_kind = ""
             state.last_success_at = time.time()
             state.probation = False
+            state.recovers_at = 0.0
             state.latency_total += max(0.0, latency_seconds)
 
-    def record_failure(self, name: str, message: str) -> str:
-        """Cool a provider down for a window matched to why it failed; returns the failure kind."""
-        kind = classify_error(message)
+    def record_probe_success(self, name: str) -> None:
+        """The client says it can serve again - which is not the same as having served.
+
+        Only a real answer resets the failure streak, so a client whose own report disagrees with
+        what its requests keep doing is paced by a growing backoff rather than trusted afresh each
+        time it says so.
+        """
         with self._lock:
             state = self._states.setdefault(name, ProviderState(name))
-            state.attempts += 1
+            state.cooldown_until = 0.0
+            state.probation = False
+            state.recovers_at = 0.0
+            state.last_error = ""
+            state.last_error_kind = ""
+
+    def record_failure(
+        self,
+        name: str,
+        message: str,
+        *,
+        kind: str | None = None,
+        recovers_at: float | None = None,
+        attempted: bool = True,
+    ) -> str:
+        """Cool a provider down for a window matched to why it failed; returns the failure kind.
+
+        `attempted` is False when nothing was asked of the provider - its client reported, for
+        free, that it cannot serve - so the measured success rate is left alone.
+        """
+        kind = kind or classify_error(message)
+        now = time.time()
+        stated = recovers_at if recovers_at and recovers_at > now else None
+        if stated is None and kind == "rate_limit":
+            stated = parse_reset_time(message, now)
+        with self._lock:
+            state = self._states.setdefault(name, ProviderState(name))
+            if attempted:
+                state.attempts += 1
+                state.failures_by_kind[kind] = state.failures_by_kind.get(kind, 0) + 1
             state.consecutive_failures += 1
             state.last_error = message
             state.last_error_kind = kind
             state.probation = True
-            state.failures_by_kind[kind] = state.failures_by_kind.get(kind, 0) + 1
             base = COOLDOWN_SECONDS.get(kind, COOLDOWN_SECONDS["unknown"])
             backoff = min(
                 COOLDOWN_CEILING, base * (2 ** (state.consecutive_failures - 1))
             )
-            state.cooldown_until = time.time() + backoff
+            state.recovers_at = float(stated or 0.0)
+            state.cooldown_until = float(stated) if stated else now + backoff
         return kind
 
     def due_for_probe(self, names: tuple[str, ...] = ()) -> list[str]:
@@ -261,6 +390,7 @@ class ProviderHealthRegistry:
                 state.cooldown_until = 0.0
                 state.consecutive_failures = 0
                 state.last_probe_at = 0.0
+                state.recovers_at = 0.0
                 cleared.append(target)
             return cleared
 

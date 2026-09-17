@@ -163,8 +163,8 @@ class FailoverTests(unittest.TestCase):
         self.assertEqual(result, {"stuck": "rate_limit"})
         self.assertFalse(provider.health.state("stuck").available_at(time.time()))
 
-    def test_no_provider_is_sidelined_for_longer_than_the_ceiling(self) -> None:
-        """A stated reset date is a guess about entitlement, which the operator can change."""
+    def test_without_a_stated_time_the_wait_between_checks_is_bounded(self) -> None:
+        """No time given, no guess made: the provider is checked again within the ceiling."""
         registry = ProviderHealthRegistry(("a",))
         for _ in range(12):
             registry.record_failure("a", "You've hit your usage limit; try again Sep 15th")

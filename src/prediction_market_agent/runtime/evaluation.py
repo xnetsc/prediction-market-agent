@@ -172,7 +172,12 @@ class MarketEvaluationMixin:
             market_topic_id=market_topic_id,
             market_id=market_id,
             token_id=token_id,
-            strategy_name=self.config.decision_strategy_name,
+            # The strategy that is actually running, not the one configured. They differ whenever a
+            # chosen strategy plugin is not ready and the built-in one stands in - and recording the
+            # configured name left every such row with an empty strategy.
+            strategy_name=(
+                getattr(self.decision_strategy, "name", "") or self.config.decision_strategy_name
+            ),
             strategy_sha256=self.decision_strategy.sha256,
             context=current,
         )

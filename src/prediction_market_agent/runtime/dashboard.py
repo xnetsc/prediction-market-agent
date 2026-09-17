@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import sqlite3
+import threading
 import time
 from contextlib import asynccontextmanager
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, urlsplit
@@ -13,9 +16,12 @@ from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.responses import HTMLResponse, JSONResponse
 from starlette.concurrency import run_in_threadpool
 
+from ..agent.decision import make_provider
+from ..agent.provider_health import ProviderHealthRegistry
 from ..core.config import ApplicationConfigStore, Config
 from ..plugin_system.management import PluginManagementService
 from ..plugin_system.contracts import platform_state_path
+from .provider_quality import ProviderQuality
 from .reporting import build_report
 from .memory import SessionMemory
 from .auth import AdminAuthStore, AdminSession, SESSION_COOKIE
@@ -27,7 +33,7 @@ from .setup_guide import setup_guide
 
 HTML = r"""<!doctype html><html lang="zh-CN"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1"><title>Prediction Agent</title>
-<link rel="stylesheet" href="/assets/dashboard.css"></head><body>
+<link rel="stylesheet" href="/assets/dashboard.css?v=__CONSOLE_VERSION__"></head><body>
 <a href="#mainContent" class="skip-link">跳到主要内容</a>
 <aside class="sidebar" id="sidebar"><a class="brand" href="#overview"><span class="brand-mark">↗</span><span>Prediction Agent<small>OPERATIONS CONSOLE</small></span></a><p class="nav-label">工作空间</p><nav aria-label="主导航">
 <a class="nav-link" href="#overview" aria-current="page"><span class="nav-icon" aria-hidden="true">◫</span>运行概览</a>
@@ -40,6 +46,7 @@ HTML = r"""<!doctype html><html lang="zh-CN"><head><meta charset="utf-8">
 <button class="nav-backdrop" id="navBackdrop" aria-label="关闭导航" tabindex="-1"></button>
 <header class="topbar"><button id="menuToggle" class="menu-toggle" aria-label="打开导航" aria-controls="sidebar" aria-expanded="false">☰</button><span class="topbar-label">工作空间 <b>/ 管理控制台</b></span><div class="topbar-right"><span id="stamp" class="muted" role="status">正在加载状态…</span><span class="avatar" aria-label="管理员">A</span></div></header>
 <main id="mainContent" tabindex="-1"><div class="page-heading"><div><p id="pageEyebrow" class="eyebrow">WORKSPACE / OVERVIEW</p><h1 id="pageTitle">运行概览</h1><p id="pageDescription">查看运行状态与关键指标，管理各平台的暂停状态。</p></div><span class="page-tag">管理控制台</span></div>
+<div id="consoleUpdate" class="attention console-update" role="alert" hidden><div class="attention-head"><strong>控制台已经更新</strong><span class="muted">这个页面还在用打开时的旧代码，看到的内容可能和现在不一样。</span></div><button class="primary" onclick="location.reload()">刷新页面</button></div>
 <div id="attention" class="attention" role="status" aria-live="polite" hidden></div>
 <section data-view="overview" id="gettingStarted"><h3>开始使用</h3><p class="muted">按下面的顺序完成连接。先确认规则与暂停状态，再让机器人运行。</p><div id="setupSteps" class="setup-grid"></div></section><div id="cards" class="cards" data-view="overview"></div>
 <dialog id="loginWizard"><h3 id="loginWizardTitle">客户端网页登录</h3><p>请只在官方页面输入账号密码。机器人仅接收本次授权结果，登录凭据保存在服务器中。</p><label class="field">客户端验证方式<select id="wizardLoginMethod" onchange="switchLoginMethod(this.value)"><option value="auto">自动选择</option><option value="local">本地回调</option><option value="remote">设备码 / 验证码</option></select><small>切换会取消本次客户端登录等待并重新开始，不改变管理员 Passkey 鉴权。</small></label><div id="remoteLoginSteps" hidden><div class="info-banner">远程 / 手机登录不需要本地助手，也不需要向公网开放随机端口。</div><h4>1. 打开官方授权页面</h4><a id="remoteOfficialLink" target="_blank" rel="noopener noreferrer" hidden>打开官方登录页</a><div id="deviceCodeStep" hidden><h4>2. 在官方页面输入设备码</h4><pre id="remoteDeviceCode" aria-label="设备码"></pre><p>需要在账号安全设置或工作空间权限中允许设备码登录。完成后回到此页，客户端会自动确认。</p></div><div id="manualCodeStep" hidden><h4>2. 粘贴官方页面给出的验证码</h4><label class="field">本次验证码<input id="remoteLoginCode" type="password" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="仅填写官方显示的验证码"></label><button id="submitLoginCode" class="primary" onclick="submitRemoteCode()">提交验证码</button><p>验证码仅传给正在等待的官方客户端，不写入配置或审计记录。</p></div><h4>3. 等待客户端确认</h4><p id="remoteLoginResult" role="status"></p></div><div id="localLoginSteps"><p id="callbackProbeStatus" role="status">等待客户端提供实际回调地址…</p><button id="callbackProbeRetry" onclick="retryCallbackProbe()">重新检测回调映射</button><ol><li data-helper-step hidden><h4>复制本次登录命令</h4><p>选择浏览器所在电脑的系统。命令从当前机器人获取完整脚本后运行，只对本次登录有效、只可获取一次。请确认站点可信，不要分享命令或终端历史。</p><select id="helperPlatform" onchange="resetHelperCommand()"><option value="bash">macOS / Linux（Bash）</option><option value="powershell">Windows（PowerShell）</option></select><textarea id="helperCommand" readonly rows="5" style="width:100%;box-sizing:border-box" aria-label="本次登录助手命令" placeholder="正在生成命令…"></textarea><button id="helperCopy" onclick="copyHelperCommand()" disabled>复制命令</button></li><li data-helper-step hidden><h4>在终端粘贴运行</h4><p>macOS 打开“终端”，Linux 打开终端，Windows 打开 PowerShell，然后粘贴命令并回车。无需手动保存脚本、解压或打开可执行文件，也不会修改系统安全设置。若系统管理策略禁止脚本，请联系管理员。</p><p>macOS/Linux 需要 Python 3.9+，缺少时会明确提示；缺少 cryptography 时在临时 venv 安装加密依赖，结束后清理，不修改系统 Python。Windows 使用 PowerShell 5.1+ 和系统 .NET。</p><p>保持终端开启，显示 Ready 后回到此页面。助手使用本机网络/代理，不继承容器代理；网络失败请检查代理或防火墙，不要关闭 TLS 验证。端口冲突不会自动终止其他程序。取消或超时后助手释放监听。</p><p id="helperConnection" role="status">等待助手连接…</p></li><li><h4>在官方网页授权</h4><p>映射验证成功或助手 Ready 后，点击下面的链接。官方页面自动回调，无需复制代码。</p><a id="officialLoginLink" target="_blank" rel="noopener noreferrer" hidden>打开官方登录页</a></li><li><h4>确认完成</h4><p id="loginWizardResult" role="status">尚未完成。</p><p>只有这里显示“已登录”才算成功；失败或超时点击“重新开始”，获取新命令。助手会自动结束，也可用 Ctrl+C 停止并在此取消登录。</p></li></ol><button onclick="switchRemoteLogin()">改用设备码 / 验证码登录</button></div><p id="loginWizardError" class="danger"></p><div class="toolbar"><button onclick="restartWizard()">重新开始</button><button onclick="cancelWizard()">取消本次登录</button><button onclick="document.getElementById('loginWizard').close()">收起向导</button></div></dialog>
@@ -54,17 +61,18 @@ HTML = r"""<!doctype html><html lang="zh-CN"><head><meta charset="utf-8">
 <section data-view="settings" hidden class="advanced-section"><details><summary>插件文件位置 <span>开发与自定义部署时修改</span></summary><p class="muted">程序从这些目录发现插件，每行一个目录。普通使用者无需改动；新增插件可在插件中心安装。</p><div id="pluginDirectories" class="plugin-grid"></div><div class="toolbar"><button class="primary" onclick="savePluginDirectories()">保存插件目录</button><button class="danger" onclick="resetPluginDirectories()">恢复默认目录</button></div></details></section>
 <section data-view="plugins" hidden id="pluginWorkspace"><div id="pluginCategoryHome"></div><nav id="pluginCategoryNav" class="subnav" aria-label="插件分类"></nav><div id="pluginCategoryGuide"></div><div class="toolbar plugin-management-tools"><button onclick="refreshPlugins()">重新扫描插件文件</button><span class="muted">新增、删除或更新文件后使用；不会替你启用插件。</span></div><div id="pluginManager"></div><div class="toolbar plugin-management-tools"><button class="primary" onclick="saveSelection()">保存启用与顺序</button><span id="manageStatus" class="status" role="status"></span></div></section>
 <section data-view="plugins" hidden><details><summary>安装新的自定义插件</summary><p class="muted">把受信任的 Python 插件源码写入已配置的类别目录。新插件安装后保持禁用，只扫描文件名；启用后才会导入并调用初始化函数。</p><div class="plugin-grid"><label class="field"><b>类别</b><select id="installKind" onchange="renderInstallTargets()"></select></label><label class="field"><b>安装目录</b><select id="installTarget"></select></label><label class="field"><b>插件名</b><input id="installName" placeholder="example_plugin"></label></div><label class="field"><b>Python 源码</b><textarea id="installSource" rows="14" placeholder="def initialize_plugin(context): ..."></textarea></label><div class="toolbar"><button class="primary" onclick="installPlugin()">安装并刷新</button><span id="installStatus" class="status muted"></span></div></details></section>
-<section data-view="decisions" hidden><h3>查看机器人为什么这样做</h3><p class="muted">一条记录是一次判断，不等于一笔成交。先看“最终动作”和“执行状态”，再展开查看证据与规则检查；没有后续观察时不能判断盈亏。</p><ol class="process-strip"><li>发现市场</li><li>收集证据</li><li>模型判断</li><li>风险检查</li><li>执行与跟踪</li></ol><div class="toolbar ledger-toolbar"><button class="primary" onclick="refreshAudit()" title="重新读取决策记录">↻ 刷新</button><span class="muted" id="ledgerStamp">尚未读取</span><span class="muted">这里不自动刷新——展开的记录不会在你读的时候被收起。</span><label class="ledger-language">决策依据语言 <select id="ledgerLanguage" onchange="saveLedgerLanguage(this.value)"><option value="zh">中文</option><option value="en">English</option></select></label><span class="status" id="ledgerLanguageStatus" role="status"></span></div><div class="ledger-tabs" role="tablist"><button role="tab" data-group="concluded" aria-selected="true" onclick="selectLedgerTab('concluded')">有结论 <span class="tab-count" id="tabCount_concluded"></span></button><button role="tab" data-group="running" aria-selected="false" onclick="selectLedgerTab('running')">分析中 <span class="tab-count" id="tabCount_running"></span></button><button role="tab" data-group="failed" aria-selected="false" onclick="selectLedgerTab('failed')">出错 <span class="tab-count" id="tabCount_failed"></span></button></div><p class="muted" id="ledgerTabNote"></p><div class="result-chips" id="ledgerResultChips" role="group" aria-label="按结果筛选"></div><div class="filter-bar"><label>平台<input id="platform" placeholder="全部平台"></label><label>模型服务<input id="providerFilter" placeholder="全部服务"></label><label>记录状态<select id="statusFilter"><option value="">全部状态</option><option value="STARTED">分析中</option><option value="PROVIDER_ERROR">模型调用失败</option><option value="RISK_REJECTED">规则拒绝，未执行</option><option value="EXECUTION_ERROR">执行失败</option><option value="COMPLETED">流程已完成</option></select></label><button class="primary" onclick="refreshAudit()">查询记录</button></div></section>
+<section data-view="decisions" hidden><h3>查看机器人为什么这样做</h3><p class="muted">一条记录是一次判断，不等于一笔成交。点开一条先看四项：发现了什么、怎么分析的、结论（观望 / 买入 / 卖出）、结果（下单成交情况，揭标后的盈亏）；需要时再看“细节”和“原始数据”。</p><ol class="process-strip"><li>发现市场</li><li>收集证据</li><li>模型判断</li><li>风险检查</li><li>执行与跟踪</li></ol><div class="toolbar ledger-toolbar"><button class="primary" onclick="refreshAudit()" title="重新读取决策记录">↻ 刷新</button><span class="muted" id="ledgerStamp">尚未读取</span><span class="muted">这里不自动刷新——展开的记录不会在你读的时候被收起。</span><label class="ledger-language">决策依据语言 <select id="ledgerLanguage" onchange="saveLedgerLanguage(this.value)"><option value="zh">中文</option><option value="en">English</option></select></label><span class="status" id="ledgerLanguageStatus" role="status"></span></div><div class="ledger-tabs" role="tablist"><button role="tab" data-group="concluded" aria-selected="true" onclick="selectLedgerTab('concluded')">有结论 <span class="tab-count" id="tabCount_concluded"></span></button><button role="tab" data-group="running" aria-selected="false" onclick="selectLedgerTab('running')">分析中 <span class="tab-count" id="tabCount_running"></span></button><button role="tab" data-group="failed" aria-selected="false" onclick="selectLedgerTab('failed')">出错 <span class="tab-count" id="tabCount_failed"></span></button></div><p class="muted" id="ledgerTabNote"></p><div class="result-chips" id="ledgerResultChips" role="group" aria-label="按结果筛选"></div><div class="filter-bar"><label>平台<input id="platform" placeholder="全部平台"></label><label>模型服务<input id="providerFilter" placeholder="全部服务"></label><label>记录状态<select id="statusFilter"><option value="">全部状态</option><option value="STARTED">分析中</option><option value="PROVIDER_ERROR">模型调用失败</option><option value="RISK_REJECTED">规则拒绝，未执行</option><option value="EXECUTION_ERROR">执行失败</option><option value="COMPLETED">流程已完成</option></select></label><button class="primary" onclick="refreshAudit()">查询记录</button></div></section>
 <section data-view="decisions" hidden><div class="section-heading"><div><h3>决策记录</h3><p>先显示最近 10 条，向下滚动每次再加载 5 条。点开一条记录才会读取它的完整证据。</p></div></div><div id="decisions"></div></section>
 <section data-view="decisions" hidden class="advanced-section"><details><summary>平台操作明细 <span>排查问题时展开</span></summary><p class="muted">发送给平台的操作和返回结果；请求失败不代表成交。</p><div id="actions"></div></details></section>
 <section data-view="decisions" hidden class="advanced-section"><details><summary>模型对话明细 <span>排查问题时展开</span></summary><p class="muted">一次决策可能多次询问模型。这里用于排查模型调用失败。</p><div id="turns"></div></details></section>
 <section data-view="decisions" hidden class="advanced-section"><details><summary>信息收集明细 <span>排查问题时展开</span></summary><p class="muted">模型为收集信息而调用的工具及结果。通常无需查看。</p><div id="steps"></div></details></section>
 <section data-view="settings" hidden class="advanced-section"><details><summary>技术运行清单 <span>排查问题时查看</span></summary><pre id="manifest"></pre></details></section></main><button id="globalFeedback" hidden aria-label="关闭操作提示" role="status"></button>
-<script src="/assets/login-probe.js"></script>
-<script src="/assets/dashboard-views.js"></script>
+<script src="/assets/login-probe.js?v=__CONSOLE_VERSION__"></script>
+<script src="/assets/dashboard-views.js?v=__CONSOLE_VERSION__"></script>
 <script>
 const TOKEN='CSRF_TOKEN',SESSION_ID='SESSION_ID',KINDS=['api','decision_provider','decision_strategy','market_discovery','research_tool','agent_policy','risk'];
 const LOCAL_ACCESS=LOCAL_ACCESS_VALUE;
+const CONSOLE_VERSION='__CONSOLE_VERSION__';
 const LABELS={api:'交易平台',decision_provider:'AI 模型服务',decision_strategy:'决策策略',market_discovery:'标的发现策略',research_tool:'信息与研究',agent_policy:'Agent 行为风控',risk:'业务风控'};
 let LAST_MANAGER=null;
 const esc=s=>String(s??'').replace(/[&<>\"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','\"':'&quot;'}[c]));
@@ -187,12 +195,33 @@ async function kickSelectedSessions(){await kickSessions([...document.querySelec
 async function logout(){try{await post('/api/auth/logout',{})}finally{await dropKey();location='/'}}
 async function refreshAudit(){setLedgerLoading(true);try{let p=document.getElementById('platform').value,q=p?'&platform='+encodeURIComponent(p):'',dq=q+'&provider='+encodeURIComponent(document.getElementById('providerFilter').value)+'&status='+encodeURIComponent(document.getElementById('statusFilter').value);dq+='&group='+encodeURIComponent(LEDGER_TAB);LEDGER_QUERY=dq;LEDGER_PLATFORM_QUERY=q;let [s,d,m]=await Promise.all([get('/api/summary'),get('/api/decisions?limit='+LEDGER_FIRST_PAGE+'&offset=0'+dq+ledgerResultsQuery()),get('/api/manifest')]);let ag=s.aggregate_account||{},cards=[['权益',ag.equity],['决策',s.summary?.decisions],['模型调用错误',s.summary?.provider_errors],['信息收集步骤',s.summary?.agent_steps]];document.getElementById('cards').innerHTML=cards.map(x=>'<div class=card><div class=muted>'+esc(x[0])+'</div><h2>'+esc(x[1]??'—')+'</h2></div>').join('');renderDecisionLedger(d.items);refreshLedgerTabCounts(q);resetDiagnosticPanels();document.getElementById('manifest').textContent=JSON.stringify(m,null,2);document.getElementById('stamp').textContent='更新 '+new Date().toLocaleTimeString();document.getElementById('ledgerStamp').textContent='读取于 '+new Date().toLocaleTimeString()}catch(e){document.getElementById('stamp').textContent='错误: '+e;document.getElementById('decisions').innerHTML='<div class="empty-state"><strong>没能读到决策记录</strong><p>'+esc(String(e&&e.message||e))+'</p></div>'}finally{setLedgerLoading(false)}}
 document.addEventListener('toggle',()=>activateChoiceLists(),true);document.getElementById('platform').onchange=refreshAudit;renderResultChips();Promise.all([refreshSecurity(),refreshManager(),refreshConfiguration(),refreshAudit()]);setInterval(()=>Promise.all([refreshRuntime(),refreshClientControls()]),REFRESH_MS);
-</script><script src="/assets/dashboard-shell.js"></script><script src="/assets/environment.js"></script></body></html>"""
+</script><script src="/assets/dashboard-shell.js?v=__CONSOLE_VERSION__"></script><script src="/assets/environment.js?v=__CONSOLE_VERSION__"></script></body></html>"""
 
 
 AUTH_HTML = r"""<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Admin Passkey</title><link rel="stylesheet" href="/assets/dashboard.css"></head><body class="auth-page"><div class="box"><div class="brand"><span class="brand-mark">↗</span>Prediction Agent</div><h2>ADMIN_TITLE</h2><p class="muted">Passkey 验证同时绑定一次 P-256 ECDH 密钥交换。登录成功后，业务请求和响应均使用该会话密钥加密。</p><input id="name" placeholder="Passkey 名称" ADMIN_NAME><button onclick="begin()">ADMIN_ACTION</button><p id="status" class="danger"></p></div><script>
 const b64u=b=>btoa(String.fromCharCode(...new Uint8Array(b))).replaceAll('+','-').replaceAll('/','_').replaceAll('=','');const unb64u=s=>Uint8Array.from(atob(s.replaceAll('-','+').replaceAll('_','/')+'==='.slice((s.length+3)%4)),c=>c.charCodeAt(0));function publicKeyBuffers(p){p.challenge=unb64u(p.challenge);if(p.user?.id)p.user.id=unb64u(p.user.id);if(p.excludeCredentials)for(let c of p.excludeCredentials)c.id=unb64u(c.id);if(p.allowCredentials)for(let c of p.allowCredentials)c.id=unb64u(c.id);return p}function credentialJson(c){let r={id:c.id,rawId:b64u(c.rawId),type:c.type,response:{clientDataJSON:b64u(c.response.clientDataJSON)}};if(c.response.attestationObject)r.response.attestationObject=b64u(c.response.attestationObject);if(c.response.authenticatorData)r.response.authenticatorData=b64u(c.response.authenticatorData);if(c.response.signature)r.response.signature=b64u(c.response.signature);if(c.response.userHandle)r.response.userHandle=b64u(c.response.userHandle);if(c.authenticatorAttachment)r.authenticatorAttachment=c.authenticatorAttachment;return r}function keyDb(){return new Promise((ok,no)=>{let r=indexedDB.open('prediction-agent-keys',1);r.onupgradeneeded=()=>r.result.createObjectStore('sessions');r.onsuccess=()=>ok(r.result);r.onerror=()=>no(r.error)})}async function saveKey(id,key){let d=await keyDb();return new Promise((ok,no)=>{let r=d.transaction('sessions','readwrite').objectStore('sessions').put(key,id);r.onsuccess=()=>ok();r.onerror=()=>no(r.error)})}async function begin(){let status=document.getElementById('status');try{status.textContent='等待 Passkey…';let pair=await crypto.subtle.generateKey({name:'ECDH',namedCurve:'P-256'},false,['deriveBits']),publicJwk=await crypto.subtle.exportKey('jwk',pair.publicKey),options=await fetch('OPTIONS_URL',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({client_public_key:publicJwk})}).then(async r=>{let j=await r.json();if(!r.ok)throw Error(j.error);return j}),challenge=unb64u(options.publicKey.challenge),serverKey=await crypto.subtle.importKey('jwk',options.server_public_key,{name:'ECDH',namedCurve:'P-256'},false,[]),shared=await crypto.subtle.deriveBits({name:'ECDH',public:serverKey},pair.privateKey,256),material=await crypto.subtle.importKey('raw',shared,'HKDF',false,['deriveKey']),aes=await crypto.subtle.deriveKey({name:'HKDF',hash:'SHA-256',salt:challenge,info:new TextEncoder().encode('prediction-market-agent-session-v1')},material,{name:'AES-GCM',length:256},false,['encrypt','decrypt']),cred=await navigator.credentials.CREDENTIAL_METHOD({publicKey:publicKeyBuffers(options.publicKey)}),result=await fetch('VERIFY_URL',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({ceremony_id:options.ceremony_id,name:document.getElementById('name').value,credential:credentialJson(cred)})}).then(async r=>{let j=await r.json();if(!r.ok)throw Error(j.error);return j});await saveKey(result.session_id,aes);location='/'}catch(e){status.textContent=e.message||String(e)}}
 </script></body></html>"""
+
+CONSOLE_ASSETS = (
+    "login-probe.js", "dashboard-shell.js", "dashboard.css", "environment.js", "dashboard-views.js",
+)
+
+
+def console_version() -> str:
+    """Names the code a console tab runs, so a tab left open across an update can tell.
+
+    Nothing reloads a page that is already open. After an update it goes on drawing with the script
+    it loaded - showing an operator a label or a layout that has since been fixed, with nothing on
+    screen to say the page itself is the stale part. The page and every file it loads are hashed
+    together; a tab compares the value it was served with the one the server reports now. The same
+    value is on each asset's URL, so the reload that follows cannot be answered from a cache.
+    """
+    digest = hashlib.sha256(HTML.encode("utf-8"))
+    static = Path(__file__).with_name("static")
+    for name in CONSOLE_ASSETS:
+        digest.update(name.encode("utf-8"))
+        digest.update(static.joinpath(name).read_bytes())
+    return digest.hexdigest()[:16]
 
 
 def _json_value(value: str | None) -> Any:
@@ -202,6 +231,39 @@ def _json_value(value: str | None) -> Any:
         return json.loads(value)
     except json.JSONDecodeError:
         return value
+
+
+def _modified(path: Path) -> int:
+    try:
+        return Path(path).stat().st_mtime_ns
+    except OSError:
+        return 0
+
+
+def _wait_text(seconds: float) -> str:
+    total = max(0, int(seconds))
+    days, hours, minutes = total // 86400, total % 86400 // 3600, total % 3600 // 60
+    if days:
+        return f"{days} 天" + (f" {hours} 小时" if hours else "")
+    if hours:
+        return f"{hours} 小时" + (f" {minutes} 分钟" if minutes else "")
+    return f"{max(1, minutes)} 分钟"
+
+
+def _capacity_reason(reading: dict[str, Any]) -> str:
+    """Why no model can answer, per service, with when each is expected back if it said."""
+    now = time.time()
+    names = {"claude": "Claude", "codex": "Codex", "openai_compatible": "兼容 API"}
+    waiting = {name: item for name, item in (reading.get("providers") or {}).items() if not item.get("ready")}
+    kinds = {item.get("kind") for item in waiting.values()}
+    parts = []
+    for name, item in waiting.items():
+        text = names.get(name, name)
+        if item.get("recovers_at") and item["recovers_at"] > now:
+            text += f"，预计 {_wait_text(item['recovers_at'] - now)}后恢复"
+        parts.append(text)
+    cause = "AI 额度用完" if kinds == {"rate_limit"} else "AI 模型服务暂时不可用"
+    return cause + ("（" + "；".join(parts) + "）" if parts else "") + "，恢复后再打开这条会自动整理"
 
 
 def _midpoint(book: dict[str, Any]) -> float | None:
@@ -228,6 +290,93 @@ def _result_codes(results: str) -> list[str]:
     return [code.strip().upper() for code in str(results or "").split(",") if code.strip()][:12]
 
 
+READABLE_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "additionalProperties": False,
+    "properties": {
+        "headline": {"type": "string", "minLength": 1, "maxLength": 90},
+        "found": {"type": "string", "minLength": 1, "maxLength": 200},
+        "analysis": {"type": "string", "minLength": 1, "maxLength": 300},
+    },
+    "required": ["headline", "found", "analysis"],
+}
+"""Only the prose parts. What was concluded - hold, buy, sell - and what came of it - filled at what
+price, won or lost at settlement - are recorded facts and are shown as recorded. A model paraphrasing
+"bought 12 USDT at 0.42" can only ever make it less exact."""
+
+READABLE_MISSION = (
+    "Restate this ledger record for a trader who is scanning many of them and has seconds for each. "
+    "Two short plain-language answers - what was found (the market, the price, what stood out) and "
+    "how it was analysed (what was checked and what that showed) - plus a one-line headline stating "
+    "the conclusion and the one fact it turned on. Do not restate the trade itself or its execution; "
+    "those are shown separately exactly as recorded. Keep every number exactly as recorded. Use only "
+    "what the record says, and where it says nothing, say so briefly rather than filling the gap. No "
+    "field names, no JSON, no jargon a trader would not use."
+)
+
+
+def _readable_brief(record: dict[str, Any]) -> dict[str, Any]:
+    """The parts of a record that bear on the four questions, and nothing the model would have to wade through.
+
+    The full context handed to the deciding model runs to tens of kilobytes of plugin manifests and
+    capability lists; none of it says what happened. Sending it would cost more and read worse.
+    """
+    context = record.get("context") if isinstance(record.get("context"), dict) else {}
+    final = record.get("final_decision") if isinstance(record.get("final_decision"), dict) else {}
+    brief: dict[str, Any] = {
+        "recorded_at_ms": record.get("created_at"),
+        "platform": record.get("platform"),
+        "status": record.get("status"),
+        "error": record.get("error") or "",
+    }
+    research = record.get("research") if isinstance(record.get("research"), list) else []
+    brief["research_steps"] = [
+        {"tool": step.get("tool"), "why": str(step.get("reason", ""))[:200]}
+        for step in research[:14] if isinstance(step, dict)
+    ]
+    if context.get("stage") == "discovery":
+        candidates = context.get("candidates") or []
+        brief["kind"] = "discovery round"
+        brief["candidates"] = len(candidates)
+        brief["candidates_priced"] = sum(1 for c in candidates if isinstance(c, dict) and "spread" in c)
+        titles = {str(c.get("topic_id")): c.get("title") for c in candidates if isinstance(c, dict)}
+        brief["selected"] = [
+            {"market": titles.get(str(item.get("topic_id")), item.get("topic_id")),
+             "why": str(item.get("reason", ""))[:300]}
+            for item in (final.get("selections") or []) if isinstance(item, dict)
+        ]
+        brief["skipped_reason"] = final.get("skipped_reason", "")
+        brief["next_look_seconds"] = final.get("next_scan_seconds")
+        brief["next_searches"] = final.get("next_survey_queries")
+        return brief
+    market = context.get("market") if isinstance(context.get("market"), dict) else {}
+    outcome = context.get("outcome") if isinstance(context.get("outcome"), dict) else {}
+    book = context.get("order_book") if isinstance(context.get("order_book"), dict) else {}
+    risk = record.get("risk_decision") if isinstance(record.get("risk_decision"), dict) else {}
+    execution = record.get("execution") if isinstance(record.get("execution"), dict) else {}
+    brief.update({
+        "kind": "trading decision",
+        "market": market.get("title") or market.get("question"),
+        "outcome": outcome.get("name"),
+        "market_implied_probability": outcome.get("displayed_probability"),
+        "best_bid": book.get("best_bid"),
+        "best_ask": book.get("best_ask"),
+        "seconds_until_close": context.get("seconds_remaining"),
+        "cash_available": (context.get("portfolio") or {}).get("cash")
+        if isinstance(context.get("portfolio"), dict) else None,
+        "decided_action": final.get("action"),
+        "size_usdt": final.get("notional_usdt"),
+        "limit_price": final.get("limit_price"),
+        "model_probability": final.get("estimated_probability"),
+        "model_confidence": final.get("confidence"),
+        "model_reasoning": str(final.get("rationale", ""))[:1200],
+        "rule_check": {"outcome": risk.get("outcome"), "reason": risk.get("reason")},
+        "execution": execution,
+        "price_afterwards": record.get("subsequent_observation"),
+    })
+    return brief
+
+
 def _slim_decision(item: dict[str, Any]) -> dict[str, Any]:
     """What a list row needs, without what only an opened row needs.
 
@@ -239,7 +388,31 @@ def _slim_decision(item: dict[str, Any]) -> dict[str, Any]:
     slim = dict(item)
     context = item.get("context") if isinstance(item.get("context"), dict) else {}
     market = context.get("market") if isinstance(context.get("market"), dict) else {}
-    slim["context"] = {"market": {"title": market.get("title", "")}} if market else {}
+    outcome = context.get("outcome") if isinstance(context.get("outcome"), dict) else {}
+    book = context.get("order_book") if isinstance(context.get("order_book"), dict) else {}
+    kept: dict[str, Any] = {}
+    if market:
+        kept["market"] = {"title": market.get("title") or market.get("question") or ""}
+    if outcome:
+        kept["outcome"] = {
+            "name": outcome.get("name"),
+            "displayed_probability": outcome.get("displayed_probability"),
+        }
+    if book:
+        kept["order_book"] = {"best_bid": book.get("best_bid"), "best_ask": book.get("best_ask")}
+    if "seconds_remaining" in context:
+        kept["seconds_remaining"] = context.get("seconds_remaining")
+    if context.get("stage") == "discovery":
+        # The at-a-glance line for a round needs its size, not its candidates.
+        candidates = context.get("candidates") or []
+        kept["stage"] = "discovery"
+        kept["candidate_count"] = len(candidates)
+        kept["candidate_titles"] = {
+            str(c.get("topic_id")): c.get("title")
+            for c in candidates if isinstance(c, dict)
+        }
+        kept["priced_count"] = sum(1 for c in candidates if isinstance(c, dict) and "spread" in c)
+    slim["context"] = kept
     research = item.get("research")
     slim["research_count"] = len(research) if isinstance(research, list) else 0
     slim.pop("research", None)
@@ -258,6 +431,10 @@ class AuditData:
         self.config = config
         self.management = management or PluginManagementService(config)
         self.runtime = runtime
+        self._restater_lock = threading.Lock()
+        self._restater_key: tuple[Any, ...] | None = None
+        self._restater_value: tuple[Any, Any] = (None, None)
+        self._restater_health = ProviderHealthRegistry()
         memory = SessionMemory(config.session_db)
         memory.close()
 
@@ -404,7 +581,7 @@ class AuditData:
             "strategy_name", "strategy_sha256", "market_topic_id", "market_id",
             "token_id", "context_json", "research_json", "model_raw_output",
             "proposed_decision_json", "risk_decision_json", "final_decision_json",
-            "execution_json", "status", "error",
+            "execution_json", "status", "error", "readable_json",
         ]
         filters: list[str] = []
         params: list[Any] = []
@@ -451,7 +628,7 @@ class AuditData:
         items: list[dict[str, Any]] = []
         json_columns = {
             "context_json", "research_json", "proposed_decision_json",
-            "risk_decision_json", "final_decision_json", "execution_json",
+            "risk_decision_json", "final_decision_json", "execution_json", "readable_json",
         }
         for row in rows:
             item = dict(zip([*columns, "result"], row))
@@ -496,6 +673,95 @@ class AuditData:
         connection.close()
         return {"limit": limit, "offset": offset, "items": items}
 
+    def readable(self, decision_id: int) -> dict[str, Any]:
+        """A record restated in four plain answers, produced once and kept.
+
+        The deciding model now writes a headline in the same call, but the rest of a record - and
+        every record written before that - is structured for a program, not a person. Asking a model
+        to restate it costs a call, so it is made the first time somebody opens the record and the
+        answer is stored; nobody pays for the same row twice.
+        """
+        memory = SessionMemory(self.config.session_db)
+        try:
+            cached = memory.readable(decision_id)
+        finally:
+            memory.connection.close()
+        if cached:
+            return {"available": True, "cached": True, **cached}
+        record = self.decision(decision_id)
+        if record.get("status") == SessionMemory.IN_PROGRESS:
+            return {"available": False, "reason": "这条还在分析中，结束后才能整理"}
+        # Restating a record needs a model that can answer - nothing about whether the robot is
+        # running. A paused robot is one that is not trading, not one whose records cannot be read.
+        try:
+            provider, quality = self._restater()
+        except Exception as error:
+            return {"available": False, "reason": "没有可用的 AI 模型服务：" + str(error)[:160]}
+        if quality is not None:
+            # The same check every round makes: asking a model known to be out of quota only
+            # produces a failure to show instead of the restatement.
+            reading = quality.capacity()
+            if not reading.get("available"):
+                return {"available": False, "reason": _capacity_reason(reading)}
+        try:
+            result = provider.run(
+                _readable_brief(record),
+                schema=READABLE_SCHEMA,
+                schema_name="ledger_readable",
+                mission=READABLE_MISSION,
+                instructions="",
+                max_tool_steps=0,
+            )
+        except Exception as error:
+            return {"available": False, "reason": f"模型整理失败：{str(error)[:200]}"}
+        value = {key: str(result.value.get(key, "")).strip() for key in READABLE_SCHEMA["required"]}
+        memory = SessionMemory(self.config.session_db)
+        try:
+            memory.save_readable(decision_id, value)
+        finally:
+            memory.connection.close()
+        return {"available": True, "cached": False, **value}
+
+    def _restater(self) -> tuple[Any, Any]:
+        """A model to restate records with, and the check of whether it can answer right now.
+
+        While the robot runs, its own provider is used, so there is one view of which accounts are
+        out of quota. Otherwise the console assembles one from the same configuration. It is rebuilt
+        when that configuration changes, but what it learned about quota is kept - an exhausted
+        account is not rediscovered on every record somebody opens.
+        """
+        engine = getattr(self.runtime, "_engine", None) if self.runtime is not None else None
+        if engine is not None and getattr(engine, "provider", None) is not None:
+            return engine.provider, getattr(engine, "provider_quality", None)
+        config = Config.load(self.config.application_config_file)
+        catalog = self.management.catalog
+        key = (
+            id(catalog),
+            tuple(config.decision_providers),
+            _modified(self.config.application_config_file),
+            _modified(config.management_file),
+        )
+        with self._restater_lock:
+            if self._restater_key != key:
+                ready = []
+                for name in config.decision_providers:
+                    try:
+                        if catalog.get("decision_provider", name).readiness().ready:
+                            ready.append(name)
+                    except Exception:
+                        continue
+                if not ready:
+                    raise ValueError("到“模型服务”页启用并登录至少一个")
+                provider = make_provider(
+                    replace(config, decision_providers=tuple(ready)), catalog,
+                    health=self._restater_health,
+                )
+                self._restater_value = (
+                    provider, ProviderQuality(memory=SessionMemory(self.config.session_db), provider=provider)
+                )
+                self._restater_key = key
+            return self._restater_value
+
     def decision(self, decision_id: int) -> dict[str, Any]:
         """One row in full, for the moment somebody opens it."""
         connection = sqlite3.connect(self.config.session_db)
@@ -510,7 +776,49 @@ class AuditData:
         page = self.decisions(200, 0, row[0], "", "", "", "", full=True, only_id=int(decision_id))
         if not page["items"]:
             raise ValueError(f"Decision {decision_id} does not exist")
-        return page["items"][0]
+        item = page["items"][0]
+        item["settlement"] = self._settlement_for(item)
+        return item
+
+    def _settlement_for(self, item: dict[str, Any]) -> dict[str, Any] | None:
+        """How a filled trade ended, once its market resolved - the part of a result that comes later.
+
+        A buy is only half a result until the market settles; "filled at 0.42" does not say whether
+        it was right. Computed from the recorded fill and the platform's own answer about who won,
+        for a position held to settlement, and labelled as exactly that.
+        """
+        execution = item.get("execution") if isinstance(item.get("execution"), dict) else {}
+        order = execution.get("order") if isinstance(execution.get("order"), dict) else {}
+        if str(order.get("side", "")).upper() != "BUY" or str(order.get("status", "")).upper() != "FILLED":
+            return None
+        connection = sqlite3.connect(self.config.session_db)
+        try:
+            row = connection.execute(
+                """
+                SELECT created_at, request_json, result_json FROM execution_actions
+                WHERE platform = ? AND token_id = ? AND action = 'REDEEM' AND created_at >= ?
+                ORDER BY created_at ASC LIMIT 1
+                """,
+                (item.get("platform"), item.get("token_id"), item.get("created_at") or 0),
+            ).fetchone()
+        finally:
+            connection.close()
+        if row is None:
+            return {"settled": False}
+        request = _json_value(row[1]) or {}
+        won = bool(request.get("winning"))
+        quantity = float(order.get("quantity") or 0)
+        cost = float(order.get("notional") or 0) + float(order.get("fee") or 0)
+        payout = quantity if won else 0.0
+        return {
+            "settled": True,
+            "settled_at": row[0],
+            "won": won,
+            "payout": round(payout, 6),
+            "cost": round(cost, 6),
+            "profit": round(payout - cost, 6),
+            "basis": "held to settlement: payout of the filled quantity against what the fill cost",
+        }
 
 
 def create_app(config: Config, *, start_robot: bool = True) -> FastAPI:
@@ -576,6 +884,7 @@ def create_app(config: Config, *, start_robot: bool = True) -> FastAPI:
         if is_local_request(request):
             return (
                 HTML.replace("REFRESH_MS", str(config.dashboard_refresh_seconds * 1000))
+                .replace("__CONSOLE_VERSION__", console_version())
                 .replace("CSRF_TOKEN", "")
                 .replace("'SESSION_ID'", "''")
                 .replace("LOCAL_ACCESS_VALUE", "true")
@@ -594,6 +903,7 @@ def create_app(config: Config, *, start_robot: bool = True) -> FastAPI:
             )
         return (
             HTML.replace("REFRESH_MS", str(config.dashboard_refresh_seconds * 1000))
+            .replace("__CONSOLE_VERSION__", console_version())
             .replace("CSRF_TOKEN", session.csrf_token)
             .replace("'SESSION_ID'", json.dumps(session.session_id))
             .replace("LOCAL_ACCESS_VALUE", "false")
@@ -601,7 +911,7 @@ def create_app(config: Config, *, start_robot: bool = True) -> FastAPI:
 
     @app.get("/assets/{asset}")
     def dashboard_asset(asset: str) -> Response:
-        if asset not in {"login-probe.js", "dashboard-shell.js", "dashboard.css", "environment.js", "dashboard-views.js"}:
+        if asset not in CONSOLE_ASSETS:
             raise HTTPException(status_code=404, detail="Unknown asset")
         return Response(
             Path(__file__).with_name("static").joinpath(asset).read_text(),
@@ -725,6 +1035,7 @@ def create_app(config: Config, *, start_robot: bool = True) -> FastAPI:
         if path == "/api/runtime":
             status=runtime.status()
             status["setup"]=setup_guide(status,management.manifest(),automatic_start=start_robot)
+            status["console_version"]=console_version()
             return status
         if path == "/api/runtime/control":
             runtime.stop()
@@ -743,6 +1054,8 @@ def create_app(config: Config, *, start_robot: bool = True) -> FastAPI:
             return application_settings.reset(
                 payload.get("names") if "names" in payload else None
             )
+        if path == "/api/decisions/readable":
+            return data.readable(int(query_value(query, "id", "0")))
         if path == "/api/decisions/detail":
             return data.decision(int(query_value(query, "id", "0")))
         if path == "/api/decisions/counts":

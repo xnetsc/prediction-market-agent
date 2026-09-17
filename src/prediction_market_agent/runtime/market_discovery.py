@@ -55,17 +55,20 @@ DISCOVERY_SCHEMA: dict[str, Any] = {
             "items": {"type": "string", "minLength": 1, "maxLength": 120},
         },
         "pacing_reason": {"type": "string", "maxLength": 300},
+        "headline": {"type": "string", "minLength": 1, "maxLength": 90},
     },
     "required": [
         "selections", "skipped_reason", "next_scan_seconds", "next_survey_queries",
-        "pacing_reason",
+        "pacing_reason", "headline",
     ],
 }
 
 DISCOVERY_MISSION = (
     "Select the markets on this platform that deserve this cycle's decision slots. Return topic_id "
     "values taken verbatim from the candidate list. Returning fewer than the maximum, or none, is "
-    "correct when nothing clears the gates."
+    "correct when nothing clears the gates. The headline is the one line a trader reads first: what "
+    "this round found, or why it found nothing - for example \"Picked 2 of 24: NATO clash volume up "
+    "67%\" or \"Nothing picked: every live book is wider than the edge\"."
 )
 
 DISCOVERY_CONTROL_MISSION = (
@@ -598,7 +601,14 @@ class DiscoveryEngine:
             provider=result.provider,
             research=result.research_trace,
             model_raw_output=result.raw_output,
-            final_decision={"selections": selections, "skipped_reason": skipped_reason},
+            final_decision={
+                "selections": selections,
+                "skipped_reason": skipped_reason,
+                "headline": str(result.value.get("headline", "")).strip()[:90],
+                "next_scan_seconds": int(result.value.get("next_scan_seconds", 0) or 0),
+                "next_survey_queries": list(result.value.get("next_survey_queries", []) or []),
+                "pacing_reason": str(result.value.get("pacing_reason", "")),
+            },
             status="OK" if selections else "NO_ACTION",
             error="" if selections else skipped_reason,
         )

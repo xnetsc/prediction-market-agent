@@ -1,4 +1,5 @@
 from ._support import *
+from types import SimpleNamespace
 import json
 
 from prediction_market_agent.runtime.memory import SessionMemory
@@ -143,7 +144,7 @@ class ReadingIsNotInterruptedTests(unittest.TestCase):
         views = self._views()
         self.assertIn("OPEN_DETAILS", views)
         self.assertIn("rememberOpenDetails()", views)
-        self.assertIn("detail(raw,r.id+':'+index)", views)
+        self.assertIn("r.id+':raw'", views, "the raw block needs a key that survives a redraw")
 
 
 class PagedLedgerTests(unittest.TestCase):
@@ -296,7 +297,8 @@ class ListRowsAreLightTests(unittest.TestCase):
             "final_decision": {"action": "HOLD", "rationale": "wide spread"},
         }
         slim = _slim_decision(heavy)
-        self.assertEqual(slim["context"], {"market": {"title": "BTC"}})
+        self.assertEqual(slim["context"]["market"], {"title": "BTC"})
+        self.assertNotIn("bids", json.dumps(slim["context"]), "the depth itself is not a list fact")
         self.assertNotIn("model_raw_output", slim)
         self.assertNotIn("research", slim)
         self.assertEqual(slim["research_count"], 4)
@@ -312,7 +314,7 @@ class ListRowsAreLightTests(unittest.TestCase):
         self.assertIn("'/api/decisions/detail?id='", views)
 
     def test_the_list_still_says_how_much_research_there_was(self) -> None:
-        self.assertIn("r.research_count??", self._views())
+        self.assertIn("Number(r.research_count||0)", self._views())
 
     def test_the_page_no_longer_promises_a_hundred_rows(self) -> None:
         self.assertNotIn("显示最近 100 条匹配记录", self._shell())
@@ -389,3 +391,136 @@ class ResultFilterTests(unittest.TestCase):
             capture_output=True, text=True, timeout=60,
         )
         self.assertEqual(completed.returncode, 0, completed.stderr or completed.stdout)
+
+
+class ReadableRecordTests(unittest.TestCase):
+    """A trader should see what was found, how it was analysed, the conclusion and its result."""
+
+    def _audit(self, provider=None):
+        import tempfile
+
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        root = Path(directory.name)
+        config = Config(
+            working_directory=root, session_db=root / "s.sqlite3", auth_db=root / "a.sqlite3",
+            management_file=root / "m.json", plugin_directories_file=root / "d.json",
+            application_config_file=root / "app.json",
+        )
+        memory = SessionMemory(config.session_db)
+        decision_id = memory.begin_decision(
+            platform="p", market_topic_id="t", market_id="m", token_id="o",
+            strategy_name="s", strategy_sha256="x",
+            context={"market": {"title": "BTC"}, "active_api_plugin": {"huge": "x" * 50000},
+                     "outcome": {"name": "Yes", "displayed_probability": 0.4},
+                     "order_book": {"best_bid": 0.39, "best_ask": 0.41}},
+        )
+        memory.complete_decision(
+            decision_id, provider="x", status="NO_ACTION",
+            final_decision={"action": "HOLD", "rationale": "spread too wide", "headline": "Hold"},
+            execution={"action": "HOLD", "status": "NO_ACTION"},
+        )
+        from prediction_market_agent.runtime.dashboard import AuditData
+
+        runtime = None
+        if provider is not None:
+            runtime = SimpleNamespace(_engine=SimpleNamespace(provider=provider))
+        data = AuditData(config, runtime=runtime)
+        self.addCleanup(data.management.shutdown)
+        return data, decision_id
+
+    class _Provider:
+        def __init__(self):
+            self.calls = 0
+            self.payloads = []
+
+        def run(self, payload, **options):
+            self.calls += 1
+            self.payloads.append(payload)
+            return SimpleNamespace(value={"headline": "观望：价差太宽", "found": "BTC 买一 0.39 卖一 0.41",
+                                          "analysis": "估计与市场相近"})
+
+    def test_it_is_written_once_and_kept(self) -> None:
+        provider = self._Provider()
+        data, decision_id = self._audit(provider)
+        first = data.readable(decision_id)
+        second = data.readable(decision_id)
+        self.assertTrue(first["available"])
+        self.assertEqual(second["headline"], "观望：价差太宽")
+        self.assertTrue(second["cached"])
+        self.assertEqual(provider.calls, 1, "the same record must not cost a model call twice")
+
+    def test_the_model_is_given_the_facts_not_the_manifests(self) -> None:
+        provider = self._Provider()
+        data, decision_id = self._audit(provider)
+        data.readable(decision_id)
+        brief = json.dumps(provider.payloads[0], ensure_ascii=False)
+        self.assertIn("BTC", brief)
+        self.assertNotIn("x" * 1000, brief, "plugin manifests were sent to be restated")
+        self.assertLess(len(brief), 4000)
+
+    def test_without_a_model_it_says_why_rather_than_failing(self) -> None:
+        data, decision_id = self._audit(provider=None)
+        answer = data.readable(decision_id)
+        self.assertFalse(answer["available"])
+        self.assertIn("没有可用的 AI 模型服务", answer["reason"])
+
+    def test_only_the_prose_is_restated(self) -> None:
+        """Conclusion and result are recorded facts; a paraphrase can only make them less exact."""
+        from prediction_market_agent.runtime.dashboard import READABLE_SCHEMA
+
+        self.assertEqual(set(READABLE_SCHEMA["required"]), {"headline", "found", "analysis"})
+
+    def test_a_filled_buy_held_to_settlement_reports_its_profit(self) -> None:
+        data, _ = self._audit()
+        item = {
+            "platform": "p", "token_id": "tok", "created_at": 0,
+            "execution": {"order": {"side": "BUY", "status": "FILLED", "quantity": 28.5,
+                                    "notional": 12.0, "fee": 0.04}},
+        }
+        memory = SessionMemory(data.config.session_db)
+        memory.record_action(platform="p", market_topic_id="t", token_id="tok", action="REDEEM",
+                             request={"winning": True}, result={})
+        settled = data._settlement_for(item)
+        self.assertTrue(settled["won"])
+        self.assertAlmostEqual(settled["profit"], 28.5 - 12.04, places=6)
+
+    def test_an_unsettled_buy_says_so_and_a_hold_has_no_settlement(self) -> None:
+        data, _ = self._audit()
+        pending = {"platform": "p", "token_id": "none", "created_at": 0,
+                   "execution": {"order": {"side": "BUY", "status": "FILLED", "quantity": 1,
+                                           "notional": 1, "fee": 0}}}
+        self.assertEqual(data._settlement_for(pending), {"settled": False})
+        self.assertIsNone(data._settlement_for({"execution": {"action": "HOLD", "status": "NO_ACTION"}}))
+
+    def test_the_card_renders_every_record_shape(self) -> None:
+        import shutil
+        import subprocess
+
+        node = shutil.which("node")
+        if node is None:
+            self.skipTest("node is not installed; this check needs a JavaScript engine")
+        completed = subprocess.run(
+            [node, "tests/ledger_render_check.js",
+             "src/prediction_market_agent/runtime/static/dashboard-views.js"],
+            capture_output=True, text=True, timeout=60,
+        )
+        self.assertEqual(completed.returncode, 0, completed.stderr or completed.stdout)
+
+
+class HeadlineContractTests(unittest.TestCase):
+    def test_both_calls_must_return_a_headline(self) -> None:
+        from prediction_market_agent.agent.decision import DECISION_SCHEMA
+        from prediction_market_agent.runtime.market_discovery import DISCOVERY_SCHEMA
+
+        self.assertIn("headline", DECISION_SCHEMA["required"])
+        self.assertIn("headline", DISCOVERY_SCHEMA["required"])
+
+    def test_a_decision_recorded_before_headlines_still_reads(self) -> None:
+        from prediction_market_agent.agent.decision import Decision
+
+        decision = Decision.from_mapping({
+            "action": "HOLD", "order_type": "MARKET", "notional_usdt": 0, "quantity_fraction": 0,
+            "limit_price": None, "confidence": 0.5, "estimated_probability": 0.5, "rationale": "r",
+        })
+        self.assertEqual(decision.headline, "")

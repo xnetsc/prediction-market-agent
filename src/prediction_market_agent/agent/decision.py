@@ -24,6 +24,7 @@ DECISION_SCHEMA: dict[str, Any] = {
         "confidence": {"type": "number", "minimum": 0, "maximum": 1},
         "estimated_probability": {"type": "number", "minimum": 0, "maximum": 1},
         "rationale": {"type": "string", "minLength": 1, "maxLength": 1200},
+        "headline": {"type": "string", "minLength": 1, "maxLength": 90},
         "priors": {
             "type": "array",
             "maxItems": 4,
@@ -39,6 +40,7 @@ DECISION_SCHEMA: dict[str, Any] = {
         "confidence",
         "estimated_probability",
         "rationale",
+        "headline",
         "priors",
     ],
 }
@@ -92,6 +94,12 @@ class Decision:
     estimated_probability: float
     rationale: str
     priors: tuple[str, ...] = ()
+    headline: str = ""
+    """The conclusion in one line, for the person scanning the ledger rather than auditing it.
+
+    Asked for in the same call that makes the decision, so it costs nothing extra and can never
+    drift from what was decided. Empty on decisions recorded before it existed.
+    """
 
     @classmethod
     def from_mapping(cls, value: dict[str, Any]) -> "Decision":
@@ -106,6 +114,7 @@ class Decision:
                 estimated_probability=float(value["estimated_probability"]),
                 rationale=str(value["rationale"]),
                 priors=tuple(str(item) for item in value.get("priors") or ())[:4],
+                headline=str(value.get("headline") or "").strip()[:90],
             )
         except (KeyError, TypeError, ValueError) as error:
             raise DecisionProviderError(f"Invalid decision payload: {error}") from error
@@ -171,7 +180,12 @@ def _strategy_instructions(payload: dict[str, Any]) -> str:
     return render_overlay_block(strategy, "CONFIGURED_DECISION_STRATEGY")
 
 
-TRADE_MISSION = "Submit the final decision for this outcome token."
+TRADE_MISSION = (
+    "Submit the final decision for this outcome token. The headline is what a trader reads first "
+    "while scanning dozens of these: the conclusion and the one fact it turns on, in a single line - "
+    "for example \"Hold: 0.13 ask already prices my 14% estimate\". Not a summary of what you "
+    "looked at; the rationale is for that."
+)
 
 TRADE_CONTROL_MISSION = (
     "Choose one next action. Use DECIDE when more research is unlikely to change the trade."
@@ -501,10 +515,31 @@ class FallbackDecisionProvider:
         by_name = {provider.name: provider for provider in self.providers}
         return [by_name[name] for name in self.health.order(self.available_names) if name in by_name]
 
+    def ready_names(self, now: float | None = None) -> tuple[str, ...]:
+        """Providers a decision may be put to right now, best first."""
+        moment = time.time() if now is None else now
+        return tuple(
+            name for name in self.health.order(self.available_names, now=moment)
+            if self.health.state(name).ready(moment)
+        )
+
     def _attempt(self, call: Callable[[AgentDecisionProvider], Any]) -> Any:
         errors: dict[str, str] = {}
         raw: list[dict[str, str]] = []
+        # Only providers that can answer are asked. One that is cooling down, or has not been
+        # confirmed back since it failed, is known not to - asking anyway turned every round of an
+        # outage into a failed call and a failed record, which is the work nobody wanted done.
+        ready = set(self.ready_names())
+        if not ready:
+            waiting = "; ".join(
+                f"{name}: [{self.health.state(name).last_error_kind or 'unavailable'}] "
+                f"{self.health.state(name).last_error[:200]}"
+                for name in self.available_names
+            )
+            raise DecisionProviderError(f"No decision provider is ready: {waiting}", "[]")
         for provider in self._ordered():
+            if provider.name not in ready:
+                continue
             started = time.monotonic()
             try:
                 result = call(provider)
@@ -548,7 +583,9 @@ class FallbackDecisionProvider:
         )
 
 
-def make_provider(config: Config, catalog: Any = None) -> FallbackDecisionProvider:
+def make_provider(
+    config: Config, catalog: Any = None, *, health: ProviderHealthRegistry | None = None
+) -> FallbackDecisionProvider:
     if catalog is None:
         from ..plugin_system.discovery import load_plugin_catalog
 
@@ -561,4 +598,6 @@ def make_provider(config: Config, catalog: Any = None) -> FallbackDecisionProvid
             providers.append(AgentDecisionProvider(backend, config))
         except (DecisionProviderError, json.JSONDecodeError, ValueError) as error:
             unavailable[name] = str(error)
-    return FallbackDecisionProvider(providers, unavailable, config.decision_providers)
+    return FallbackDecisionProvider(
+        providers, unavailable, config.decision_providers, health=health
+    )

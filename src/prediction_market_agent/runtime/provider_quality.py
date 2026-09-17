@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import json
 import logging
+import threading
 import time
 from typing import Any
 
 from ..agent.decision import DecisionProviderError
+from .decision_capacity import capacity_reading
 from .memory import SessionMemory
 
 LOGGER = logging.getLogger(__name__)
@@ -81,6 +83,78 @@ class ProviderQuality:
     def __init__(self, *, memory: SessionMemory, provider: Any) -> None:
         self.memory = memory
         self.provider = provider
+        self._first_look = threading.Lock()
+        self._looked = False
+        self._probing = threading.Lock()
+
+    def capacity(self) -> dict[str, Any]:
+        """Whether a decision can be asked for right now, found out for free wherever possible.
+
+        Asked before any work that exists only to reach a decision - pulling markets, building a
+        prompt, opening a ledger record - and by the watch that tells the plugins. Health lives in
+        memory, so the first time this is asked each client is also asked whether its account has
+        quota at all: otherwise a restart forgets the account ran dry, and the first round after it
+        pulls markets and writes a failed record to learn it again.
+        """
+        self._look_once()
+        # Two callers can arrive together - the watch and a platform's cycle. One check is enough,
+        # and neither should wait on a slow one: the other reads what is already recorded.
+        if self._probing.acquire(blocking=False):
+            try:
+                self.probe_recovering()
+            except Exception:
+                LOGGER.exception("provider recovery check failed; judging on what is recorded")
+            finally:
+                self._probing.release()
+        return capacity_reading(self.provider)
+
+    def _look_once(self) -> None:
+        with self._first_look:
+            if self._looked:
+                return
+            self._looked = True
+            health = getattr(self.provider, "health", None)
+            if health is None:
+                return
+            for item in getattr(self.provider, "providers", []) or []:
+                reading = self._quota(item)
+                if reading and reading.get("available") is False:
+                    health.record_failure(
+                        item.name,
+                        str(reading.get("detail") or "client reports no usable quota or session"),
+                        kind=str(reading.get("kind") or "") or None,
+                        recovers_at=float(reading.get("recovers_at") or 0) or None,
+                        attempted=False,
+                    )
+                    LOGGER.info("decision provider %s has no usable quota: %s", item.name, reading)
+
+    @staticmethod
+    def _quota(item: Any) -> dict[str, Any] | None:
+        """The client's own free answer about its account, when it gives one.
+
+        The runtime holds a wrapper around each client; what the client can say for itself lives
+        on the client. Looking for it on the wrapper found nothing, every time, so each recovery
+        check fell through to a paid request.
+        """
+        client = getattr(item, "backend", item)
+        quota = getattr(client, "quota", None)
+        if callable(quota):
+            try:
+                reading = quota()
+            except Exception:
+                LOGGER.exception("%s could not report its quota", getattr(item, "name", "provider"))
+                return None
+            return reading if isinstance(reading, dict) else None
+        entitlement = getattr(client, "entitlement", None)
+        if callable(entitlement):
+            try:
+                answer = entitlement()
+            except Exception:
+                LOGGER.exception("%s could not report its entitlement", getattr(item, "name", "provider"))
+                return None
+            if answer is not None:
+                return {"available": bool(answer), "kind": "", "recovers_at": 0.0, "detail": ""}
+        return None
 
     def measure(self) -> dict[str, dict[str, Any]]:
         delivery = self.memory.provider_delivery()
@@ -225,15 +299,19 @@ class ProviderQuality:
             # are ones the client can answer for free. Spending a request to discover whether
             # requests are still possible is the expensive way to learn it, and tells you nothing
             # at all once the account is already exhausted.
-            entitlement = getattr(backends[name], "entitlement", None)
-            answer = entitlement() if callable(entitlement) else None
+            reading = self._quota(backends[name])
+            answer = reading.get("available") if reading else None
             if answer is False:
                 results[name] = health.record_failure(
-                    name, "client reports no usable quota or session"
+                    name,
+                    str(reading.get("detail") or "client reports no usable quota or session"),
+                    kind=str(reading.get("kind") or "") or None,
+                    recovers_at=float(reading.get("recovers_at") or 0) or None,
+                    attempted=False,
                 )
                 continue
             if answer is True:
-                health.record_success(name)
+                health.record_probe_success(name)
                 results[name] = "recovered"
                 LOGGER.info("decision provider %s reports it can serve requests again", name)
                 continue

@@ -23,6 +23,10 @@ class ClaudeCliBackend:
         self.control = control
         self.effort = effort
 
+    def quota(self) -> dict[str, Any] | None:
+        """Whether this account can serve a request and, if not, when it can again - for free."""
+        return self.control.quota() if self.control else None
+
     def entitlement(self) -> bool | None:
         """Whether this account can serve a request, asked without spending anything.
 
@@ -30,12 +34,12 @@ class ClaudeCliBackend:
         rather than answered by sending a request and seeing what happens. Returns None when the
         client cannot say, which leaves the caller free to find out the expensive way.
         """
-        if not self.control:
+        reading = self.quota()
+        if reading is None:
             return None
-        usage = self.control.usage()
-        if usage.get("available") is not None:
-            return bool(usage["available"])
-        return self.control.authenticated()
+        if reading.get("available") is not None:
+            return bool(reading["available"])
+        return reading.get("signed_in")
 
     def liveness(self) -> bool | None:
         """Free signal the client provides about its own session; None when unavailable."""

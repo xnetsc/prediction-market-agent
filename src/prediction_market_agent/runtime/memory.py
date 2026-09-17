@@ -106,6 +106,13 @@ class SessionMemory:
                 ON decision_ledger(platform, token_id, created_at DESC);
             """
         )
+        ledger_columns = {
+            row[1] for row in self.connection.execute("PRAGMA table_info(decision_ledger)")
+        }
+        if "readable_json" not in ledger_columns:
+            # A plain-language restatement of a record, written once and kept. Recomputing it on
+            # every view would spend a model call each time somebody opened the same row.
+            self.connection.execute("ALTER TABLE decision_ledger ADD COLUMN readable_json TEXT")
         for table in ("provider_turns", "execution_actions", "agent_steps"):
             columns = {
                 row[1] for row in self.connection.execute(f"PRAGMA table_info({table})")
@@ -856,6 +863,25 @@ class SessionMemory:
     error - so the reasoning and the outcome are simply lost and the operator is left believing
     they tidied up a stuck entry.
     """
+
+    def readable(self, decision_id: int) -> dict[str, Any] | None:
+        row = self.connection.execute(
+            "SELECT readable_json FROM decision_ledger WHERE id = ?", (int(decision_id),)
+        ).fetchone()
+        if row is None or not row[0]:
+            return None
+        try:
+            value = json.loads(row[0])
+        except json.JSONDecodeError:
+            return None
+        return value if isinstance(value, dict) else None
+
+    def save_readable(self, decision_id: int, value: dict[str, Any]) -> None:
+        self.connection.execute(
+            "UPDATE decision_ledger SET readable_json = ? WHERE id = ?",
+            (json.dumps(value, ensure_ascii=False), int(decision_id)),
+        )
+        self.connection.commit()
 
     def forget_decisions(
         self,
