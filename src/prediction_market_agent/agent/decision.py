@@ -66,6 +66,15 @@ constraints are evaluated by the active API and risk plugins. Return only the JS
 the current schema."""
 
 
+class DecisionCancelled(RuntimeError):
+    """The decision was deleted while it was still being made.
+
+    Deliberately not a DecisionProviderError: nothing failed, so it must not count against the
+    provider, must not send the round to the next provider in line, and must not be recorded as an
+    error on a row that no longer exists.
+    """
+
+
 class DecisionProviderError(RuntimeError):
     def __init__(self, message: str, raw_output: str = ""):
         super().__init__(message)
@@ -262,8 +271,14 @@ class AgentDecisionProvider:
         step_recorder: Callable[..., None] | None = None,
         tool_descriptions: dict[str, Any] | None = None,
         consultation: AgentConsultation | None = None,
+        should_stop: Callable[[], bool] | None = None,
     ) -> AgentRunResult:
         """Drive one multi-step tool loop and return a value matching the supplied schema."""
+        def stop_if_cancelled() -> None:
+            # Checked before each model call: every one of them costs money, and once the decision
+            # has been deleted there is nowhere for the answer to go.
+            if should_stop is not None and should_stop():
+                raise DecisionCancelled("the decision was deleted while it was being made")
         trace: list[dict[str, Any]] = []
         raw_outputs: list[dict[str, Any]] = []
         final_index = 0
@@ -292,6 +307,7 @@ class AgentDecisionProvider:
                 )
             try:
                 for index in range(steps):
+                    stop_if_cancelled()
                     final_index = index + 1
                     prompt = _control_prompt(
                         payload, trace, tools, control_mission, instructions, self.preamble
@@ -390,6 +406,7 @@ class AgentDecisionProvider:
             "tool_budget_exhausted": bool(tool_executor is not None and len(trace) >= steps),
         }
         resolved = _strategy_instructions(final_input) if instructions is None else instructions
+        stop_if_cancelled()
         prompt = _final_prompt(final_input, mission, resolved, self.preamble)
         try:
             response = self.backend.complete(prompt, schema, schema_name)
@@ -432,6 +449,7 @@ class AgentDecisionProvider:
         tool_descriptions: dict[str, Any] | None = None,
         instructions: str | None = None,
         consultation: AgentConsultation | None = None,
+        should_stop: Callable[[], bool] | None = None,
     ) -> ProviderResult:
         result = self.run(
             payload,
@@ -444,6 +462,7 @@ class AgentDecisionProvider:
             step_recorder=step_recorder,
             tool_descriptions=tool_descriptions,
             consultation=consultation,
+            should_stop=should_stop,
         )
         return ProviderResult(
             decision=Decision.from_mapping(result.value),
@@ -514,6 +533,7 @@ class FallbackDecisionProvider:
         tool_descriptions: dict[str, Any] | None = None,
         instructions: str | None = None,
         consultation: AgentConsultation | None = None,
+        should_stop: Callable[[], bool] | None = None,
     ) -> ProviderResult:
         return self._attempt(
             lambda provider: provider.decide(
@@ -523,6 +543,7 @@ class FallbackDecisionProvider:
                 tool_descriptions=tool_descriptions,
                 instructions=instructions,
                 consultation=consultation,
+                should_stop=should_stop,
             )
         )
 

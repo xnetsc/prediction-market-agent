@@ -111,3 +111,26 @@ class TheSettingTests(unittest.TestCase):
 
     def test_the_default_matches_the_console_the_operator_reads(self) -> None:
         self.assertEqual(Config().agent_language, "zh")
+
+
+class TheBrowserChoosesUntilSomebodyDoesTests(unittest.TestCase):
+    """The server cannot see a browser; the page can, and it is that browser showing the reasoning."""
+
+    def test_the_default_is_taken_from_the_browser_and_never_overrides_a_choice(self) -> None:
+        import shutil
+        import subprocess
+
+        node = shutil.which("node")
+        if node is None:
+            self.skipTest("node is not installed; this check needs a JavaScript engine")
+        completed = subprocess.run(
+            [node, "tests/language_default_check.js",
+             "src/prediction_market_agent/runtime/static/dashboard-views.js"],
+            capture_output=True, text=True, timeout=60,
+        )
+        self.assertEqual(completed.returncode, 0, completed.stderr or completed.stdout)
+
+    def test_the_language_can_be_changed_where_the_reasoning_is_read(self) -> None:
+        shell = Path("src/prediction_market_agent/runtime/dashboard.py").read_text()
+        self.assertIn('id="ledgerLanguage"', shell)
+        self.assertIn("saveLedgerLanguage(this.value)", shell)

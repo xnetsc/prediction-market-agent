@@ -88,8 +88,8 @@ class ProductionApiIntegrationTests(unittest.TestCase):
             available_names = ("integration-hold",)
             unavailable = {}
 
-            def decide(self, context, *, tool_executor=None, step_recorder=None, tool_descriptions=None, instructions=None, consultation=None):
-                del context, tool_executor, step_recorder, tool_descriptions, consultation
+            def decide(self, context, *, tool_executor=None, step_recorder=None, tool_descriptions=None, instructions=None, consultation=None, should_stop=None):
+                del context, tool_executor, step_recorder, tool_descriptions, consultation, should_stop
                 return ProviderResult(
                     decision=Decision(
                         action="HOLD",

@@ -243,8 +243,14 @@ class ApplicationConfigStore:
         unknown = sorted(set(submitted) - set(_FIELD_MAP))
         if unknown:
             raise ValueError("Unknown application settings: " + ", ".join(unknown))
+        # Merged into what is already stored, never written over it. Saving one setting used to
+        # replace the whole file with that one setting, so anything submitting less than the full
+        # form reset everything it did not mention to its default - which, for paper trading, means
+        # quietly switching an account from simulated orders to real ones. Removing an override is
+        # what reset() is for; leaving a field out of a save is not a request to forget it.
         values = {
-            name: _FIELD_MAP[name].validate(value) for name, value in submitted.items()
+            **self._read_overrides(),
+            **{name: _FIELD_MAP[name].validate(value) for name, value in submitted.items()},
         }
         atomic_write_text(
             self.path,

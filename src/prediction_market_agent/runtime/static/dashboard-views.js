@@ -498,7 +498,7 @@ function activateChoiceLists(){
 let LEDGER_TAB='concluded';
 const LEDGER_TAB_NOTE={
     concluded:'每一条都是一次得出结论的判断（观望、买入、卖出、规则拒绝）。结论不等于成交。',
-    running:'模型正在分析、还没有结论的记录。这些不能删除——运行中的代码还要把结论写回去。',
+    running:'模型正在分析、还没有结论的记录。删除会同时让那次分析停下：不再花模型调用，也不会据此下单。重启前卡住、永远不会结束的记录也在这里，可以直接删。',
     failed:'没能得出结论的记录：模型调用失败、执行失败。它们会拉低 provider 排名，确认无用后可以删掉。',
 };
 
@@ -659,6 +659,59 @@ function renderDecisionLedger(rows){
     watchLedgerEnd();
 }
 
+/* The language the model writes its reasoning in follows the reader's browser until somebody chooses
+   one. The server's own default has to be something, and it cannot see a browser; the page can, and
+   it is the operator's browser that will be showing those sentences. Only an unchosen setting is
+   filled in this way - an explicit choice, including one made in another browser, is never
+   overridden - and anything that cannot be read or is not a supported language falls back to
+   Chinese. */
+function browserAgentLanguage(){
+    try{
+        const tags=[...(navigator.languages||[]),navigator.language].filter(Boolean).map(String);
+        for(const tag of tags){
+            const base=tag.toLowerCase().split('-')[0];
+            if(base==='zh')return 'zh';
+            if(base==='en')return 'en';
+        }
+    }catch(e){}
+    return 'zh';
+}
+
+async function adoptBrowserLanguageIfUnchosen(settings){
+    try{
+        const field=(settings&&settings.fields||[]).find(f=>f.name==='agent_language');
+        if(!field||field.configured)return false;
+        const language=browserAgentLanguage();
+        await post('/api/settings',{values:{agent_language:language}});
+        return true;
+    }catch(e){return false}
+}
+
+/* The same setting, on the page where its effect is read. Buried among twenty application settings it
+   could not be found, and the ledger is where somebody notices the reasoning is in the wrong
+   language. It changes what the model writes from the next round on; rows already written keep the
+   language they were written in. */
+async function syncLedgerLanguage(){
+    const select=document.getElementById('ledgerLanguage');
+    if(!select)return;
+    try{
+        const settings=await get('/api/settings');
+        const field=(settings.fields||[]).find(f=>f.name==='agent_language');
+        if(field)select.value=String(field.value||field.default||'zh');
+    }catch(e){}
+}
+
+async function saveLedgerLanguage(language){
+    const status=document.getElementById('ledgerLanguageStatus');
+    try{
+        await post('/api/settings',{values:{agent_language:language}});
+        if(status){status.className='status good';status.textContent='已保存，下一轮起生效；已写好的记录保持原来的语言。'}
+    }catch(e){
+        if(status){status.className='status danger';status.textContent='没能保存：'+(e&&e.message||e)}
+        syncLedgerLanguage();
+    }
+}
+
 /* The three diagnostic tables sit behind panels labelled "open when debugging", and were fetched on
    every visit anyway - two and a half megabytes of raw model output for twenty rows, for panels
    almost nobody opens. They load when opened, and again when opened after a refresh. */
@@ -777,12 +830,10 @@ async function forgetDecision(event,id){
     if(!confirm('删除决策 #'+id+'？\n\n这条记录参与 provider 排名与策略校准，删掉之后这些统计会变。已经在平台上发生过的动作不会被删除。'))return;
     try{
         const answer=await post('/api/decisions/forget',{decision_ids:[id]});
-        if(!answer.decisions&&answer.kept_in_progress)
-            showOperationFeedback('没有删除：这条决策还在进行中，运行中的代码正等着把结论写回这一行。等它结束后再删。','danger',true);
-        else if(!answer.decisions&&answer.kept_executed)
+        if(!answer.decisions&&answer.kept_executed)
             showOperationFeedback('没有删除：这次决策已经产生 '+answer.kept_executed+' 条真实平台动作，删掉记录会让账本与余额对不上。','danger',true);
         else
-            showOperationFeedback('已删除决策 '+answer.decisions+' 条、模型往返 '+answer.provider_turns+' 条、工具步骤 '+answer.agent_steps+' 条。');
+            showOperationFeedback('已删除决策 '+answer.decisions+' 条、模型往返 '+answer.provider_turns+' 条、工具步骤 '+answer.agent_steps+' 条'+(answer.cancelled_in_progress?'；其中 '+answer.cancelled_in_progress+' 条正在分析，已让它停下，不会再花模型调用、也不会据此下单':'')+'。');
         refreshAudit();
     }catch(e){showOperationFeedback('删除失败：'+e.message,'danger',true)}
 }

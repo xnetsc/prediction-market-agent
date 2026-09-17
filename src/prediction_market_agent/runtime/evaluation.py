@@ -7,7 +7,7 @@ from dataclasses import asdict, replace
 from typing import Any
 
 from ..agent.consultation import AgentConsultation
-from ..agent.decision import DecisionProviderError
+from ..agent.decision import DecisionCancelled, DecisionProviderError
 from ..agent.evolution import prompt_json_payload, render_overlay_block
 from ..agent.research import ResearchToolContext, ResearchToolbox
 from ..plugin_system.contracts import Market, OrderBook, Outcome, Topic, TopicDetail
@@ -233,7 +233,12 @@ class MarketEvaluationMixin:
                     strategy_payload, "CONFIGURED_DECISION_STRATEGY"
                 ),
                 consultation=consultation,
+                should_stop=lambda: self.memory.is_cancelled(decision_id),
             )
+        except DecisionCancelled:
+            # The row is gone; there is nothing to record against and nothing to act on.
+            LOGGER.info("decision %s was deleted while being made; stopped", decision_id)
+            return
         except DecisionProviderError as error:
             self.memory.record_turn(
                 platform=platform,
@@ -268,6 +273,11 @@ class MarketEvaluationMixin:
             status="OK",
             decision_id=decision_id,
         )
+        if self.memory.is_cancelled(decision_id):
+            # Deleted after the model answered but before anything was done about it. Acting on it
+            # now would place an order for a decision the operator has already thrown away.
+            LOGGER.info("decision %s was deleted before execution; not acted on", decision_id)
+            return
         action_rule = self.risk.evaluate(
             "agent:actions",
             result.decision.action,

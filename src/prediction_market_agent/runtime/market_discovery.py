@@ -4,7 +4,7 @@ import logging
 import time
 from typing import Any, Callable
 
-from ..agent.decision import DecisionProviderError
+from ..agent.decision import DecisionCancelled, DecisionProviderError
 from ..agent.evolution import (
     DISCOVERY_EVOLUTION_KEY,
     LESSON_DEVIATION,
@@ -519,7 +519,13 @@ class DiscoveryEngine:
                 final_step_name="FINAL_SELECTION",
                 tool_executor=toolbox.execute,
                 tool_descriptions=toolbox.descriptions,
+                should_stop=lambda: self.memory.is_cancelled(decision_id),
             )
+        except DecisionCancelled:
+            # The round's record was deleted while the agent was still choosing. Its choices have
+            # nowhere to be recorded, so this round selects nothing rather than acting on them.
+            LOGGER.info("discovery round %s on %s was deleted; stopped", decision_id, platform)
+            return [], "cancelled", "deleted while running"
         except (DecisionProviderError, AttributeError, TypeError) as error:
             # Losing the Agent must not stop the platform from trading. Fall back to the
             # deterministic prescore order and mark the cycle so the audit trail shows which
@@ -548,6 +554,9 @@ class DiscoveryEngine:
                 "mechanical",
                 "",
             )
+        if self.memory.is_cancelled(decision_id):
+            LOGGER.info("discovery round %s on %s was deleted after answering", decision_id, platform)
+            return [], "cancelled", "deleted while running"
         selections = [item for item in result.value.get("selections", []) if isinstance(item, dict)]
         skipped_reason = str(result.value.get("skipped_reason", ""))
         # How soon to come back and what to go looking for are judgements about this platform right

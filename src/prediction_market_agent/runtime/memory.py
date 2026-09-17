@@ -4,6 +4,14 @@ import json
 import sqlite3
 import threading
 import time
+
+_CANCELLED: set[tuple[str, int]] = set()
+_CANCELLED_LOCK = threading.Lock()
+"""Decisions deleted while still running, so the code holding them can stop.
+
+Kept at module level rather than on an instance: the console deletes through its own
+SessionMemory and the engine runs through another, and a flag only one of them could see
+would be a cancellation nobody obeyed."""
 from pathlib import Path
 from typing import Any
 
@@ -456,7 +464,13 @@ class SessionMemory:
             ),
         )
         self.connection.commit()
-        return int(cursor.lastrowid)
+        decision_id = int(cursor.lastrowid)
+        # Anything registered under this id belonged to an older row: a database recreated since,
+        # or a deleted row whose id was reused. It must not stop the decision just opened, and
+        # clearing it here is also what keeps the register from growing without end.
+        with _CANCELLED_LOCK:
+            _CANCELLED.discard(self._cancel_key(decision_id))
+        return decision_id
 
     def complete_decision(
         self,
@@ -819,6 +833,21 @@ class SessionMemory:
             return "failed"
         return "concluded"
 
+    def _cancel_key(self, decision_id: int) -> tuple[str, int]:
+        # Ids restart at one in every database, so an id alone names a different decision in each
+        # of them. Keyed by the file as well, a cancellation can only ever stop the row it was for.
+        return (str(Path(self.path).resolve()), int(decision_id))
+
+    def cancel_decision(self, decision_id: int) -> None:
+        with _CANCELLED_LOCK:
+            _CANCELLED.add(self._cancel_key(decision_id))
+
+    def is_cancelled(self, decision_id: int | None) -> bool:
+        if decision_id is None:
+            return False
+        with _CANCELLED_LOCK:
+            return self._cancel_key(decision_id) in _CANCELLED
+
     IN_PROGRESS = "STARTED"
     """The status a decision carries while the code that opened it is still running.
 
@@ -843,8 +872,7 @@ class SessionMemory:
         not merely look untidy, it goes on shaping behaviour with evidence that was never about
         the thing it is now counted against.
 
-        A decision still in progress is not removed either: the code that opened it is still
-        running and will come back to complete it.
+        A decision still in progress is removed too, and the analysis behind it is told to stop.
 
         What actually happened at a venue is not removed with it. The account's cash and positions
         are kept as their own state rather than derived from these rows, so deleting an executed
@@ -855,7 +883,7 @@ class SessionMemory:
         if not selected:
             return {
                 "decisions": 0, "provider_turns": 0, "agent_steps": 0,
-                "kept_executed": 0, "kept_in_progress": 0,
+                "kept_executed": 0, "cancelled_in_progress": 0,
             }
         marks = ",".join("?" for _ in selected)
         running = {
@@ -865,13 +893,13 @@ class SessionMemory:
                 [*selected, self.IN_PROGRESS],
             )
         }
-        selected = [item for item in selected if item not in running]
-        if not selected:
-            return {
-                "decisions": 0, "provider_turns": 0, "agent_steps": 0,
-                "kept_executed": 0, "kept_in_progress": len(running),
-            }
-        marks = ",".join("?" for _ in selected)
+        # A row still marked as running is deleted like any other, and the analysis behind it is
+        # told to stop. Refusing it instead left rows stuck forever whenever the process that held
+        # them was gone - a restart mid-analysis leaves a STARTED row nothing will ever complete -
+        # and letting the analysis carry on after the row was removed would be spending model calls
+        # on a conclusion with nowhere to go.
+        for decision_id in running:
+            self.cancel_decision(decision_id)
         executed = self.connection.execute(
             f"SELECT COUNT(*) FROM execution_actions WHERE decision_id IN ({marks})",
             selected,
@@ -887,7 +915,7 @@ class SessionMemory:
         if not removable:
             return {
                 "decisions": 0, "provider_turns": 0, "agent_steps": 0,
-                "kept_executed": int(executed), "kept_in_progress": len(running),
+                "kept_executed": int(executed), "cancelled_in_progress": len(running),
             }
         marks = ",".join("?" for _ in removable)
         turns = self.connection.execute(
@@ -905,7 +933,7 @@ class SessionMemory:
             "provider_turns": int(turns),
             "agent_steps": int(steps),
             "kept_executed": int(executed),
-            "kept_in_progress": len(running),
+            "cancelled_in_progress": len(running),
         }
 
     def _decisions_to_forget(

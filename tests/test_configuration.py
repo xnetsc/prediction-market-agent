@@ -1,7 +1,7 @@
 import json
 
 from ._support import *
-from prediction_market_agent.core.config import APPLICATION_FIELDS
+from prediction_market_agent.core.config import APPLICATION_FIELDS, ApplicationConfigStore
 
 class ConfigurationTests(unittest.TestCase):
     def test_platform_credentials_are_plugin_private_and_manifests_are_redacted(self) -> None:
@@ -116,3 +116,38 @@ class ShippedDefaultSelectionTests(unittest.TestCase):
         self.assertEqual(
             enabled["api"], ["binance", "polymarket"], "platforms stay discoverable"
         )
+
+
+class SavingOneSettingKeepsTheRestTests(unittest.TestCase):
+    """A save that mentions one setting is not a request to forget every other one."""
+
+    def _store(self):
+        import tempfile
+
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        return ApplicationConfigStore(Path(directory.name) / "application.json")
+
+    def test_changing_the_language_does_not_switch_paper_trading_off(self) -> None:
+        """Replacing the file would have turned simulated orders into real ones, silently."""
+        store = self._store()
+        store.save({"paper_trading": "on", "paper_trading_funds": 5000})
+        store.save({"agent_language": "en"})
+        values = store.values()
+        self.assertEqual(values["paper_trading"], "on")
+        self.assertEqual(values["paper_trading_funds"], 5000)
+        self.assertEqual(values["agent_language"], "en")
+
+    def test_a_later_save_still_overwrites_the_setting_it_names(self) -> None:
+        store = self._store()
+        store.save({"agent_language": "en"})
+        store.save({"agent_language": "zh"})
+        self.assertEqual(store.values()["agent_language"], "zh")
+
+    def test_forgetting_an_override_is_still_what_reset_is_for(self) -> None:
+        store = self._store()
+        store.save({"paper_trading": "on", "agent_language": "en"})
+        store.reset(["paper_trading"])
+        values = store.values()
+        self.assertEqual(values["paper_trading"], "off")
+        self.assertEqual(values["agent_language"], "en")

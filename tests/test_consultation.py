@@ -1005,8 +1005,8 @@ class LedgerDeleteControlTests(unittest.TestCase):
         self.assertIn("confirm(", handler, "a destructive control on every row needs a check")
 
 
-class RunningDecisionsAreProtectedTests(unittest.TestCase):
-    """Something is holding that id and will come back to write the conclusion into it."""
+class RunningDecisionsCanBeDeletedAndStopTests(unittest.TestCase):
+    """A row stuck in STARTED after a restart must be removable, and removing one must end its work."""
 
     def setUp(self) -> None:
         temp = tempfile.TemporaryDirectory()
@@ -1019,37 +1019,95 @@ class RunningDecisionsAreProtectedTests(unittest.TestCase):
             strategy_name="s", strategy_sha256="x", context={},
         )
 
-    def test_a_decision_still_running_is_refused(self) -> None:
+    def test_a_running_decision_is_deleted_and_marked_cancelled(self) -> None:
         decision_id = self._open()
         answer = self.memory.forget_decisions(decision_ids=[decision_id])
-        self.assertEqual(answer["decisions"], 0)
-        self.assertEqual(answer["kept_in_progress"], 1)
+        self.assertEqual(answer["decisions"], 1)
+        self.assertEqual(answer["cancelled_in_progress"], 1)
+        self.assertTrue(self.memory.is_cancelled(decision_id))
 
-    def test_the_conclusion_still_lands_after_a_refused_delete(self) -> None:
-        """An UPDATE matching no row is not an error, so the loss would have been silent."""
+    def test_a_new_decision_never_inherits_an_old_cancellation(self) -> None:
+        """Ids restart in every database; a cancellation must only ever stop the row it was for."""
         decision_id = self._open()
         self.memory.forget_decisions(decision_ids=[decision_id])
-        self.memory.complete_decision(
-            decision_id, provider="p", model_raw_output="", status="NO_ACTION",
+        self.assertTrue(self.memory.is_cancelled(decision_id))
+        reopened = self._open(token="o-new")
+        self.assertFalse(self.memory.is_cancelled(reopened))
+
+    def test_a_cancellation_in_one_database_does_not_reach_another(self) -> None:
+        decision_id = self._open()
+        self.memory.forget_decisions(decision_ids=[decision_id])
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        elsewhere = SessionMemory(Path(temp.name) / "other.sqlite3")
+        same_id = elsewhere.begin_decision(
+            platform="venue", market_topic_id="t", market_id="m", token_id="o",
+            strategy_name="s", strategy_sha256="x", context={},
         )
-        [status] = self.memory.connection.execute(
-            "SELECT status FROM decision_ledger WHERE id = ?", (decision_id,)
-        ).fetchone()
-        self.assertEqual(status, "NO_ACTION")
+        self.assertEqual(same_id, decision_id, "the point is that both databases use this id")
+        self.assertFalse(elsewhere.is_cancelled(same_id))
 
-    def test_a_bulk_delete_skips_the_running_one_and_takes_the_rest(self) -> None:
+    def test_the_cancellation_is_visible_to_another_memory_instance(self) -> None:
+        """The console deletes through one instance and the engine runs through another."""
+        decision_id = self._open()
+        self.memory.forget_decisions(decision_ids=[decision_id])
+        other = SessionMemory(self.memory.path)
+        self.assertTrue(other.is_cancelled(decision_id))
+
+    def test_a_finished_decision_is_not_reported_as_cancelled(self) -> None:
         finished = self._open(token="o-done")
-        self.memory.complete_decision(finished, provider="p", status="PROVIDER_ERROR")
-        running = self._open(token="o-running")
-        answer = self.memory.forget_decisions(platform="venue")
+        self.memory.complete_decision(finished, provider="p", status="NO_ACTION")
+        answer = self.memory.forget_decisions(decision_ids=[finished])
         self.assertEqual(answer["decisions"], 1)
-        self.assertEqual(answer["kept_in_progress"], 1)
-        remaining = [
-            row[0] for row in self.memory.connection.execute("SELECT id FROM decision_ledger")
-        ]
-        self.assertEqual(remaining, [running])
+        self.assertEqual(answer["cancelled_in_progress"], 0)
 
-    def test_the_page_says_why_nothing_was_deleted(self) -> None:
+    def test_the_page_describes_what_deleting_a_running_row_does(self) -> None:
         script = Path("src/prediction_market_agent/runtime/static/dashboard-views.js").read_text()
-        self.assertIn("answer.kept_in_progress", script)
-        self.assertIn("还在进行中", script)
+        self.assertIn("answer.cancelled_in_progress", script)
+        self.assertNotIn("kept_in_progress", script)
+
+
+class CancelledDecisionsStopWorkingTests(unittest.TestCase):
+    """Deleted means stopped: no more model calls spent, and above all no order placed."""
+
+    def test_the_control_loop_stops_before_its_next_model_call(self) -> None:
+        from prediction_market_agent.agent.decision import AgentDecisionProvider, DecisionCancelled
+
+        calls: list[str] = []
+        stop = {"now": False}
+
+        class Backend:
+            name = "b"
+
+            def complete(self, prompt, schema, schema_name):
+                calls.append(schema_name)
+                stop["now"] = True  # deleted while this call was in flight
+                return StructuredResult(
+                    value={"next_action": "GET_TOPIC", "arguments_json": "{}", "reason": "r"},
+                    raw_output="{}",
+                )
+
+        provider = AgentDecisionProvider(Backend(), config(Path("/tmp/cancel-state.json")))
+        with self.assertRaises(DecisionCancelled):
+            provider.decide(
+                {"market": {}},
+                tool_executor=lambda name, arguments: {},
+                tool_descriptions={"GET_TOPIC": {"purpose": "p", "arguments": {}}},
+                should_stop=lambda: stop["now"],
+            )
+        self.assertEqual(calls, ["agent_control"], "it asked the model again after being deleted")
+
+    def test_cancellation_does_not_count_against_the_provider(self) -> None:
+        """Nothing failed, so it must not fall through to the next provider or be scored as a fault."""
+        from prediction_market_agent.agent.decision import DecisionCancelled, DecisionProviderError
+
+        self.assertFalse(issubclass(DecisionCancelled, DecisionProviderError))
+
+    def test_nothing_is_executed_for_a_decision_deleted_after_the_model_answered(self) -> None:
+        import inspect
+        from prediction_market_agent.runtime import evaluation
+
+        source = inspect.getsource(evaluation)
+        guard = source.index("if self.memory.is_cancelled(decision_id):")
+        self.assertLess(guard, source.index("action_rule = self.risk.evaluate("))
+        self.assertLess(guard, source.index("execution = self._execute_decision("))
