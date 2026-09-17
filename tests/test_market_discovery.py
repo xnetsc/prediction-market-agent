@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import tempfile
 import time
 import unittest
@@ -1013,3 +1014,40 @@ class _HorizonPlatform(FakePlugin):
     def get_topic(self, topic_id: str):
         detail = super().get_topic(topic_id)
         return replace(detail, end_time_ms=int(time.time() * 1000) + _HORIZONS[topic_id] * 1000)
+
+
+class AnEmptyHorizonCostsNothingTests(unittest.TestCase):
+    """Most markets on a venue settle months out; that must not be a model call each round."""
+
+    def setUp(self) -> None:
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.memory = SessionMemory(Path(self.temp.name) / "m.sqlite3")
+
+    class _Distant(FakePlugin):
+        def __init__(self) -> None:
+            super().__init__(topics=3)
+
+        def get_topic(self, topic_id: str):
+            detail = super().get_topic(topic_id)
+            return replace(detail, end_time_ms=int(time.time() * 1000) + 90 * 86400 * 1000)
+
+    def test_nothing_in_range_is_recorded_without_asking_a_model(self) -> None:
+        from prediction_market_agent.agent.market_discovery import BuiltInMarketDiscovery
+
+        provider = RecordingProvider()
+        selected = DiscoveryEngine(
+            memory=self.memory, provider=provider,
+            strategy=BuiltInMarketDiscovery(horizon_days=3), evolution_enabled=False,
+        ).discover(platform="fake", plugin=self._Distant(), maximum_topics=2)
+        self.assertEqual(selected, ())
+        self.assertEqual(provider.requests, [], "a model was asked to choose from an empty list")
+        row = self.memory.connection.execute(
+            "SELECT status, provider, final_decision_json FROM decision_ledger ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+        self.assertEqual(row[0], "NO_ACTION")
+        self.assertEqual(row[1], "", "no provider was used, so none is named")
+        decision = json.loads(row[2])
+        self.assertIn("3 天之外结算", decision["skipped_reason"])
+        self.assertIn("没有调用模型", decision["skipped_reason"])
+        self.assertEqual(decision["headline"], "本轮没有 3 天内结算的标的")

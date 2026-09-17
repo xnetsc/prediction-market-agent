@@ -527,6 +527,30 @@ class DiscoveryEngine:
                     continue
                 kept.append(candidate)
             candidates = kept
+        if too_far and not candidates:
+            # Nothing left to choose between. Asking a model to pick from an empty list costs a
+            # call to be told what the gate already knows, and on a venue where most markets
+            # settle months out this is the ordinary case rather than the exception.
+            reason = (
+                f"本轮 {too_far} 个候选都在 {horizon_days} 天之外结算，没有可做的标的，"
+                "没有调用模型"
+            )
+            decision_id = self.memory.begin_decision(
+                platform=platform, market_topic_id="", market_id="", token_id="",
+                strategy_name=f"{self.strategy.name}:discovery",
+                strategy_sha256=self.strategy.sha256,
+                context={"stage": "discovery", "candidates": [],
+                         "maximum_selections": maximum_topics,
+                         "dropped_settling_after_horizon": too_far,
+                         "horizon_days": horizon_days},
+            )
+            self.memory.complete_decision(
+                decision_id, provider="", status="NO_ACTION",
+                final_decision={"selections": [], "skipped_reason": reason,
+                                "headline": f"本轮没有 {horizon_days} 天内结算的标的"},
+            )
+            LOGGER.info("platform=%s %s", platform, reason)
+            return [], "horizon", reason
         request = {
             "platform": platform,
             "platform_capabilities": plugin.capabilities.to_dict(),
