@@ -1051,3 +1051,81 @@ class AnEmptyHorizonCostsNothingTests(unittest.TestCase):
         self.assertIn("3 天之外结算", decision["skipped_reason"])
         self.assertIn("没有调用模型", decision["skipped_reason"])
         self.assertEqual(decision["headline"], "本轮没有 3 天内结算的标的")
+
+
+class WhenToComeBackTests(unittest.TestCase):
+    """The interval is the soonest moment something could change what the robot would do."""
+
+    def setUp(self) -> None:
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.memory = SessionMemory(Path(self.temp.name) / "m.sqlite3")
+
+    def test_the_round_is_told_what_moves_the_interval(self) -> None:
+        from prediction_market_agent.agent.market_discovery import BuiltInMarketDiscovery
+
+        text = BuiltInMarketDiscovery(horizon_days=3).instructions
+        for factor in (
+            "Deadlines already in range",
+            "Markets about to come into range",
+            "Dated catalysts",
+            "How fast this venue is actually repricing",
+            "When the resolving source publishes",
+            "What is already open here",
+            "Whether this venue lists anything new",
+            "What the last few rounds produced",
+            "What is happening outside this venue",
+        ):
+            with self.subTest(factor=factor):
+                self.assertIn(factor, text)
+        self.assertIn("A survey is not free", text)
+        self.assertIn("nearest_settlement_outside_horizon_seconds", text)
+        # Markets are listed late; the ones worth naming are the ones the world has but the venue
+        # does not yet - a tournament under way, an election days out.
+        self.assertIn("a tournament in progress", text)
+        self.assertIn("Read the news for the few events", text)
+
+    def test_how_long_until_the_closest_one_is_tradeable_is_supplied(self) -> None:
+        """Timing the next look to a market entering the window needs the number, not a hint."""
+        from prediction_market_agent.agent.market_discovery import BuiltInMarketDiscovery
+
+        provider = RecordingProvider()
+        DiscoveryEngine(
+            memory=self.memory, provider=provider,
+            strategy=BuiltInMarketDiscovery(horizon_days=3), evolution_enabled=False,
+        ).discover(platform="fake", plugin=_HorizonPlatform(), maximum_topics=2)
+        request = provider.requests[0]
+        # Topic 3 settles in 40 days, so it becomes tradeable 37 days from now.
+        self.assertAlmostEqual(
+            request["nearest_settlement_outside_horizon_seconds"], 37 * 86400, delta=120
+        )
+        self.assertEqual(request["horizon_days"], 3)
+
+    def test_an_empty_window_paces_itself_without_a_model(self) -> None:
+        from prediction_market_agent.agent.market_discovery import BuiltInMarketDiscovery
+        from prediction_market_agent.runtime.market_discovery import HORIZON_WAIT_CEILING_SECONDS
+
+        self.memory.save_survey_plan(platform="fake", queries=["fed decision"],
+                                     next_scan_seconds=900, reason="earlier round")
+        provider = RecordingProvider()
+        DiscoveryEngine(
+            memory=self.memory, provider=provider,
+            strategy=BuiltInMarketDiscovery(horizon_days=3), evolution_enabled=False,
+        ).discover(platform="fake", plugin=_DistantPlatform(), maximum_topics=2)
+        self.assertEqual(provider.requests, [])
+        plan = self.memory.survey_plan("fake")
+        self.assertEqual(plan["next_scan_seconds"], HORIZON_WAIT_CEILING_SECONDS,
+                         "a wait on arithmetic alone is capped; the venue lists new markets too")
+        self.assertEqual(plan["queries"], ["fed decision"], "the searches still have work to do")
+        self.assertIn("没有可做的标的", plan["reason"])
+
+
+class _DistantPlatform(FakePlugin):
+    """Everything settles three months out."""
+
+    def __init__(self) -> None:
+        super().__init__(topics=3)
+
+    def get_topic(self, topic_id: str):
+        detail = super().get_topic(topic_id)
+        return replace(detail, end_time_ms=int(time.time() * 1000) + 90 * 86400 * 1000)

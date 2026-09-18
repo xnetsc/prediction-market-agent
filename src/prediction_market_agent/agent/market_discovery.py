@@ -74,17 +74,55 @@ SET THE NEXT LOOK
 You also decide when this platform is worth reading again, and what to go looking for when it is.
 Both are judgements about this venue right now and nobody else here has just read it.
 
-- `next_scan_seconds`: how long to wait before the next survey. The platform enforces its own
-  minimum, so you can ask to wait longer but never to come back sooner. A venue whose prices barely
-  moved and whose catalysts are weeks out does not need looking at every minute, and surveying it
-  anyway spends a model call to learn nothing. Something resolving within the hour, or a book that
-  moved since last time, is the opposite case. Zero means "no opinion, use the minimum".
+- `next_scan_seconds`: how long to wait before the next survey. It is one question - when is the
+  soonest moment something could change what this robot would do? - and the answer is that gap, not
+  a habit. What moves it, in the order it usually bites:
+  - Deadlines already in range. A candidate settling in hours has to be seen while it is still
+    tradeable; one minutes from closing is past being worth a slot at all.
+  - Markets about to come into range. `nearest_settlement_outside_horizon_seconds` says how long
+    until the closest market now dated too far out becomes tradeable. Sleeping past it wastes the
+    window it opens; waking far before it buys nothing.
+  - Dated catalysts. A rate decision, a print, a vote, a fixture at a known hour: come back around
+    it. Whether the number lands at the top of the hour is not a reason to look every minute until
+    then.
+  - How fast this venue is actually repricing. You just read these books and this listing, and the
+    history says what they were before: a shortlist that moved since last time is worth rereading
+    soon; one quoted at the same prices as an hour ago is not, whatever is going on elsewhere.
+  - When the resolving source publishes. A market that settles on a figure released at a fixed time
+    cannot change before that figure lands, however interesting it looks in between.
+  - What is already open here. An unfilled order, a position whose exit case could turn, a
+    settlement due to be claimed - each is a reason to come back that has nothing to do with the
+    listing.
+  - Whether this venue lists anything new. If this survey turned up markets that were not here last
+    time, the listing is moving and worth rereading; if it returns the same slate every round, it is
+    not, and the gap should grow rather than repeat the same read.
+  - What the last few rounds produced. Round after round that found nothing says the interval is too
+    short for this venue, not that the next one will be different - but never stretch it past a
+    deadline or catalyst above.
+  - What is happening outside this venue. Every market here exists because something is going on in
+    the world, and the world is where it starts: a tournament already under way, a summit this week,
+    a verdict due, a release scheduled, a story that broke this morning. An event that starts, moves
+    or resolves before your next look is both when its markets get listed and when their prices
+    move - and none of that is visible in the listing you just read, because the market for it may
+    not exist yet. Read the news for the few events that could actually change this venue's slate
+    inside your horizon, and set the interval so the robot is here when they do, not a day later.
+  A survey is not free: it spends a model call and part of the venue's read budget, and while it
+  runs nothing else is being decided. Ask for a short wait only with one of these to point at. The
+  platform enforces its own minimum, so you can ask to wait longer but never to come back sooner,
+  and zero means "no opinion, use the minimum".
 - `next_survey_queries`: what to search for next round, on top of the platform's own listing. The
   listing is one fixed opinion - most traded first - and a robot that only sees that can only find
-  things there. Name the catalyst, the category or the question you want pulled in: a dated event
-  you know is coming, a theme that moved today, something you saw quoted elsewhere and want priced
-  here. Leave it empty when the listing is genuinely where you want to be looking.
-- `pacing_reason`: one sentence on why, so the next round can tell whether the guess held.
+  things there. It is a particularly poor way to find what settles soon, which is what this runtime
+  trades: the busiest markets are usually the distant ones. Name the catalyst, the category or the
+  question you want pulled in: something dated inside the horizon, an event you know is coming, a
+  theme that moved today, something you saw quoted elsewhere and want priced here. The ones worth
+  most are the ones not listed yet: a tournament in progress, an election days away, a hearing on
+  the calendar, whatever the news is actually about this week. Venues list those late, often only
+  once the event is close, so naming them is how they get found at all - and naming them is cheap,
+  while missing the week they are tradeable is not. Leave it empty only when the listing is
+  genuinely where you want to be looking.
+- `pacing_reason`: one sentence on why - which of the above decided it, and what you expect to be
+  different by then, so the next round can tell whether the guess held.
 
 OUTPUT
 Return the selected topics in priority order, each with the specific observation that earned the

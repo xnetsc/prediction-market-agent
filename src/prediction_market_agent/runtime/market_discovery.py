@@ -24,6 +24,13 @@ from .memory import SessionMemory
 
 LOGGER = logging.getLogger(__name__)
 
+HORIZON_WAIT_CEILING_SECONDS = 6 * 3600
+"""Longest the framework will pace itself on arithmetic alone.
+
+Waiting exactly until the nearest market enters the window is right about that market and blind to
+everything else: a venue lists new ones, and nobody asked this robot to be asleep for two days.
+"""
+
 
 DISCOVERY_SCHEMA: dict[str, Any] = {
     "type": "object",
@@ -517,6 +524,9 @@ class DiscoveryEngine:
         # part of what the round is told, so an empty shortlist is not a mystery.
         horizon_days = int(getattr(self.strategy, "horizon_days", 0) or 0)
         too_far = 0
+        # When the closest of the dropped ones becomes tradeable. Asking the round to time its next
+        # look to markets entering the window is only answerable if it is told when that happens.
+        nearest_outside: float | None = None
         if horizon_days > 0:
             limit = horizon_days * 86400
             kept = []
@@ -524,6 +534,8 @@ class DiscoveryEngine:
                 seconds = candidate.get("seconds_remaining")
                 if isinstance(seconds, (int, float)) and seconds > limit:
                     too_far += 1
+                    entering = float(seconds) - limit
+                    nearest_outside = min(nearest_outside or entering, entering)
                     continue
                 kept.append(candidate)
             candidates = kept
@@ -542,11 +554,26 @@ class DiscoveryEngine:
                 context={"stage": "discovery", "candidates": [],
                          "maximum_selections": maximum_topics,
                          "dropped_settling_after_horizon": too_far,
-                         "horizon_days": horizon_days},
+                         "horizon_days": horizon_days,
+                         "nearest_settlement_outside_horizon_seconds": int(nearest_outside or 0)},
             )
+            # When to come back is arithmetic here rather than judgement: nothing is tradeable
+            # until the closest of these enters the window, and surveying before then finds the
+            # same nothing. The plugin's own minimum still applies, and the searches the last round
+            # asked for are kept - they are how anything new gets found in the meantime.
+            waiting = int(min(nearest_outside or 0, HORIZON_WAIT_CEILING_SECONDS))
+            if waiting > 0:
+                self.memory.save_survey_plan(
+                    platform=platform,
+                    queries=[str(item) for item in (self.memory.survey_plan(platform).get("queries") or [])],
+                    next_scan_seconds=waiting,
+                    reason=f"{reason}；最近的一个还要 {waiting // 3600} 小时 {waiting % 3600 // 60} 分钟才进入窗口",
+                )
             self.memory.complete_decision(
                 decision_id, provider="", status="NO_ACTION",
                 final_decision={"selections": [], "skipped_reason": reason,
+                                "next_scan_seconds": waiting, "next_survey_queries": [],
+                                "pacing_reason": f"没有可做的标的，等最近的一个进入 {horizon_days} 天窗口",
                                 "headline": f"本轮没有 {horizon_days} 天内结算的标的"},
             )
             LOGGER.info("platform=%s %s", platform, reason)
@@ -557,7 +584,10 @@ class DiscoveryEngine:
             "maximum_selections": maximum_topics,
             "discovery_strategy": prompt_json_payload(payload),
             "candidates": candidates,
-            **({"dropped_settling_after_horizon": too_far} if too_far else {}),
+            **({"dropped_settling_after_horizon": too_far,
+                "horizon_days": horizon_days,
+                "nearest_settlement_outside_horizon_seconds": int(nearest_outside or 0)}
+               if too_far else {}),
         }
         # Every call to a model leaves a row, this one included. It used to leave none: a discovery
         # round that failed, or that judged nothing worth a slot, produced no ledger entry at all,
@@ -575,7 +605,9 @@ class DiscoveryEngine:
             context={"stage": "discovery", "candidates": candidates,
                      "maximum_selections": maximum_topics,
                      **({"dropped_settling_after_horizon": too_far,
-                         "horizon_days": horizon_days} if too_far else {})},
+                         "horizon_days": horizon_days,
+                         "nearest_settlement_outside_horizon_seconds": int(nearest_outside or 0)}
+                        if too_far else {})},
         )
         try:
             result = self.provider.run(
