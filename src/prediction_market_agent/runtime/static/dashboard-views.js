@@ -1471,6 +1471,44 @@ async function forgetDecision(event,id){
 
 /* Plugin notices: the plugin declares what it may need to say, the framework only renders it.
    Nothing here knows which plugin it is talking to or what any notice means. */
+function noticeContentHtml(box,content){
+    /* Whatever the plugin put in the notice, drawn so a person can read and copy it. This used to
+       be a JSON dump, which is fine for a status and useless for the thing an operator actually has
+       to act on - an address they must paste somewhere else without mistyping a character. */
+    if(content===null||content===undefined)return;
+    if(typeof content!=='object'||Array.isArray(content)){
+        const line=controlNode('pre',Array.isArray(content)?content.join('\n'):String(content),box);
+        line.className='notice-content';
+        return;
+    }
+    const list=controlNode('dl','',box);list.className='notice-facts';
+    for(const [key,value] of Object.entries(content)){
+        controlNode('dt',key,list);
+        const cell=controlNode('dd','',list);
+        if(Array.isArray(value)){
+            const items=controlNode('ul','',cell);
+            for(const item of value)controlNode('li',typeof item==='object'?JSON.stringify(item):String(item),items);
+            continue;
+        }
+        if(value&&typeof value==='object'){
+            const nested=controlNode('pre',JSON.stringify(value,null,2),cell);
+            nested.className='notice-content';
+            continue;
+        }
+        const text=String(value??'');
+        controlNode('span',text,cell);
+        // Long, unmemorable and unforgiving of a typo: exactly what a copy button is for.
+        if(text.length>=20){
+            const copy=controlNode('button','复制',cell);
+            copy.className='notice-copy';
+            copy.onclick=async()=>{
+                try{await navigator.clipboard.writeText(text);copy.textContent='已复制'}
+                catch(e){copy.textContent='复制失败，请手动选中'}
+                setTimeout(()=>{copy.textContent='复制'},2000);
+            };
+        }
+    }
+}
 async function renderPluginNotices(card,kind,plugin){
     const host=controlNode('div','',card);host.className='plugin-notices';
     host.innerHTML='<p class="muted">正在读取插件状态…</p>';
@@ -1484,8 +1522,7 @@ async function renderPluginNotices(card,kind,plugin){
         controlNode('h5',notice.title,head);
         if(notice.description)controlNode('p',notice.description,box).className='muted';
         if(notice.error){controlNode('p','插件报告错误：'+notice.error,box).className='danger';continue}
-        const body=controlNode('pre','',box);body.className='notice-content';
-        body.textContent=JSON.stringify(notice.content??{},null,2);
+        noticeContentHtml(box,notice.content);
         const verbs=[['confirm',notice.action_label,notice.action_fields||[]],['dismiss',notice.dismiss_label,notice.dismiss_fields||[]]].filter(v=>v[1]);
         if(!verbs.length)continue;
         const inputs=new Map();
@@ -1497,15 +1534,25 @@ async function renderPluginNotices(card,kind,plugin){
         }
         const bar=controlNode('div','',box);bar.className='toolbar';
         const status=controlNode('span','',bar);status.className='status muted';
+        if(notice.action_note)controlNode('p',notice.action_note,box).className='muted notice-waiting';
         const run=async(action,label)=>{
             const button=controlNode('button',label,bar);
             if(action==='confirm')button.className='primary';
+            // The plugin is waiting for something it can see and the page cannot - a chain
+            // confirmation, a code - so it says the button is not usable yet, and why.
+            if(action==='confirm'&&notice.action_disabled){
+                button.disabled=true;
+                button.title=notice.action_note||'';
+            }
             button.onclick=async()=>{
                 button.disabled=true;setOperationStatus(status,'处理中…','pending');
                 try{
                     const values={};for(const [name,input] of inputs)values[name]=input.value;
                     const answer=await post('/api/plugins/notices/action',{kind,name:plugin.name,key:notice.key,action,values});
-                    setOperationStatus(status,answer.message||(answer.ok?'完成':'未完成'),answer.ok?'':'danger');
+                    /* Not done is not the same as failed: a plugin waiting on something says so
+                       with `pending`, and a wait drawn in red reads as a mistake the operator made. */
+                    setOperationStatus(status,answer.message||(answer.ok?'完成':'未完成'),
+                        answer.ok?'':answer.pending?'pending':'danger');
                     /* Some answers are the point of pressing the button, not a report on it.
                        A plugin that returns `reveal` has produced something the operator has to
                        read and keep, so it is shown where it can be selected and copied - and the
@@ -1522,7 +1569,11 @@ async function renderPluginNotices(card,kind,plugin){
                         };
                         button.disabled=false;return;
                     }
-                    if(answer.ok){renderPluginNotices(card,kind,plugin);host.remove()}
+                    /* Redrawn whatever the answer was: "not found", "still confirming" and
+                       "arrived" are all states of the same panel, and the plugin is the only
+                       thing that knows which one it is in now. */
+                    renderPluginNotices(card,kind,plugin);
+                    host.remove();
                     if(LAST_MANAGER)refreshAttention(LAST_MANAGER);
                 }catch(e){setOperationStatus(status,e.message,'danger')}
                 button.disabled=false;

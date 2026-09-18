@@ -183,3 +183,74 @@ class CredentialHonestyTests(unittest.TestCase):
         self.assertEqual(fields["POLYMARKET_CLOB_URL"], PRODUCTION.clob_url)
         self.assertEqual(fields["POLYMARKET_RELAYER_URL"], PRODUCTION.relayer_url)
         self.assertEqual(fields["POLYMARKET_CHAIN_ID"], PRODUCTION.chain_id)
+
+
+class AButtonCanSayItIsNotUsableYetTests(unittest.TestCase):
+    """Waiting for a chain confirmation is the plugin's business; the button is the framework's."""
+
+    def test_a_plugin_may_grey_out_its_own_button_and_say_why(self) -> None:
+        [notice] = validated_notices([{
+            "key": "deposit", "title": "我要充值", "kind": "confirm",
+            "content": {}, "action_label": "我已充值，去查",
+            "action_disabled": True, "action_note": "确认中（4/12 个确认）",
+        }])
+        self.assertTrue(notice["action_disabled"])
+        self.assertEqual(notice["action_note"], "确认中（4/12 个确认）")
+
+    def test_an_ordinary_notice_has_a_usable_button(self) -> None:
+        [notice] = validated_notices([{
+            "key": "k", "title": "t", "kind": "confirm", "content": {}, "action_label": "去",
+        }])
+        self.assertFalse(notice["action_disabled"])
+        self.assertEqual(notice["action_note"], "")
+
+    def test_the_page_draws_both_and_asks_again_after_every_answer(self) -> None:
+        views = Path("src/prediction_market_agent/runtime/static/dashboard-views.js").read_text()
+        self.assertIn("notice.action_disabled", views)
+        self.assertIn("notice.action_note", views)
+        self.assertIn("function noticeContentHtml", views)
+        after = views[views.index("const answer=await post('/api/plugins/notices/action'"):]
+        handler = after[:after.index("}catch(e)")]
+        self.assertIn("renderPluginNotices(card,kind,plugin);", handler,
+                      "a panel that only redraws on success cannot show 'still confirming'")
+        self.assertIn("answer.pending?'pending':'danger'", handler,
+                      "a wait drawn in red reads as a mistake the operator made")
+
+
+class DepositingIsOfferedWheneverThePluginIsLoadedTests(unittest.TestCase):
+    """Being asked for money is one way to deposit; deciding to is the other, and it comes first."""
+
+    def _plugin_source(self) -> str:
+        return Path("src/prediction_market_agent/plugins/api/polymarket.py").read_text()
+
+    def test_the_deposit_notice_does_not_wait_for_the_robot_to_ask(self) -> None:
+        source = self._plugin_source()
+        self.assertIn("def deposit_notices()", source)
+        self.assertIn("*deposit_notices()", source)
+        block = source[source.index("def deposit_notices()"):source.index("def funding_notices()")]
+        self.assertIn('"key": "deposit"', block)
+        self.assertIn("我要充值", block)
+        self.assertNotIn("pending_request", block, "this one is offered whether or not one is open")
+
+    def test_the_robots_request_confirms_through_the_same_deposit_check(self) -> None:
+        source = self._plugin_source()
+        block = source[source.index("def funding_action("):source.index("return PluginSpec(")]
+        self.assertIn('deposit_action("funding", "confirm", payload)', block)
+        funding = source[source.index("def funding_notices()"):source.index("def wallet_notices()")]
+        self.assertIn("*DEPOSIT_FIELDS", funding, "the same txid field, so it is the same act")
+
+    def test_what_a_deposit_needs_is_stated_rather_than_guessed(self) -> None:
+        write = Path("src/prediction_market_agent/plugins/api/_polymarket/write.py").read_text()
+        block = write[write.index("def deposit_instructions("):write.index("def _token_identity(")]
+        for field in ("chain", "chain_id", "address", "token_symbol", "token_contract", "warnings"):
+            with self.subTest(field=field):
+                self.assertIn(f'"{field}"', block)
+
+    def test_a_deposit_is_followed_on_the_chain_not_taken_on_trust(self) -> None:
+        write = Path("src/prediction_market_agent/plugins/api/_polymarket/write.py").read_text()
+        block = write[write.index("def deposit_status("):write.index("def deposit_target(")]
+        for state in ("not_found", "failed", "confirming", "credited", "wrong_target"):
+            with self.subTest(state=state):
+                self.assertIn(f'"{state}"', block)
+        self.assertIn("eth_getTransactionReceipt", block)
+        self.assertIn("eth_blockNumber", block)

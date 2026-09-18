@@ -416,6 +416,11 @@ def validated_notices(items: Any) -> list[dict[str, Any]]:
                     "required": bool(field.get("required", False)),
                 })
             entry[verb] = checked_fields
+        # A plugin may say its own button is not usable right now, and why. The framework has no
+        # idea what it is waiting for - a confirmation on a chain, a code in an email - only that
+        # a button that cannot do anything yet should say so rather than fail when pressed.
+        entry["action_disabled"] = bool(entry.get("action_disabled", False))
+        entry["action_note"] = str(entry.get("action_note", ""))
         entry["kind"] = kind
         checked.append(entry)
     return checked

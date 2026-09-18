@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 import time
 import uuid
 from dataclasses import replace
@@ -271,6 +272,128 @@ class PolymarketWriteTransport:
             "platformStatus": platform_status,
             "status": status,
         }
+
+    CHAIN_NAMES = {1: "Ethereum", 137: "Polygon", 80002: "Polygon Amoy 测试网"}
+    TRANSFER_TOPIC = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef"
+    DEPOSIT_CONFIRMATIONS = 12
+    """Blocks before a deposit is called arrived. About half a minute on Polygon."""
+
+    def deposit_instructions(self) -> dict[str, Any]:
+        """Everything a deposit needs to land, stated rather than guessed.
+
+        A deposit goes wrong in three ways that look identical afterwards - the wrong chain, the
+        wrong token on the right chain, the right token to the wrong address - and all three are
+        unrecoverable. So each is named, and the token is read off the chain rather than assumed.
+        """
+        client = self._require_client()
+        token = str(client.environment.collateral_token)
+        symbol, decimals = self._token_identity(token)
+        chain_id = int(self.settings.chain_id)
+        chain = self.CHAIN_NAMES.get(chain_id, f"chain {chain_id}")
+        return {
+            "chain": chain,
+            "chain_id": chain_id,
+            "address": str(client.wallet),
+            "token_symbol": symbol,
+            "token_contract": token,
+            "token_decimals": decimals,
+            "minimum_confirmations": self.DEPOSIT_CONFIRMATIONS,
+            "warnings": [
+                f"只能走 {chain}（chain id {chain_id}），发到别的链上收不回来",
+                f"只能转这个合约的 {symbol}：{token}，同名的其它 {symbol} 不行",
+                f"收款地址是 {client.wallet}，这是交易账户，不是你的签名地址",
+            ],
+        }
+
+    def _token_identity(self, token: str) -> tuple[str, int]:
+        """What the collateral token calls itself, asked of the token."""
+        symbol, decimals = "USDC", 6
+        try:
+            raw = self._rpc("eth_call", [{"to": token, "data": "0x95d89b41"}, "latest"])
+            decoded = self._decode_string(str(raw or ""))
+            symbol = decoded or symbol
+        except Exception:
+            pass
+        try:
+            raw = self._rpc("eth_call", [{"to": token, "data": "0x313ce567"}, "latest"])
+            decimals = int(str(raw or "0x6"), 16) or decimals
+        except Exception:
+            pass
+        return symbol, decimals
+
+    @staticmethod
+    def _decode_string(value: str) -> str:
+        body = value[2:] if value.startswith("0x") else value
+        if len(body) < 128:
+            return ""
+        length = int(body[64:128], 16)
+        return bytes.fromhex(body[128:128 + length * 2]).decode("utf-8", errors="ignore").strip()
+
+    def _rpc(self, method: str, params: list[Any]) -> Any:
+        url = str(self.settings.rpc_url).strip()
+        if not url:
+            raise RuntimeError("这个插件没有配置链上 RPC 地址，查不了转账")
+        client = self._http_client(url)
+        try:
+            response = client.post(
+                url, json={"jsonrpc": "2.0", "id": 1, "method": method, "params": params}
+            )
+            response.raise_for_status()
+            payload = response.json()
+        finally:
+            client.close()
+        if isinstance(payload, dict) and payload.get("error"):
+            raise RuntimeError(f"RPC {method} 出错：{str(payload['error'])[:200]}")
+        return payload.get("result") if isinstance(payload, dict) else None
+
+    def deposit_status(self, txid: str) -> dict[str, Any]:
+        """Where one deposit transaction has got to, read from the chain itself.
+
+        Four answers matter to whoever sent it: this is not a transaction we can find, it is on its
+        way, it failed, or the money is here. Anything vaguer leaves them refreshing a balance and
+        wondering whether they sent it to the wrong place.
+        """
+        reference = str(txid or "").strip()
+        if not re.fullmatch(r"0x[0-9a-fA-F]{64}", reference):
+            return {"state": "invalid",
+                    "detail": "交易号应该是 0x 开头、后面 64 位十六进制的那串"}
+        receipt = self._rpc("eth_getTransactionReceipt", [reference])
+        if not receipt:
+            if self._rpc("eth_getTransactionByHash", [reference]):
+                return {"state": "confirming", "confirmations": 0,
+                        "required": self.DEPOSIT_CONFIRMATIONS,
+                        "detail": "交易已经广播，还没有被打包"}
+            return {"state": "not_found",
+                    "detail": "这条链上查不到这笔交易：确认交易号没有复制错，以及它确实是这条链上的"}
+        if int(str(receipt.get("status", "0x0")), 16) == 0:
+            return {"state": "failed", "detail": "这笔交易在链上失败了，钱没有转出去"}
+        client = self._require_client()
+        token = str(client.environment.collateral_token).lower()
+        _symbol, decimals = self._token_identity(token)
+        wallet = str(client.wallet).lower()
+        credited = 0.0
+        for log in receipt.get("logs") or []:
+            topics = [str(item).lower() for item in (log.get("topics") or [])]
+            if len(topics) < 3 or topics[0] != self.TRANSFER_TOPIC:
+                continue
+            if str(log.get("address", "")).lower() != token:
+                continue
+            if not topics[2].endswith(wallet[2:]):
+                continue
+            credited += int(str(log.get("data", "0x0")), 16) / 10**decimals
+        head = int(str(self._rpc("eth_blockNumber", []) or "0x0"), 16)
+        mined = int(str(receipt.get("blockNumber", "0x0")), 16)
+        confirmations = max(0, head - mined + 1) if head and mined else 0
+        if not credited:
+            return {"state": "wrong_target", "confirmations": confirmations,
+                    "detail": f"这笔交易成功了，但没有把 {_symbol} 转到 {client.wallet}："
+                              "可能是转错了地址、错了代币，或者这根本是另一笔交易"}
+        if confirmations < self.DEPOSIT_CONFIRMATIONS:
+            return {"state": "confirming", "amount": credited, "confirmations": confirmations,
+                    "required": self.DEPOSIT_CONFIRMATIONS,
+                    "detail": f"链上已经收到 {credited:.6f} {_symbol}，等待确认"}
+        return {"state": "credited", "amount": credited, "confirmations": confirmations,
+                "detail": f"{credited:.6f} {_symbol} 已到账"}
 
     def deposit_target(self) -> dict[str, Any]:
         """Where collateral has to arrive, and whether this client could send it there itself.

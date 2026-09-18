@@ -1,4 +1,6 @@
 from __future__ import annotations
+
+from typing import Any
 from prediction_market_agent.plugin_system.network_diagnostics import configured_proxy_route
 
 from polymarket import PRODUCTION
@@ -106,6 +108,73 @@ def initialize_plugin(context: PluginInitializationContext) -> PluginSpec:
         except Exception as error:  # configuration incomplete, credentials missing, network down
             return {"error": str(error)[:300], "pending_request": None}
 
+    # What the operator last told this plugin they sent, so the panel can follow it to the chain
+    # and back without asking them to hold the transaction number in their head.
+    watched: dict[str, Any] = {"txid": "", "state": "", "detail": ""}
+
+    DEPOSIT_FIELDS = [{
+        "name": "txid", "label": "充值交易号（txid）", "required": True,
+        "placeholder": "0x 开头的那串交易号；转完账在钱包或区块浏览器里复制",
+    }]
+
+    def deposit_action(key: str, name: str, payload: dict) -> dict:
+        """Follow a deposit the operator says they made. The chain is the only witness."""
+        del key
+        if name == "dismiss":
+            watched.update(txid="", state="", detail="")
+            return {"ok": True, "message": "已清除这笔充值的跟踪"}
+        try:
+            instance = _live_instance()
+        except Exception as error:
+            return {"ok": False, "message": str(error)[:300]}
+        answer = instance.confirm_deposit(payload)
+        watched.update(
+            txid=str(answer.get("txid", "")),
+            state=str(answer.get("state", "")),
+            detail=str(answer.get("message", "")),
+        )
+        return answer
+
+    def deposit_watch() -> dict:
+        """Re-read a deposit still on its way, so the panel moves on its own once it lands."""
+        if not watched["txid"] or watched["state"] in {"credited", "not_found", "failed", "invalid"}:
+            return dict(watched)
+        try:
+            status = _live_instance().deposit_status(watched["txid"])
+        except Exception as error:
+            return {**watched, "detail": str(error)[:200]}
+        watched.update(state=str(status.get("state", "")), detail=str(status.get("detail", "")))
+        return dict(watched)
+
+    def deposit_notices() -> list:
+        """Always offered: an operator may decide to top up without being asked to."""
+        try:
+            panel = _live_instance().deposit_panel()
+        except Exception as error:
+            return [{
+                "key": "deposit", "title": '我要充值', "kind": "display",
+                "description": '给这个账户转钱的地址、链和币种。插件连上账户之后才能给出地址。',
+                "content": {"读取失败": str(error)[:300]},
+            }]
+        tracking = deposit_watch()
+        state, detail = tracking["state"], tracking["detail"]
+        confirming = state == "confirming"
+        content = dict(panel)
+        if tracking["txid"]:
+            content["这笔充值"] = f"{tracking['txid']}：{detail or state}"
+        return [{
+            "key": "deposit",
+            "title": '我要充值',
+            "kind": "confirm",
+            "description": '往下面这个地址、这条链、这个币种转账；转完把交易号填进来，插件去链上查，到账了会在这里说，余额也会更新。转错链或错币种的钱拿不回来。',
+            "content": content,
+            "action_label": '我已充值，去查',
+            "action_disabled": confirming,
+            "action_note": (detail or '确认中…') if confirming else '',
+            "action_fields": DEPOSIT_FIELDS,
+            "dismiss_label": '清除这笔跟踪' if tracking["txid"] else "",
+        }]
+
     def funding_notices() -> list:
         """Answer only when there is something outstanding, so a quiet plugin shows nothing."""
         try:
@@ -126,8 +195,13 @@ def initialize_plugin(context: PluginInitializationContext) -> PluginSpec:
             "kind": "confirm",
             "description": '机器人请求达到某个可用金额时，这里会显示需要转入的金额和收款地址。你转账后点确认，插件会重新读取余额核对，不满足会说明还差多少。',
             "content": panel,
-            "action_label": '我已转账，去核对',
-            "action_fields": [{"name": "note", "label": "附言（可选）", "placeholder": '确认时可以顺带告诉机器人一句话，比如「我只剩这些了，别再要了」——它会读到。', "multiline": True}],
+            "action_label": '我已充值，去查',
+            "action_disabled": deposit_watch()["state"] == "confirming",
+            "action_note": deposit_watch()["detail"] if deposit_watch()["state"] == "confirming" else '',
+            "action_fields": [
+                *DEPOSIT_FIELDS,
+                {"name": "note", "label": "附言（可选）", "placeholder": '确认时可以顺带告诉机器人一句话，比如「我只剩这些了，别再要了」——它会读到。', "multiline": True},
+            ],
             "dismiss_fields": [{"name": "note", "label": "拒绝理由", "required": True, "placeholder": '拒绝理由（会给到机器人，让它别再原样问一遍）', "multiline": True}],
             "dismiss_label": '驳回',
         }]
@@ -288,6 +362,10 @@ def initialize_plugin(context: PluginInitializationContext) -> PluginSpec:
             instance = _live_instance()
         except Exception as error:
             return {"ok": False, "message": str(error)[:300]}
+        # Confirming the robot's request is confirming a deposit: the same transaction, followed
+        # the same way, and the request is settled by what the chain says rather than by the click.
+        if name == "confirm" and str(payload.get("txid", "")).strip():
+            return deposit_action("funding", "confirm", payload)
         handler = {"confirm": instance.confirm_funding, "dismiss": instance.reject_funding}.get(name)
         if handler is None:
             return {"ok": False, "message": f"Unknown funding action: {name}"}
@@ -312,10 +390,12 @@ def initialize_plugin(context: PluginInitializationContext) -> PluginSpec:
             ),
         ),
         teardown=lambda: close_plugin_instances(instances),
-        notices_callback=lambda: [*wallet_notices(), *funding_notices()],
+        notices_callback=lambda: [*wallet_notices(), *deposit_notices(), *funding_notices()],
         notice_action_callback=lambda key, name, payload: (
             wallet_action(key, name, payload)
             if key.startswith("wallet")
+            else deposit_action(key, name, payload)
+            if key == "deposit"
             else funding_action(key, name, payload)
         ),
         readiness_callback=readiness,

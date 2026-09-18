@@ -289,6 +289,88 @@ class PolymarketApiPlugin:
         )
         return {"ok": True, "message": "The funding request was dismissed"}
 
+    def deposit_panel(self) -> dict[str, Any]:
+        """Where to send money, in what, on which chain - and what the account holds right now.
+
+        Offered whenever the plugin is loaded rather than only when the robot has asked for money:
+        an operator who decides to top up should not have to wait to be asked.
+        """
+        funds = self.account_funds()
+        panel: dict[str, Any] = {
+            "当前可用": f"{funds.available:.6f} {funds.currency}",
+            "余额来源": funds.source,
+        }
+        try:
+            instructions = self._write_transport.deposit_instructions()
+        except Exception as error:
+            panel["读取充值地址失败"] = str(error)[:300]
+            return panel
+        panel.update({
+            "链": f"{instructions['chain']}（chain id {instructions['chain_id']}）",
+            "收款地址": instructions["address"],
+            "币种": instructions["token_symbol"],
+            "代币合约": instructions["token_contract"],
+            "到账需要确认数": instructions["minimum_confirmations"],
+            "注意": instructions["warnings"],
+        })
+        return panel
+
+    def deposit_status(self, txid: str) -> dict[str, Any]:
+        """Where one deposit got to, plus what the account holds after it."""
+        status = dict(self._write_transport.deposit_status(txid))
+        try:
+            funds = self.account_funds()
+            status["available"] = funds.available
+            status["currency"] = funds.currency
+        except Exception as error:
+            status["balance_error"] = str(error)[:200]
+        return status
+
+    def confirm_deposit(self, values: dict[str, Any] | None = None) -> dict[str, Any]:
+        """Check a deposit the operator says they made, and let a waiting request off if it covers it.
+
+        The money arriving and the robot's request being answered are the same event seen twice, so
+        confirming the transaction settles the request when it covers what was asked - otherwise
+        the operator would fund the account and still be nagged for the money they just sent.
+        """
+        txid = str((values or {}).get("txid", "")).strip()
+        if not txid:
+            return {"ok": False, "state": "invalid", "message": "请填写充值交易号（txid）"}
+        try:
+            status = self.deposit_status(txid)
+        except Exception as error:
+            return {"ok": False, "state": "error", "message": str(error)[:300]}
+        state = str(status.get("state", ""))
+        available = status.get("available")
+        balance = (
+            f"；当前可用 {available:.6f} {status.get('currency', '')}"
+            if isinstance(available, (int, float)) else ""
+        )
+        if state != "credited":
+            return {"ok": False, "state": state, "txid": txid,
+                    # Still on its way is a wait, not a mistake, and the page draws the two apart.
+                    "pending": state == "confirming",
+                    "message": str(status.get("detail", "")) + balance, **status}
+        settled = None
+        request = self.funding_requests.pending()
+        if request is not None and isinstance(available, (int, float)):
+            if available + 1e-9 >= float(request["amount"]):
+                self.funding_requests.settle(
+                    operator_note=str((values or {}).get("note", "")),
+                    state="satisfied", available=available,
+                    detail=f"deposit {txid} credited {status.get('amount', 0):.6f}",
+                )
+                settled = "satisfied"
+            else:
+                self.funding_requests.settle(
+                    operator_note=str((values or {}).get("note", "")),
+                    state="partial", available=available,
+                    detail=shortfall_message(request, available),
+                )
+                settled = "partial"
+        return {"ok": True, "state": "credited", "txid": txid, "request": settled,
+                "message": str(status.get("detail", "")) + balance, **status}
+
     def funding_panel(self) -> dict[str, Any]:
         funds = self.account_funds()
         panel: dict[str, Any] = {
