@@ -16,6 +16,14 @@ from pathlib import Path
 from typing import Any
 
 
+def _instruction_conditions(value: Any) -> dict[str, Any]:
+    try:
+        parsed = json.loads(value or "{}")
+    except json.JSONDecodeError:
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
 class SessionMemory:
     """Append-only provider turns and actions, plus bounded context recall."""
 
@@ -113,6 +121,15 @@ class SessionMemory:
             # A plain-language restatement of a record, written once and kept. Recomputing it on
             # every view would spend a model call each time somebody opened the same row.
             self.connection.execute("ALTER TABLE decision_ledger ADD COLUMN readable_json TEXT")
+        instruction_columns = {
+            row[1] for row in self.connection.execute("PRAGMA table_info(operator_instructions)")
+        }
+        if instruction_columns and "progress" not in instruction_columns:
+            # How far along an open instruction is. Written by the same review that decides whether
+            # it is finished, so that a session opened mid-way says more than "still open".
+            self.connection.execute(
+                "ALTER TABLE operator_instructions ADD COLUMN progress TEXT NOT NULL DEFAULT ''"
+            )
         for table in ("provider_turns", "execution_actions", "agent_steps"):
             columns = {
                 row[1] for row in self.connection.execute(f"PRAGMA table_info({table})")
@@ -195,6 +212,24 @@ class SessionMemory:
                 reason TEXT NOT NULL DEFAULT '',
                 updated_at INTEGER NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS operator_instructions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                created_at INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL,
+                platform TEXT NOT NULL DEFAULT '',
+                source TEXT NOT NULL DEFAULT '',
+                raw_text TEXT NOT NULL,
+                kind TEXT NOT NULL DEFAULT 'reminder',
+                headline TEXT NOT NULL DEFAULT '',
+                instruction TEXT NOT NULL DEFAULT '',
+                conditions_json TEXT NOT NULL DEFAULT '{}',
+                status TEXT NOT NULL DEFAULT 'active',
+                resolution TEXT NOT NULL DEFAULT '',
+                progress TEXT NOT NULL DEFAULT '',
+                checked_at INTEGER NOT NULL DEFAULT 0
+            );
+            CREATE INDEX IF NOT EXISTS idx_instruction_status
+                ON operator_instructions(status, created_at DESC);
             CREATE TABLE IF NOT EXISTS discovery_priors (
                 strategy TEXT NOT NULL,
                 prior_id TEXT NOT NULL,
@@ -1224,6 +1259,165 @@ class SessionMemory:
             (json.dumps(context, ensure_ascii=False), int(time.time() * 1000), int(decision_id)),
         )
         self.connection.commit()
+
+    INSTRUCTION_KINDS = ("fund_condition", "strategy_note", "reminder", "remark")
+    """What somebody paying can attach to the money, and the one thing that binds nothing.
+
+    A condition on the money ("spend it within three days", "only on sports"), a change to how the
+    robot should trade, or something to keep in mind - those three reach the rounds. A remark - a
+    thank-you, a greeting, a sentence about nothing in particular - is written down and never handed
+    to one: pasting a note the robot cannot act on into every prompt is how prompts turn to noise.
+    It is kept because the operator wrote it and will look for it, not because anything obeys it.
+    """
+
+    def record_instruction(
+        self,
+        *,
+        platform: str,
+        source: str,
+        raw_text: str,
+        kind: str,
+        headline: str,
+        instruction: str,
+        conditions: dict[str, Any] | None = None,
+        status: str = "active",
+    ) -> int:
+        """Keep something the operator attached to their money, in the terms it will be applied in.
+
+        The words they wrote are kept as well as what was made of them: when the robot later says a
+        condition was met, the operator has to be able to check that against what they actually
+        said, not against a paraphrase nobody can audit.
+        """
+        now = int(time.time() * 1000)
+        cursor = self.connection.execute(
+            """
+            INSERT INTO operator_instructions(
+                created_at, updated_at, platform, source, raw_text, kind, headline,
+                instruction, conditions_json, status
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (now, now, str(platform), str(source), str(raw_text), str(kind), str(headline),
+             str(instruction), json.dumps(conditions or {}, ensure_ascii=False), str(status)),
+        )
+        self.connection.commit()
+        return int(cursor.lastrowid)
+
+    def active_instructions(self, platform: str = "") -> list[dict[str, Any]]:
+        """What the operator is still owed, which is what every round has to work within."""
+        clauses, values = ["status = 'active'"], []
+        if platform:
+            clauses.append("(platform = ? OR platform = '')")
+            values.append(str(platform))
+        rows = self.connection.execute(
+            f"SELECT id, created_at, platform, source, raw_text, kind, headline, instruction,"
+            f" conditions_json, progress FROM operator_instructions WHERE {' AND '.join(clauses)}"
+            " ORDER BY created_at",
+            values,
+        ).fetchall()
+        return [
+            {
+                "id": int(row[0]), "created_at": int(row[1]), "platform": row[2], "source": row[3],
+                "raw_text": row[4], "kind": row[5], "headline": row[6], "instruction": row[7],
+                "conditions": _instruction_conditions(row[8]), "progress": row[9],
+            }
+            for row in rows
+        ]
+
+    def resolve_instruction(self, instruction_id: int, *, status: str, resolution: str) -> None:
+        """Mark one as done, expired or dropped, with the reason it stopped applying."""
+        now = int(time.time() * 1000)
+        self.connection.execute(
+            "UPDATE operator_instructions SET status = ?, resolution = ?, updated_at = ?,"
+            " checked_at = ? WHERE id = ?",
+            (str(status), str(resolution)[:600], now, now, int(instruction_id)),
+        )
+        self.connection.commit()
+
+    def note_instruction_check(self, instruction_ids: list[int]) -> None:
+        """Remember that these were looked at, so a quiet round is distinguishable from no round."""
+        if not instruction_ids:
+            return
+        marks = ",".join("?" for _ in instruction_ids)
+        self.connection.execute(
+            f"UPDATE operator_instructions SET checked_at = ? WHERE id IN ({marks})",
+            [int(time.time() * 1000), *[int(item) for item in instruction_ids]],
+        )
+        self.connection.commit()
+
+    def note_instruction_progress(self, instruction_id: int, progress: str) -> None:
+        """Keep how far along one is, because "still open" is not an answer to "how is it going"."""
+        self.connection.execute(
+            "UPDATE operator_instructions SET progress = ?, updated_at = ?, checked_at = ?"
+            " WHERE id = ?",
+            (str(progress)[:400], int(time.time() * 1000), int(time.time() * 1000),
+             int(instruction_id)),
+        )
+        self.connection.commit()
+
+    def forget_instruction(self, instruction_id: int) -> bool:
+        """Drop one entirely, so that nothing downstream is working to it any more.
+
+        Deleted rather than closed: a closed instruction is one the robot says it carried out, and
+        the operator taking a note back is not that. What they asked for is gone from the record and
+        from every prompt built after this, which is the only reading of "delete" that would not
+        leave the robot quietly still obeying it.
+        """
+        cursor = self.connection.execute(
+            "DELETE FROM operator_instructions WHERE id = ?", (int(instruction_id),)
+        )
+        self.connection.commit()
+        return bool(cursor.rowcount)
+
+    def instructions(self, limit: int = 100) -> list[dict[str, Any]]:
+        """Everything the operator has attached, open and closed, newest first."""
+        rows = self.connection.execute(
+            "SELECT id, created_at, updated_at, platform, source, raw_text, kind, headline,"
+            " instruction, conditions_json, status, resolution, progress, checked_at"
+            " FROM operator_instructions ORDER BY created_at DESC LIMIT ?",
+            (max(1, int(limit)),),
+        ).fetchall()
+        columns = ("id", "created_at", "updated_at", "platform", "source", "raw_text", "kind",
+                   "headline", "instruction", "conditions", "status", "resolution", "progress",
+                   "checked_at")
+        items = []
+        for row in rows:
+            item = dict(zip(columns, row))
+            item["conditions"] = _instruction_conditions(item["conditions"])
+            items.append(item)
+        return items
+
+    def decisions_since_instruction(self, platform: str, *, limit: int = 12) -> list[dict[str, Any]]:
+        """What this platform decided lately, in the terms a promise is judged against.
+
+        Whether "spend it within three days" happened is a question about trades, not about
+        reasoning, so this carries the action, the size and what the venue did with it - and
+        nothing else, because the review that reads it costs a model call.
+        """
+        rows = self.connection.execute(
+            """
+            SELECT created_at, context_json, final_decision_json, execution_json, status
+            FROM decision_ledger WHERE platform = ? AND strategy_name NOT LIKE '%discovery'
+            ORDER BY created_at DESC LIMIT ?
+            """,
+            (str(platform), max(1, int(limit))),
+        ).fetchall()
+        items: list[dict[str, Any]] = []
+        for created_at, context_json, final_json, execution_json, status in rows:
+            try:
+                context = json.loads(context_json or "{}")
+                final = json.loads(final_json or "{}")
+                execution = json.loads(execution_json or "{}")
+            except json.JSONDecodeError:
+                continue
+            items.append({
+                "at_ms": int(created_at),
+                "market": (context.get("market") or {}).get("title", "") if isinstance(context, dict) else "",
+                "action": (final or {}).get("action", ""),
+                "notional_usdt": (final or {}).get("notional_usdt"),
+                "execution": (execution or {}).get("status", ""),
+                "status": status,
+            })
+        return items
 
     def save_survey_plan(
         self, *, platform: str, queries: list[str], next_scan_seconds: int, reason: str

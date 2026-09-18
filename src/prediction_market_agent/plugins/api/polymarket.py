@@ -112,10 +112,16 @@ def initialize_plugin(context: PluginInitializationContext) -> PluginSpec:
     # and back without asking them to hold the transaction number in their head.
     watched: dict[str, Any] = {"txid": "", "state": "", "detail": ""}
 
-    DEPOSIT_FIELDS = [{
-        "name": "txid", "label": "充值交易号（txid）", "required": True,
-        "placeholder": "0x 开头的那串交易号；转完账在钱包或区块浏览器里复制",
-    }]
+    DEPOSIT_FIELDS = [
+        {"name": "txid", "label": "充值交易号（txid）", "required": True,
+         "placeholder": "0x 开头的那串交易号；转完账在钱包或区块浏览器里复制"},
+        # People attach conditions when they pay. Written here, obeyed by the runtime: a deadline
+        # for using it, what it may be spent on, a change of approach - whatever they would say to
+        # somebody they were handing money to.
+        {"name": "note", "label": "附言（可选）：给这笔钱提的要求", "multiline": True,
+         "placeholder": "比如「这笔 3 天内用完」「只买体育」「别再买几个月后才揭标的」——机器人会一直照做，"
+                        "做完了会在决策账本里告诉你"},
+    ]
 
     def deposit_action(key: str, name: str, payload: dict) -> dict:
         """Follow a deposit the operator says they made. The chain is the only witness."""
@@ -127,6 +133,9 @@ def initialize_plugin(context: PluginInitializationContext) -> PluginSpec:
             instance = _live_instance()
         except Exception as error:
             return {"ok": False, "message": str(error)[:300]}
+        note = str(payload.get("note", "")).strip()
+        if note:
+            instance.note_from_operator(note, source="deposit", txid=str(payload.get("txid", "")))
         answer = instance.confirm_deposit(payload)
         watched.update(
             txid=str(answer.get("txid", "")),
@@ -157,11 +166,23 @@ def initialize_plugin(context: PluginInitializationContext) -> PluginSpec:
                 "content": {"读取失败": str(error)[:300]},
             }]
         tracking = deposit_watch()
+        # A note is read by the robot, not by this plugin, and the robot may be paused or out of
+        # model quota. Saying so is the difference between "it is waiting its turn" and the
+        # operator concluding their words went nowhere.
+        try:
+            waiting = [str(item.get("text", "")) for item in _live_instance().operator_messages()]
+        except Exception:
+            waiting = []
         state, detail = tracking["state"], tracking["detail"]
         confirming = state == "confirming"
         content = dict(panel)
         if tracking["txid"]:
             content["这笔充值"] = f"{tracking['txid']}：{detail or state}"
+        if waiting:
+            content["待机器人读取的附言"] = (
+                "；".join(waiting) + f"（{len(waiting)} 条，机器人下一轮开始前会读它们，"
+                "读懂了会出现在总览页的「转账附言与要求」里）"
+            )
         return [{
             "key": "deposit",
             "title": '我要充值',
@@ -364,6 +385,11 @@ def initialize_plugin(context: PluginInitializationContext) -> PluginSpec:
             return {"ok": False, "message": str(error)[:300]}
         # Confirming the robot's request is confirming a deposit: the same transaction, followed
         # the same way, and the request is settled by what the chain says rather than by the click.
+        note = str(payload.get("note", "")).strip()
+        if note:
+            instance.note_from_operator(
+                note, source=f"funding:{name}", txid=str(payload.get("txid", "")),
+            )
         if name == "confirm" and str(payload.get("txid", "")).strip():
             return deposit_action("funding", "confirm", payload)
         handler = {"confirm": instance.confirm_funding, "dismiss": instance.reject_funding}.get(name)

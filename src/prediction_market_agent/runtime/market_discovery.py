@@ -144,12 +144,16 @@ class DiscoveryEngine:
         evolution_enabled: bool,
         cross_platform_search: Callable[[str, int], dict[str, Any]] | None = None,
         research_contributions: list[Any] | None = None,
+        operator_instructions: Callable[[str], list[dict[str, Any]]] | None = None,
     ) -> None:
         self.memory = memory
         self.strategy = strategy
         self.provider = provider
         self.evolution_enabled = evolution_enabled
         self.cross_platform_search = cross_platform_search
+        # What the operator attached to their money, asked for per round: a slot spent on something
+        # they ruled out is a slot spent against them.
+        self.operator_instructions = operator_instructions
         # The gates ask about resolution wording and deadlines, and a candidate that does not carry
         # them was being rejected as unverifiable - while the tools that could have gone and found
         # them were offered only at the decision stage. Discovery could see that something was
@@ -157,6 +161,9 @@ class DiscoveryEngine:
         self.research_contributions = list(research_contributions or [])
 
     # ------------------------------------------------------------------ survey
+
+    operator_instructions: Any = None
+    """Asked for the open instructions each round; the runtime sets it, tests may leave it out."""
 
     def _survey_by_deadline(
         self, plugin: PredictionMarketApiPlugin, budget: DiscoveryBudget, horizon_days: int
@@ -475,6 +482,7 @@ class DiscoveryEngine:
             }
             for position, topic in enumerate(pool, start=1)
         ]
+        instructions = self.operator_instructions(platform) if self.operator_instructions else {}
         request = {
             "platform": platform,
             "platform_capabilities": plugin.capabilities.to_dict(),
@@ -489,6 +497,9 @@ class DiscoveryEngine:
                 "may_be_exceeded": "with a concrete reason about this opportunity, stated in the selection",
             },
             "nothing_here_is_priced_yet": "VERIFY_TOPICS reads deadlines, resolutions and spreads for the ids you name",
+            # Conditions the operator attached to their money. A slot spent on something they ruled
+            # out is a slot spent against them, so the round that picks the slates sees them too.
+            **({"operator_instructions": instructions} if instructions.get("count") else {}),
         }
         # Every call to a model leaves a row, this one included. It used to leave none: a discovery
         # round that failed, or that judged nothing worth a slot, produced no ledger entry at all,

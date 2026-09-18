@@ -17,6 +17,7 @@ from dataclasses import asdict, is_dataclass
 from typing import Any
 
 from ..plugin_system.contracts import FUNDING_TIMEOUT_SECONDS
+from .operator_instructions import OperatorInstructions, by_urgency, instruction_detail
 
 
 
@@ -126,6 +127,54 @@ DESCRIPTIONS: dict[str, Any] = {
         ),
         "arguments": {"request_id": "required string", "platform": "optional string"},
     },
+    "NOTE_INSTRUCTION": {
+        "purpose": (
+            "Report where you have got to on something the operator attached to their money. The "
+            "instructions you were given carry an id; use it. state=progress records how far along "
+            "it is and leaves it binding. state=done closes it, and is for when the thing asked "
+            "for has actually happened - the money spent as required, the trade made - not when "
+            "you intend to. state=expired closes one whose time has passed or that has become "
+            "impossible. Closing one stops it binding later rounds, so close nothing you are not "
+            "sure of: if it is only partly done, that is progress. This is for saying what "
+            "happened, never for getting out of an instruction you would rather not follow, and "
+            "only the operator may delete one."
+        ),
+        "arguments": {
+            "id": "required integer, from the instruction you were given",
+            "state": "required: progress, done or expired",
+            "why": (
+                "required string: the reason for this state, in the numbers the instruction was "
+                "written in - what was asked, what has happened so far, what is left. \"They asked "
+                "for 5 USDT on this market; 3 are bought, 2 to go\" is a reason. \"Making "
+                "progress\" is not, and neither is \"done\": the operator has to be able to check "
+                "it against what they wrote, and a round that cannot state the remainder has not "
+                "measured it."
+            ),
+        },
+    },
+    "LIST_INSTRUCTIONS": {
+        "purpose": (
+            "List what the operator has attached to their money on this platform. You are already "
+            "given the open ones with every round, so use this when you want the ones that did not "
+            "fit, or the closed ones - what was asked before, and what this robot reported back "
+            "about it."
+        ),
+        "arguments": {
+            "include_closed": "optional boolean, default false",
+            "platform": "optional string",
+        },
+    },
+    "READ_INSTRUCTION": {
+        "purpose": (
+            "Read one instruction whole: the operator's own words, the transfer it arrived with, "
+            "every condition, and where it stands. The rounds are handed the rule, not the "
+            "wording, because notes are long and rules are short. Fetch the wording when it "
+            "decides something - when the rule as written does not settle the case in front of "
+            "you, or when you are about to close one and their sentence is what says whether it "
+            "is finished."
+        ),
+        "arguments": {"id": "required integer"},
+    },
     "LIST_PLATFORMS": {
         "purpose": "List every connected market platform and what each one supports.",
         "arguments": {},
@@ -219,11 +268,13 @@ class MarketToolset:
         self._platforms = platforms
         self._current = current_platform
         self._consultation: Any = None
+        self._memory: Any = None
 
     def create(self, context: Any) -> "MarketToolset":
         # Taken from the standard tool context rather than wired in specially: asking the asker is
         # something any tool plugin may need, so it arrives the same way for all of them.
         self._consultation = getattr(context, "consultation", None)
+        self._memory = getattr(context, "memory", None)
         return self
 
     def _runtime(self, arguments: dict[str, Any]) -> Any:
@@ -260,6 +311,80 @@ class MarketToolset:
             consult=self._consultation,
         )
         return {"platform": runtime.plugin.name, **result.to_dict()}
+
+    def _note_instruction(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        """Let the round say what became of an operator's instruction, at the moment it happens.
+
+        The twice-a-cycle review asks about all of them at once, which is the right place to notice
+        a deadline has passed, and the wrong place to notice a trade just satisfied one: by then the
+        round that made the trade is over and the evidence is a ledger row somebody has to read back.
+        Whoever did the thing is in the best position to say it was done.
+
+        Only what is open on this platform can be touched. A closed instruction stays closed because
+        reopening one is a decision about what the operator is still owed, and an id from another
+        platform is a mistake, not a shortcut.
+        """
+        if self._memory is None:
+            return {"recorded": False, "why": "this round has no record to write to"}
+        identifier = int(arguments["id"])
+        state = str(arguments.get("state", "progress")).strip().lower()
+        why = str(arguments.get("why", "")).strip()
+        if state not in ("progress", "done", "expired"):
+            raise ValueError("state must be progress, done or expired")
+        # A state change nobody can check is worse than no state change: the record then says the
+        # operator was served without saying how, and the next round reads that as settled. So the
+        # reason has to be long enough to carry what was asked against what has happened, and a
+        # bare "done" is refused here rather than stored and believed.
+        if len(why) < 8:
+            raise ValueError(
+                "`why` must say what was asked, what has happened and what is left - e.g. "
+                "\"asked for 5 USDT here, 3 bought, 2 to go\". A bare verdict is not a reason."
+            )
+        open_items = {item["id"]: item for item in self._memory.active_instructions(self._current)}
+        if identifier not in open_items:
+            return {
+                "recorded": False,
+                "why": f"instruction {identifier} is not open on {self._current}",
+                "open_instructions": sorted(open_items),
+            }
+        if state == "progress":
+            self._memory.note_instruction_progress(identifier, why)
+        else:
+            self._memory.resolve_instruction(identifier, status=state, resolution=why)
+        return {
+            "recorded": True,
+            "id": identifier,
+            "state": state,
+            "still_binding": state == "progress",
+            "asked": open_items[identifier]["instruction"],
+        }
+
+    def _list_instructions(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        if self._memory is None:
+            return {"instructions": [], "why": "this round has no record to read from"}
+        platform = str(arguments.get("platform") or self._current)
+        if bool(arguments.get("include_closed", False)):
+            rows = [
+                item for item in self._memory.instructions(limit=100)
+                if item["platform"] in ("", platform)
+            ]
+            items = [
+                {**OperatorInstructions.catalogue_entry(item), "status": item["status"],
+                 "closed_because": item["resolution"]}
+                for item in rows
+            ]
+        else:
+            items = [
+                OperatorInstructions.catalogue_entry(item)
+                for item in by_urgency(self._memory.active_instructions(platform))
+            ]
+        return {"platform": platform, "instructions": items, "count": len(items)}
+
+    def _read_instruction(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        if self._memory is None:
+            return {"why": "this round has no record to read from"}
+        found = instruction_detail(self._memory, int(arguments["id"]))
+        return found or {"why": f"no instruction {arguments['id']} on record"}
 
     def _funding_status(self, arguments: dict[str, Any]) -> dict[str, Any]:
         runtime = self._runtime(arguments)

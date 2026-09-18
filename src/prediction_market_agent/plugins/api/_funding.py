@@ -202,6 +202,53 @@ either park a transfer that is wrong or throw away the one chance to correct it.
 """
 
 
+class OperatorNotes:
+    """Whatever the operator wrote alongside their money, kept until the runtime has taken it.
+
+    People attach conditions when they pay: use it this week, only on sports, this is the last of
+    it. A plugin is where those words are typed, and it is not the thing that can judge them - so it
+    holds them, hands them over exactly as written, and forgets them once somebody has.
+
+    Kept on disk beside the funding book: a note typed a second before a restart is still a
+    condition the operator believes they set.
+    """
+
+    def __init__(self, path: Path):
+        self.path = path
+
+    def _read(self) -> list[dict[str, Any]]:
+        try:
+            value = json.loads(self.path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return []
+        return [item for item in value if isinstance(item, dict)] if isinstance(value, list) else []
+
+    def _write(self, items: list[dict[str, Any]]) -> None:
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self.path.write_text(json.dumps(items, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    def add(self, text: str, **context: Any) -> str:
+        """Record one note with where it was written, and answer with its handle."""
+        body = str(text or "").strip()
+        if not body:
+            return ""
+        entry = {
+            "id": uuid.uuid4().hex[:12],
+            "text": body[:2000],
+            "written_at": int(time.time() * 1000),
+            "context": {key: value for key, value in context.items() if value not in (None, "")},
+        }
+        self._write([*self._read(), entry])
+        return str(entry["id"])
+
+    def pending(self) -> list[dict[str, Any]]:
+        return self._read()
+
+    def acknowledge(self, identifiers: list[str]) -> None:
+        taken = {str(item) for item in identifiers}
+        self._write([item for item in self._read() if str(item.get("id", "")) not in taken])
+
+
 def conflict_question(pending: dict[str, Any], amount: float, currency: str, reason: str) -> str:
     """State the fork in the numbers that decide it, without steering the answer.
 

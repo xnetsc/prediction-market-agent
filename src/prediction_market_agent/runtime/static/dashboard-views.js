@@ -1583,3 +1583,58 @@ async function renderPluginNotices(card,kind,plugin){
     }
     if(!host.children.length)host.remove();
 }
+
+// 转账附言：你写的话、机器人读出来的要求、做到哪一步了，以及删掉它。
+// 原文和理解并排放着，是因为理解可能是错的，而只有写这句话的人能看出来错在哪。
+function instructionCardHtml(item){
+    const when=item.written_at?new Date(item.written_at).toLocaleString():'';
+    const facts=[];
+    if(item.came_with)facts.push(['转账',item.came_with]);
+    if(item.platform)facts.push(['平台',item.platform]);
+    if(when)facts.push(['写于',when]);
+    const conditions=Object.entries(item.conditions||{}).map(([k,v])=>k+'='+(Array.isArray(v)?v.join('、'):v));
+    if(conditions.length)facts.push(['条件',conditions.join('；')]);
+    if(item.lasts_label)facts.push(['有效期',item.lasts_label]);
+    if(item.progress)facts.push(['做到哪了',item.progress]);
+    if(item.resolution)facts.push(['结论',item.resolution]);
+    const tone=item.binding?'good':(item.status==='noted'?'muted':'');
+    return '<article class="instruction-card'+(item.binding?' binding':'')+'">'
+        +'<header><span class="badge '+tone+'">'+esc(item.status_label)+'</span>'
+        +'<span class="badge muted">'+esc(item.kind_label)+'</span>'
+        +'<strong>'+esc(item.headline||item.operator_wrote.slice(0,40))+'</strong>'
+        +'<button class="danger" title="删除这条记录" onclick="forgetInstruction('+item.id+')">删除</button></header>'
+        +'<blockquote class="operator-words">'+esc(item.operator_wrote)+'</blockquote>'
+        +(item.instruction?'<p class="instruction-read"><b>机器人读成：</b>'+esc(item.instruction)+'</p>':'<p class="muted">机器人认为这句话不需要它做什么。</p>')
+        +(facts.length?'<dl class="instruction-facts">'+facts.map(([k,v])=>'<dt>'+esc(k)+'</dt><dd>'+esc(String(v))+'</dd>').join('')+'</dl>':'')
+        +'</article>';
+}
+
+async function refreshInstructions(){
+    const panel=document.getElementById('instructionPanel');
+    if(!panel)return;
+    try{
+        const result=await get('/api/instructions?limit=100');
+        const items=result.instructions||[];
+        // Hidden when empty: most accounts are funded without anybody writing anything, and an
+        // empty box on the main page teaches the operator to ignore that part of the page.
+        panel.hidden=items.length===0;
+        document.getElementById('instructionList').innerHTML=items.length
+            ?items.map(instructionCardHtml).join('')
+            :'';
+        document.getElementById('instructionStamp').textContent=items.length
+            ?(items.filter(x=>x.binding).length+' 条正在生效，共 '+items.length+' 条')
+            :'';
+    }catch(e){
+        panel.hidden=false;
+        document.getElementById('instructionList').innerHTML='<div class="empty-state"><strong>读不出来</strong><p>'+esc(e.message)+'</p></div>';
+    }
+}
+
+async function forgetInstruction(id){
+    if(!confirm('删掉这条记录？之后的决策研究不再看到它。'))return;
+    try{
+        await post('/api/instructions/forget',{id:id});
+        showOperationFeedback('已删除，后续决策不再受它影响');
+        await refreshInstructions();
+    }catch(e){showOperationFeedback(e.message,'danger')}
+}

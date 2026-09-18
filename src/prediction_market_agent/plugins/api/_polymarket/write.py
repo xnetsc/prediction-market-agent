@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import re
+import threading
 import time
 import uuid
+import weakref
+from contextlib import contextmanager
 from dataclasses import replace
 from typing import Any
 
@@ -54,6 +57,10 @@ class PolymarketWriteTransport:
         self.settings = settings
         self._quotes: dict[str, _QuoteSpec] = {}
         self._client: SecureClient | None = None
+        # Which httpx clients are ours, so a second pass does not close and rebuild a good one.
+        self._policy_clients: weakref.WeakSet[httpx.Client] = weakref.WeakSet()
+        self._setup_client: SecureClient | None = None
+        self._setup_client_at = 0.0
 
     def _api_key(self) -> BuilderApiKey | RelayerApiKey | None:
         if (
@@ -96,7 +103,7 @@ class PolymarketWriteTransport:
             transport.close()
 
     def _http_client(self, base_url: str) -> httpx.Client:
-        return httpx.Client(
+        client = httpx.Client(
             base_url=base_url,
             proxy=self.settings.http_proxy or None,
             trust_env=False,
@@ -104,8 +111,40 @@ class PolymarketWriteTransport:
             timeout=20,
             headers={"User-Agent": "prediction-market-agent/0.6"},
         )
+        self._policy_clients.add(client)
+        return client
+
+    _patch_lock = threading.Lock()
+
+    @contextmanager
+    def _sdk_uses_our_network(self):
+        """Make the SDK build its own transports our way, for as long as this block runs.
+
+        Replacing transports after a client exists is too late. Construction itself goes to the
+        network - it asks the relayer whether this wallet is deployed - and it does that through a
+        client the SDK made with its own defaults: five seconds to connect, and no proxy. On a host
+        where the TLS handshake to Polymarket takes six, that call can only ever time out, and the
+        wallet panel showed the operator a raw `_ssl.c:1015` with nothing they could do about it.
+
+        So the policy is installed one level earlier, at the point any transport is made. The patch
+        is on the SDK class and therefore process-wide, which is why it is held only for the call
+        that needs it and behind a lock: two plugins may have different proxies, and neither should
+        get the other's.
+        """
+        original = SyncTransport.__init__
+
+        def patched(inner_self, *, base_url: str, client: httpx.Client | None = None, **rest: Any):
+            original(inner_self, base_url=base_url, client=client or self._http_client(base_url), **rest)
+
+        with self._patch_lock:
+            SyncTransport.__init__ = patched
+            try:
+                yield
+            finally:
+                SyncTransport.__init__ = original
 
     def _install_network_policy(self, client: SecureClient) -> None:
+        """Catch anything built outside that window - lazily, or by a path not patched."""
         ctx = client._ctx  # polymarket-client 0.3.x: pinned internal transport integration point
         transports = (
             ctx.gamma,
@@ -119,20 +158,38 @@ class PolymarketWriteTransport:
         )
         for transport in transports:
             old = transport._client
+            if old in self._policy_clients:
+                continue
             base_url = str(old.base_url)
             old.close()
             transport._client = self._http_client(base_url)
             transport._owns_client = True
 
+    SETUP_CLIENT_SECONDS = 90.0
+    """How long a setup connection is reused before it is made again.
+
+    Connecting is not cheap: it is several round trips, and on a slow path each handshake alone can
+    take six seconds. One page of this plugin's panels asks three separate questions - the wallet,
+    the deposit address, the balance - and connecting once per question took nearly two minutes, by
+    which point the operator has decided the page is broken and gone looking for the button
+    somewhere else. Long enough to serve one page from one connection, short enough that a key or
+    an address changed in the settings takes effect while the operator is still looking at it.
+    """
+
     def _require_client(self, *, for_trading: bool = True) -> SecureClient:
         """Connect. With `for_trading` false the wallet is not deployed on the way in.
 
         Everything that trades needs a wallet that exists on chain; everything that sets the
-        account up runs before one does. Caching only the trading client keeps the difference
-        honest - a setup client is short-lived and never stands in for the real one.
+        account up runs before one does. The two are cached separately and the setup one expires,
+        so it never quietly stands in for the real one.
         """
         if for_trading and self._client is not None:
             return self._client
+        if not for_trading and self._setup_client is not None:
+            if time.time() - self._setup_client_at < self.SETUP_CLIENT_SECONDS:
+                return self._setup_client
+            self._setup_client.close()
+            self._setup_client = None
         environment = replace(
             PRODUCTION,
             name="configured",
@@ -166,14 +223,15 @@ class PolymarketWriteTransport:
         # Public create() performs requests during construction before an application can
         # inject transport policy. Version 0.3.x exposes this constructor path; credentials
         # are supplied, validation is deferred, and all transports are replaced before use.
-        client = SecureClient._create(
-            private_key=self.settings.private_key,
-            wallet=self.settings.funder_address.strip() or None,
-            environment=environment,
-            credentials=credentials,
-            api_key=self._api_key(),
-            validate_credentials=False,
-        )
+        with self._sdk_uses_our_network():
+            client = SecureClient._create(
+                private_key=self.settings.private_key,
+                wallet=self.settings.funder_address.strip() or None,
+                environment=environment,
+                credentials=credentials,
+                api_key=self._api_key(),
+                validate_credentials=False,
+            )
         try:
             self._install_network_policy(client)
             if for_trading:
@@ -183,6 +241,7 @@ class PolymarketWriteTransport:
                 # button that creates the key could not run without the key it was there to create.
                 client = client._ensure_wallet_ready()
             else:
+                self._setup_client, self._setup_client_at = client, time.time()
                 return client
             self._client = client
         except BaseException:
@@ -194,6 +253,9 @@ class PolymarketWriteTransport:
         if self._client is not None:
             self._client.close()
             self._client = None
+        if self._setup_client is not None:
+            self._setup_client.close()
+            self._setup_client = None
 
     def get_quote(
         self,

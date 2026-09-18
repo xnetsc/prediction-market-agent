@@ -138,3 +138,15 @@ dialog{background:var(--surface)!important;color:var(--ink)!important;border:1px
 .console-update{display:flex;gap:1rem;align-items:center;justify-content:space-between;flex-wrap:wrap}
 .ledger-bulk{display:flex;flex-wrap:wrap;gap:.5rem 1rem;align-items:center;margin:.25rem 0 .75rem}.ledger-pick-all{display:flex;gap:.35rem;align-items:center;white-space:nowrap}.ledger-forget-category{margin-left:auto;color:var(--danger,#c0392b)}.decision-pick{margin:0 .5rem 0 0;flex:0 0 auto;width:1rem;height:1rem;cursor:pointer}
 .notice-facts{display:grid;grid-template-columns:auto 1fr;gap:.35rem .75rem;margin:.5rem 0}.notice-facts dt{color:var(--muted,#666);white-space:nowrap}.notice-facts dd{margin:0;display:flex;gap:.5rem;align-items:baseline;flex-wrap:wrap;word-break:break-all}.notice-facts ul{margin:0;padding-left:1.1rem}.notice-copy{font-size:.75rem;padding:.1rem .4rem}.notice-waiting{margin:.35rem 0 0}
+
+/* 转账附言。原话用引用块，理解用正文：哪句是谁说的，一眼看得出来。 */
+.instruction-card{border:1px solid var(--line);border-radius:10px;padding:12px 14px;margin:10px 0;background:var(--panel)}
+.instruction-card.binding{border-left:3px solid var(--good)}
+.instruction-card header{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.instruction-card header strong{flex:1;min-width:120px}
+.instruction-card header button{margin-left:auto}
+.operator-words{margin:8px 0;padding:8px 12px;border-left:3px solid var(--line);color:var(--text);white-space:pre-wrap}
+.instruction-read{margin:6px 0}
+.instruction-facts{display:grid;grid-template-columns:auto 1fr;gap:2px 10px;margin:8px 0 0;font-size:.9em;color:var(--muted)}
+.instruction-facts dt{font-weight:600}
+.instruction-facts dd{margin:0;word-break:break-all}

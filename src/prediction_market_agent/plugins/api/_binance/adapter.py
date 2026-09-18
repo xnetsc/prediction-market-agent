@@ -7,7 +7,11 @@ from typing import Any
 from pathlib import Path
 
 from prediction_market_agent.agent.consultation import AgentConsult
-from prediction_market_agent.plugins.api._funding import FundingRequests, resolve_conflict
+from prediction_market_agent.plugins.api._funding import (
+    FundingRequests,
+    OperatorNotes,
+    resolve_conflict,
+)
 from prediction_market_agent.runtime.broker import ExecutionGateway
 from prediction_market_agent.core.domain import AccountState
 from prediction_market_agent.plugin_system.contracts import (
@@ -75,6 +79,13 @@ class BinancePredictionApiPlugin:
             Path(self.settings.funding_request_file)
             if self.settings.funding_request_file
             else Path('config/plugins/binance_funding_request.json')
+        )
+        self.operator_notes = OperatorNotes(
+            Path(self.settings.funding_request_file).with_name(
+                f'binance_operator_notes.json'
+            )
+            if self.settings.funding_request_file
+            else Path('config/plugins/binance_operator_notes.json')
         )
         self.client = BinancePredictionReadClient(
             self.settings.api_key,
@@ -376,6 +387,18 @@ class BinancePredictionApiPlugin:
                            + "。这笔钱在币安账户里，机器人要用还需要一次划转："
                            "有待批的资金请求就在下面批准，没有的话等机器人下次开口。",
                 **status}
+
+    # -- What the operator wrote with their money ------------------------------------------------
+    # Collected here because this is where it was typed, and handed over untouched: what a note
+    # means, and what to do about it, is the runtime's to work out with a model, not this plugin's.
+    def note_from_operator(self, text: str, **context: Any) -> str:
+        return self.operator_notes.add(text, **context)
+
+    def operator_messages(self) -> list[dict[str, Any]]:
+        return self.operator_notes.pending()
+
+    def acknowledge_operator_messages(self, identifiers: list[str]) -> None:
+        self.operator_notes.acknowledge(identifiers)
 
     def funding_panel(self) -> dict[str, Any]:
         funds = self.account_funds()

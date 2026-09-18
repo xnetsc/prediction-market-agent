@@ -87,6 +87,13 @@ tried - that is a finding. "No data" about something you never looked up is not 
   the next review will read it. An expiry so near that a decision cannot be acted on before it
   resolves is a different matter: that one is simply not tradeable.
 - Status gate. Closed, halted, or non-accepting markets are never candidates.
+- `operator_instructions` in the request are conditions the person who funded this account attached
+  to their money. They are not preferences and not suggestions: one that says what this money may
+  be spent on decides which topics can take a slot at all, and one that rules something out rules
+  it out however good it looks. Where an instruction and a preference above disagree, the
+  instruction wins; where it and a hard gate disagree, say so in the selection rather than passing
+  the gate. Each carries `where_it_stands`, what was left of it when it was last measured - a
+  slate that ignores something still owed is a slate the operator did not ask for.
 
 ROTATION AND BUDGET DISCIPLINE
 - Recently analyzed topics arrive with their last analysis time. Re-selecting one is justified only

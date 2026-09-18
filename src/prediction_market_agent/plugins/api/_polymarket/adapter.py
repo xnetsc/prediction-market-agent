@@ -12,6 +12,7 @@ from prediction_market_agent.agent.consultation import AgentConsult
 from prediction_market_agent.plugins.api._funding import (
     FundingRequests,
     resolve_conflict,
+    OperatorNotes,
     shortfall_message,
 )
 from prediction_market_agent.runtime.broker import ExecutionGateway
@@ -109,6 +110,13 @@ class PolymarketApiPlugin:
             Path(self.settings.funding_request_file)
             if self.settings.funding_request_file
             else Path('config/plugins/polymarket_funding_request.json')
+        )
+        self.operator_notes = OperatorNotes(
+            Path(self.settings.funding_request_file).with_name(
+                f'polymarket_operator_notes.json'
+            )
+            if self.settings.funding_request_file
+            else Path('config/plugins/polymarket_operator_notes.json')
         )
         self._events: list[dict[str, Any]] = []
 
@@ -376,6 +384,18 @@ class PolymarketApiPlugin:
         return {"ok": True, "state": "arrived", "txid": txid, "request": settled,
                 "pending": waiting_on_platform,
                 "message": str(status.get("detail", "")) + balance + note, **status}
+
+    # -- What the operator wrote with their money ------------------------------------------------
+    # Collected here because this is where it was typed, and handed over untouched: what a note
+    # means, and what to do about it, is the runtime's to work out with a model, not this plugin's.
+    def note_from_operator(self, text: str, **context: Any) -> str:
+        return self.operator_notes.add(text, **context)
+
+    def operator_messages(self) -> list[dict[str, Any]]:
+        return self.operator_notes.pending()
+
+    def acknowledge_operator_messages(self, identifiers: list[str]) -> None:
+        self.operator_notes.acknowledge(identifiers)
 
     def funding_panel(self) -> dict[str, Any]:
         funds = self.account_funds()

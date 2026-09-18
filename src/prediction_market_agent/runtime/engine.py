@@ -15,6 +15,7 @@ from .broker import ExecutionError
 from .evaluation import MarketEvaluationMixin
 from .decision_strategy import DecisionEvolution
 from .market_discovery import DiscoveryEngine
+from .operator_instructions import OperatorInstructions, evidence_for_review
 from .provider_quality import ProviderQuality
 from .memory import SessionMemory
 
@@ -42,6 +43,11 @@ class TradingEngine(MarketEvaluationMixin, ExecutionActionsMixin):
         self.provider = components.provider
         self.research_contributions = components.research_contributions
         self.discovery_strategy = components.discovery_strategy
+        # What the operator attached to their money. Collected by the platform plugins, understood
+        # and kept here, obeyed by every round until this says it is finished.
+        self.operator_instructions = OperatorInstructions(
+            memory=self.memory, provider=components.provider
+        )
         self.discovery = DiscoveryEngine(
             memory=self.memory,
             strategy=components.discovery_strategy,
@@ -49,6 +55,7 @@ class TradingEngine(MarketEvaluationMixin, ExecutionActionsMixin):
             evolution_enabled=components.strategy_evolution,
             cross_platform_search=self.search_market_candidates,
             research_contributions=components.research_contributions,
+            operator_instructions=self.operator_instructions.payload,
         )
         self.decision_evolution = DecisionEvolution(
             memory=self.memory,
@@ -131,6 +138,9 @@ class TradingEngine(MarketEvaluationMixin, ExecutionActionsMixin):
     ) -> list[Topic]:
         if not self.can_decide(runtime.plugin.name):
             return []
+        # Before anything is collected: take what the operator has said since last time, and ask
+        # which of the standing instructions this cycle no longer has to carry.
+        self._apply_operator_instructions(runtime, moment="before_cycle")
         runtime.plugin.sync_time()
         for name, review in (
             ("discovery", self.discovery.review),
@@ -328,6 +338,11 @@ class TradingEngine(MarketEvaluationMixin, ExecutionActionsMixin):
             # would only collect data and write a failed record apiece.
             if not self.can_decide(runtime.plugin.name):
                 break
+            # A note that arrives mid-cycle has to bind the next decision, not the next cycle. The
+            # money it came with is already spendable, and a restriction read an hour later is a
+            # restriction read after the trade it was meant to stop. This costs a file read when
+            # nobody has written anything, which is almost always.
+            self._catch_up_on_notes(runtime)
             try:
                 self._evaluate_topic(runtime, topic)
             except (KeyError, ValueError, RuntimeError, ExecutionError) as error:
@@ -337,7 +352,56 @@ class TradingEngine(MarketEvaluationMixin, ExecutionActionsMixin):
                     topic.topic_id,
                     error,
                 )
+        # The cycle is over and the robot is about to wait: this is when what it just did can be
+        # measured against what it was asked for.
+        self._apply_operator_instructions(runtime, moment="cycle_finished")
         runtime.store.save(runtime.state)
+
+    def _catch_up_on_notes(self, runtime: PlatformRuntime) -> None:
+        """Read anything the operator has said since the last decision, and nothing else.
+
+        The review - asking which instructions are finished - stays at the two moments a cycle can
+        be judged from. This is only the reading half, because a new instruction is worth a model
+        call the moment it exists, and re-judging the old ones between two topics is not.
+        """
+        try:
+            kept = self.operator_instructions.harvest(runtime.plugin.name, runtime.plugin)
+        except Exception:
+            LOGGER.exception("could not read what the operator said on %s", runtime.plugin.name)
+            return
+        if kept:
+            LOGGER.info(
+                "%s: %d new thing(s) from the operator, binding from this decision on",
+                runtime.plugin.name, len(kept),
+            )
+
+    def _apply_operator_instructions(self, runtime: PlatformRuntime, *, moment: str) -> None:
+        """Collect what was said, and close what has been done - at the two points it can be judged.
+
+        Both halves are quiet when there is nothing to do: no notes means no reading, and no open
+        instruction means no review. A round that asked a model twice to be told nothing changed
+        would be paying for the feature rather than using it.
+        """
+        platform = runtime.plugin.name
+        try:
+            kept = self.operator_instructions.harvest(platform, runtime.plugin)
+            if kept:
+                LOGGER.info("%s: kept %d thing(s) the operator asked for", platform, len(kept))
+        except Exception:
+            LOGGER.exception("could not read what the operator said on %s", platform)
+        try:
+            closed = self.operator_instructions.review(
+                platform,
+                moment=moment,
+                evidence=evidence_for_review(self.memory, platform),
+            )
+            for item in closed:
+                LOGGER.info(
+                    "%s: instruction %s is %s - %s",
+                    platform, item["id"], item["state"], item["why"],
+                )
+        except Exception:
+            LOGGER.exception("could not review the operator's instructions on %s", platform)
 
     @staticmethod
     def _platform_status(runtime: PlatformRuntime) -> dict[str, Any]:

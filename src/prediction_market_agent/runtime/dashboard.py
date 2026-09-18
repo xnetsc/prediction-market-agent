@@ -55,7 +55,7 @@ HTML = r"""<!doctype html><html lang="zh-CN"><head><meta charset="utf-8">
 <section data-view="models" hidden><h3>服务可用性与实测质量</h3><p class="muted">限流、掉线或凭证过期的服务会自动退避，恢复后自动回到轮换；可用的服务按实测质量排序使用。</p><div id="providerHealth"></div></section>
 <section data-view="models" id="modelConfigurationSection" hidden><h3>模型与连接配置</h3><p class="muted">保存会立即重新检查服务是否可用；不会自动调用付费模型。</p><div id="modelConfigurations"></div></section>
 <section data-view="models" hidden class="advanced-section"><details><summary>安装新的模型服务扩展 <span>开发与自定义部署时使用</span></summary><p class="muted">把受信任的 Python 模型服务源码写入已配置目录。安装后保持禁用且不会初始化，请在上方明确启用并保存。</p><div class="plugin-grid"><label class="field"><b>安装目录</b><select id="modelInstallTarget"></select></label><label class="field"><b>服务名</b><input id="modelInstallName" placeholder="example_provider"></label></div><label class="field"><b>Python 源码</b><textarea id="modelInstallSource" rows="14" placeholder="def initialize_plugin(context): ..."></textarea></label><div class="toolbar"><button class="primary" onclick="installModelPlugin()">安装模型服务</button><span id="modelInstallStatus" class="status muted"></span></div></details></section>
-<section data-view="overview"><h3>机器人运行控制</h3><p class="muted">主链只要求至少一个可用 AI 模型服务和至少一个成功启动的平台插件。策略、研究与两类过滤插件都是可选增强；插件自行报告能否启动，通用框架不会猜测其私有参数。这里的暂停设置会保留到下次启动。</p><div id="runtimeControl"></div><div class="toolbar"><button class="primary" onclick="saveRuntimeControl()">保存暂停状态</button><button onclick="refreshRuntime()">刷新运行状态</button><span id="runtimeStatus" class="status muted"></span></div></section>
+<section data-view="overview" id="instructionPanel" hidden><h3>转账附言与要求</h3><p class="muted">你充值时写的话。机器人会读懂它是什么——这笔钱的条件、对策略的要求、还是随口一句——然后在每一轮决策里照做，做到哪一步也写在这里。原文和它的理解并排放着，不一致以你的原话为准。删掉的记录，之后的决策研究不再看到它。</p><div class="toolbar"><button onclick="refreshInstructions()">刷新</button><span class="muted" id="instructionStamp"></span></div><div id="instructionList"></div></section><section data-view="overview"><h3>机器人运行控制</h3><p class="muted">主链只要求至少一个可用 AI 模型服务和至少一个成功启动的平台插件。策略、研究与两类过滤插件都是可选增强；插件自行报告能否启动，通用框架不会猜测其私有参数。这里的暂停设置会保留到下次启动。</p><div id="runtimeControl"></div><div class="toolbar"><button class="primary" onclick="saveRuntimeControl()">保存暂停状态</button><button onclick="refreshRuntime()">刷新运行状态</button><span id="runtimeStatus" class="status muted"></span></div></section>
 <section data-view="security" hidden><h3>管理员安全</h3><div id="securityAccessNote" class="info-banner" hidden>当前通过本地 / 私网入口访问，没有创建需要退出的管理员登录会话。公网入口仍需要 Passkey；下方管理的是服务器已保存的登录凭据和会话。</div><p class="muted">Passkey 是设备上的登录凭据，可用指纹、面容或设备解锁验证。可以添加备用凭据，但必须保留至少一个。下方可查看登录设备并撤销会话。</p><div class="toolbar"><input id="newPasskeyName" placeholder="新 Passkey 名称"><button onclick="addPasskey()">添加 Passkey</button><button id="logoutSession" onclick="logout()">退出当前会话</button></div><h4>Passkey</h4><div id="passkeys"></div><h4>登录设备与会话</h4><div class="toolbar"><button onclick="kickSelectedSessions()">踢出选中会话</button></div><div id="sessions"></div></section>
 <section data-view="settings" hidden id="environmentPanel"><div class="section-heading"><div><h3>服务器与网络</h3><p>查看机器人运行在哪里，以及对外访问时使用哪个公网 IP。</p></div><button onclick="refreshEnvironment()">刷新状态</button></div><div id="environmentSummary" class="summary-line"></div><div class="query-box"><h4>查找 API 白名单需要的 IP</h4><p class="muted">先对比服务器直连与统一继承代理访问同一组检测目标时的出口。选择 INHERIT 的 市场平台插件通常使用第二项；插件另有独立代理时，再从下拉框单独查询。</p><button id="probeEgressComparison" class="primary" onclick="probeEgressComparison()">对比两种出口</button><div id="egressComparison" class="egress-comparison"></div><div class="filter-bar"><label>单独检查哪个连接？<select id="egressRoute" aria-label="公网出口查询路径" onchange="renderEgressSelection()"></select></label><button id="probeEgress" onclick="probeEgress()">查询所选连接</button></div><div id="egressResults"></div><p id="environmentStatus" class="status" role="status"></p><p class="description">不会修改白名单或发送交易。查询服务和交易平台可能经过不同的网络出口；配置白名单前请再向平台核对。</p></div><div id="environmentFacts"></div></section>
 <section data-view="settings" hidden><div class="section-intro"><h2>交易风格</h2><p>内置策略的<strong>偏好</strong>：优先做这么多天内揭标的标的，单笔大致买这么多——小额多次、快进快出，钱回得快、错得便宜、效果很快看得见。这是偏好不是禁令：更赚钱的机会，AI 可以做得更久或更大，但必须在理由里说清楚凭什么，你能在决策账本里看到。换成你自己的决策策略插件后，这两个值不再起作用；要不可逾越的硬上限，请在插件中心启用业务风控。</p></div><div id="strategySettings" class="plugin-grid"></div><div class="toolbar"><button class="primary" onclick="saveApplicationSettings()">保存交易风格</button><span id="strategySettingsStatus" class="status muted"></span></div></section>
@@ -163,7 +163,7 @@ function renderConfigurationPresets(m){for(let [kind,plugins]of Object.entries(m
 
 
 
-async function refreshRuntime(){let r=await get('/api/runtime');renderRuntime(r);return r}
+async function refreshRuntime(){let r=await get('/api/runtime');renderRuntime(r);refreshInstructions();return r}
 let FEEDBACK_TIMER;
 function showOperationFeedback(message,state='good',sticky=false){let n=document.getElementById('globalFeedback');clearTimeout(FEEDBACK_TIMER);n.className=state;n.textContent=message;n.hidden=false;n.onclick=()=>{n.hidden=true};if(!sticky)FEEDBACK_TIMER=setTimeout(()=>{n.hidden=true},5000)}
 function setOperationStatus(node,message,state='good'){if(node){node.className='status '+state;node.textContent=message}showOperationFeedback(message,state,state==='pending')}
@@ -603,6 +603,73 @@ class AuditData:
             )
         finally:
             memory.connection.close()
+
+    def instructions(self, limit: int = 100) -> dict[str, Any]:
+        """What the operator attached to their money, open and closed, as they wrote it.
+
+        The robot's reading of a note is a claim about what they meant, so it is never shown on its
+        own: the words, the transfer they came with, what was made of them and where that stands go
+        out together, and the operator settles any disagreement between them.
+        """
+        memory = SessionMemory(self.config.session_db)
+        try:
+            items = memory.instructions(limit=max(1, min(500, int(limit))))
+        finally:
+            memory.connection.close()
+        return {"instructions": [self._instruction_card(item) for item in items]}
+
+    LASTS_IN_WORDS = {
+        "until_done": "做完为止",
+        "until_deadline": "到期为止",
+        "standing": "长期有效",
+        "unclear": "没说期限，按一直有效处理",
+        "none": "",
+    }
+    STATUS_IN_WORDS = {
+        "active": "生效中",
+        "done": "已完成",
+        "expired": "已过期",
+        "noted": "只是备注，不影响决策",
+    }
+    KIND_IN_WORDS = {
+        "fund_condition": "这笔钱的条件",
+        "strategy_note": "对策略的要求",
+        "reminder": "提醒",
+        "remark": "闲话",
+    }
+
+    def _instruction_card(self, item: dict[str, Any]) -> dict[str, Any]:
+        conditions = dict(item.get("conditions") or {})
+        lasts = str(conditions.pop("lasts", "unclear"))
+        return {
+            "id": item["id"],
+            "platform": item["platform"],
+            "written_at": item["created_at"],
+            "operator_wrote": item["raw_text"],
+            "came_with": item["source"],
+            "kind": item["kind"],
+            "kind_label": self.KIND_IN_WORDS.get(str(item["kind"]), str(item["kind"])),
+            "headline": item["headline"],
+            "instruction": item["instruction"],
+            "conditions": {key: value for key, value in conditions.items() if value not in (None, [], "")},
+            "lasts": lasts,
+            "lasts_label": self.LASTS_IN_WORDS.get(lasts, lasts),
+            "status": item["status"],
+            "status_label": self.STATUS_IN_WORDS.get(str(item["status"]), str(item["status"])),
+            "binding": str(item["status"]) == "active",
+            "progress": item["progress"],
+            "resolution": item["resolution"],
+            "checked_at": item["checked_at"],
+        }
+
+    def forget_instruction(self, instruction_id: int) -> dict[str, Any]:
+        """Take one back. Nothing decided after this sees it, which is what taking it back means."""
+        memory = SessionMemory(self.config.session_db)
+        try:
+            removed = memory.forget_instruction(int(instruction_id))
+        finally:
+            memory.connection.close()
+        return {"deleted": bool(removed), "id": int(instruction_id)}
 
     FORGET_BATCH = 400
     """Ids per delete statement, well inside what any SQLite build accepts as parameters."""
@@ -1148,6 +1215,10 @@ def create_app(config: Config, *, start_robot: bool = True) -> FastAPI:
             return application_settings.reset(
                 payload.get("names") if "names" in payload else None
             )
+        if path == "/api/instructions/forget":
+            return data.forget_instruction(int(payload.get("id", 0)))
+        if path == "/api/instructions":
+            return data.instructions(int(query_value(query, "limit", "100")))
         if path == "/api/decisions/readable":
             return data.readable(int(query_value(query, "id", "0")))
         if path == "/api/decisions/detail":

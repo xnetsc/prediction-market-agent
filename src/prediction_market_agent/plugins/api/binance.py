@@ -105,6 +105,11 @@ def initialize_plugin(context: PluginInitializationContext) -> PluginSpec:
     DEPOSIT_FIELDS = [
         {"name": "txid", "label": "充值交易号（txid）", "required": True,
          "placeholder": "0x 或 交易所给的那串交易号；转完账在提币记录里复制"},
+        # Conditions people attach when they pay: a deadline, what it may be spent on, a change of
+        # approach. Collected here, obeyed by the runtime.
+        {"name": "note", "label": "附言（可选）：给这笔钱提的要求", "multiline": True,
+         "placeholder": "比如「这笔 3 天内用完」「只买体育」「别再买几个月后才揭标的」——机器人会一直照做，"
+                        "做完了会在决策账本里告诉你"},
     ]
 
     def deposit_action(key: str, name: str, payload: dict) -> dict:
@@ -116,6 +121,9 @@ def initialize_plugin(context: PluginInitializationContext) -> PluginSpec:
             instance = _live_instance()
         except Exception as error:
             return {"ok": False, "message": str(error)[:300]}
+        note = str(payload.get("note", "")).strip()
+        if note:
+            instance.note_from_operator(note, source="deposit", txid=str(payload.get("txid", "")))
         network = str(payload.get("network", "")).strip().upper()
         if network and not str(payload.get("txid", "")).strip():
             # Asking for another chain's address is not a claim that anything was sent.
@@ -154,6 +162,17 @@ def initialize_plugin(context: PluginInitializationContext) -> PluginSpec:
         content = dict(panel)
         if tracking["txid"]:
             content["这笔充值"] = f"{tracking['txid']}：{tracking['detail'] or tracking['state']}"
+        # Read by the robot, not here, and the robot may be paused or out of model quota. Saying so
+        # is the difference between "waiting its turn" and the operator thinking it went nowhere.
+        try:
+            waiting = [str(item.get("text", "")) for item in _live_instance().operator_messages()]
+        except Exception:
+            waiting = []
+        if waiting:
+            content["待机器人读取的附言"] = (
+                "；".join(waiting) + f"（{len(waiting)} 条，机器人下一轮开始前会读它们，"
+                "读懂了会出现在总览页的「转账附言与要求」里）"
+            )
         return [{
             "key": "deposit",
             "title": '我要充值',
@@ -210,6 +229,11 @@ def initialize_plugin(context: PluginInitializationContext) -> PluginSpec:
             return {"ok": False, "message": str(error)[:300]}
         # A deposit made to answer this request is checked at the exchange before any transfer:
         # approving a move of money that has not landed is how an account ends up short twice.
+        note = str(payload.get("note", "")).strip()
+        if note:
+            instance.note_from_operator(
+                note, source=f"funding:{name}", txid=str(payload.get("txid", "")),
+            )
         if name == "confirm" and str(payload.get("txid", "")).strip():
             answer = deposit_action("funding", "confirm", payload)
             if not answer.get("ok"):

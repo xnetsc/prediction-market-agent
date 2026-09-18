@@ -124,6 +124,8 @@ class MarketEvaluationMixin:
         # The strategy text reaches the model once, through the instruction block; the context
         # JSON carries only which priors and lessons were applied.
         strategy_payload = self.decision_evolution.payload()
+        keeper = getattr(self, "operator_instructions", None)
+        instructions = keeper.payload(platform) if keeper is not None else {}
         current = {
             "market": compact_market(platform, topic, detail, market),
             "outcome": {
@@ -151,6 +153,9 @@ class MarketEvaluationMixin:
             # Present only when this round exists because an earlier one stopped for money. It
             # carries the old reasoning as something to re-check, never as a conclusion to resume.
             **({"delayed_funding_answer": funding_followup} if funding_followup else {}),
+            # Conditions the operator attached to the money. They are not preferences: obeying
+            # them comes before anything the strategy text would otherwise choose.
+            **({"operator_instructions": instructions} if instructions.get("count") else {}),
             "registered_platform_capabilities": {
                 name: item.plugin.capabilities.to_dict()
                 for name, item in self.platforms.items()
