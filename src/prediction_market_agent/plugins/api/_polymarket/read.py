@@ -62,6 +62,34 @@ class PolymarketReadClient:
             raise RuntimeError("Polymarket Gamma /events response must be an array")
         return [item for item in value if isinstance(item, dict)]
 
+    def list_events_by_deadline(
+        self, *, offset: int, limit: int, after: str, before: str
+    ) -> list[dict[str, Any]]:
+        """Events settling inside a window, soonest first.
+
+        The default listing is ordered by volume, where the busiest markets are the ones settling
+        months out. Asked by date instead, the same venue answers with what resolves this week.
+        `after` keeps out the ones whose date has already passed while the event is still marked
+        active - the venue leaves plenty of those lying around.
+        """
+        value = self._get(
+            self.gamma_url,
+            "/events",
+            {
+                "active": "true",
+                "closed": "false",
+                "limit": limit,
+                "offset": offset,
+                "order": "endDate",
+                "ascending": "true",
+                "end_date_min": after,
+                "end_date_max": before,
+            },
+        )
+        if not isinstance(value, list):
+            raise RuntimeError("Polymarket Gamma /events response must be an array")
+        return [item for item in value if isinstance(item, dict)]
+
     def get_event(self, event_id: str) -> dict[str, Any]:
         value = self._get(self.gamma_url, f"/events/{urllib.parse.quote(event_id, safe='')}")
         if not isinstance(value, dict):

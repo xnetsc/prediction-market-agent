@@ -370,3 +370,24 @@ class FundingContinuationTests(unittest.TestCase):
             answer, detail, None, SimpleNamespace(name="YES"),
         )
         self.assertEqual(note["how_long_this_market_still_has"], "30 minutes")
+
+
+class WhatTheRobotIsForTests(unittest.TestCase):
+    """Both mistakes cost: a bad trade taken, and a good one not taken."""
+
+    def test_the_decision_text_states_the_objective_and_that_holding_is_not_it(self) -> None:
+        from prediction_market_agent.agent.strategy import BuiltInDecisionStrategy
+
+        text = BuiltInDecisionStrategy().instructions
+        self.assertIn("more money at the end than at the start", text)
+        self.assertIn("costs exactly what it would have made", text)
+        self.assertIn("not because doing nothing is the", text)
+        # The guardrails it is bounded by are still there.
+        self.assertIn("HOLD IS THE DEFAULT", text)
+        self.assertIn("THE BAR IS THE PRICE PLUS COSTS", text)
+
+    def test_discovery_spends_slots_on_what_can_pay(self) -> None:
+        from prediction_market_agent.agent.market_discovery import BuiltInMarketDiscovery
+
+        text = BuiltInMarketDiscovery().instructions
+        self.assertIn("a slot is worth what the decision behind it can earn", text)

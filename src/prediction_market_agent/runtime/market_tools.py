@@ -12,6 +12,7 @@ nor for forgiveness - it just does what it was asked and reports what happened.
 """
 from __future__ import annotations
 
+import time
 from dataclasses import asdict, is_dataclass
 from typing import Any
 
@@ -132,6 +133,19 @@ DESCRIPTIONS: dict[str, Any] = {
     "LIST_TOPICS": {
         "purpose": "Page through a platform's topics. Use it to look beyond this round's shortlist.",
         "arguments": {"platform": "optional string", "offset": "optional int", "limit": "optional int"},
+    },
+    "LIST_TOPICS_BY_DEADLINE": {
+        "purpose": (
+            "List a platform's topics by when they settle, soonest first, inside a window you "
+            "name. The ordinary listing is ordered by how busy a market is, and the busiest ones "
+            "are usually the ones settling months out - on one venue, nine of the two hundred "
+            "busiest settled inside three days while asking by date returned a hundred. Use this "
+            "when what you need is what resolves soon. Platforms that cannot answer by date say so."
+        ),
+        "arguments": {
+            "within_hours": "required number: how far ahead to look",
+            "platform": "optional string", "offset": "optional int", "limit": "optional int",
+        },
     },
     "GET_TOPIC": {
         "purpose": "Read one topic in full: every market and every outcome under it.",
@@ -276,6 +290,25 @@ class MarketToolset:
             limit=int(arguments.get("limit", 20) or 20),
         )
         return _plain({"platform": runtime.plugin.name, "page": page})
+
+    def _list_topics_by_deadline(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        runtime = self._runtime(arguments)
+        listing = getattr(runtime.plugin, "list_topics_by_deadline", None)
+        if not callable(listing):
+            return {"platform": runtime.plugin.name, "supported": False,
+                    "note": "这个平台不能按结算时间列出标的，请用 LIST_TOPICS"}
+        hours = float(arguments["within_hours"])
+        if hours <= 0:
+            raise ValueError("within_hours must be positive")
+        now_ms = int(time.time() * 1000)
+        page = listing(
+            offset=int(arguments.get("offset", 0) or 0),
+            limit=int(arguments.get("limit", 20) or 20),
+            after_ms=now_ms,
+            before_ms=now_ms + int(hours * 3600 * 1000),
+        )
+        return _plain({"platform": runtime.plugin.name, "supported": True,
+                       "within_hours": hours, "page": page})
 
     def _get_topic(self, arguments: dict[str, Any]) -> dict[str, Any]:
         runtime = self._runtime(arguments)

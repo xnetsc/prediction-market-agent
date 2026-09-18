@@ -1025,12 +1025,17 @@ class AnEmptyHorizonCostsNothingTests(unittest.TestCase):
         self.memory = SessionMemory(Path(self.temp.name) / "m.sqlite3")
 
     class _Distant(FakePlugin):
+        """Asked by date, it answers with nothing: this venue really has nothing settling soon."""
+
         def __init__(self) -> None:
             super().__init__(topics=3)
 
         def get_topic(self, topic_id: str):
             detail = super().get_topic(topic_id)
             return replace(detail, end_time_ms=int(time.time() * 1000) + 90 * 86400 * 1000)
+
+        def list_topics_by_deadline(self, *, offset, limit, after_ms, before_ms):
+            return TopicPage((), False, 0)
 
     def test_nothing_in_range_is_recorded_without_asking_a_model(self) -> None:
         from prediction_market_agent.agent.market_discovery import BuiltInMarketDiscovery
@@ -1121,7 +1126,7 @@ class WhenToComeBackTests(unittest.TestCase):
 
 
 class _DistantPlatform(FakePlugin):
-    """Everything settles three months out."""
+    """Everything settles three months out, and asking by date confirms it."""
 
     def __init__(self) -> None:
         super().__init__(topics=3)
@@ -1129,3 +1134,181 @@ class _DistantPlatform(FakePlugin):
     def get_topic(self, topic_id: str):
         detail = super().get_topic(topic_id)
         return replace(detail, end_time_ms=int(time.time() * 1000) + 90 * 86400 * 1000)
+
+    def list_topics_by_deadline(self, *, offset, limit, after_ms, before_ms):
+        return TopicPage((), False, 0)
+
+
+class TheVenueIsAskedForWhatSettlesSoonTests(unittest.TestCase):
+    """A listing ordered by volume is the worst way to find what settles this week."""
+
+    def setUp(self) -> None:
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.memory = SessionMemory(Path(self.temp.name) / "m.sqlite3")
+
+    class _Venue(FakePlugin):
+        """Busy markets settle in a month; the near-dated ones answer only when asked by date."""
+
+        def __init__(self) -> None:
+            super().__init__(topics=3)
+            self.deadline_calls: list[dict] = []
+            self.near = [
+                Topic("near-1", "Game tonight", "q", "d", "sport", "OPEN", 5_000.0, 10.0, "n1"),
+                Topic("near-2", "Bitcoin 5 minute", "q", "d", "crypto", "OPEN", 5_000.0, 10.0, "n2"),
+            ]
+
+        def list_topics_by_deadline(self, *, offset, limit, after_ms, before_ms):
+            self.deadline_calls.append({"offset": offset, "limit": limit,
+                                        "window_days": round((before_ms - after_ms) / 86400 / 1000)})
+            return TopicPage(tuple(self.near[offset:offset + limit]), False, offset + len(self.near))
+
+    def test_what_settles_soon_is_fetched_first_and_the_listing_still_runs(self) -> None:
+        from prediction_market_agent.agent.market_discovery import BuiltInMarketDiscovery
+
+        venue = self._Venue()
+        provider = RecordingProvider()
+        DiscoveryEngine(
+            memory=self.memory, provider=provider,
+            strategy=BuiltInMarketDiscovery(horizon_days=3), evolution_enabled=False,
+        ).discover(platform="fake", plugin=venue, maximum_topics=2)
+        self.assertEqual(venue.deadline_calls[0]["window_days"], 3, "the window is the horizon")
+        observed = {row["market_topic_id"] for row in self.memory.connection.execute(
+            "SELECT market_topic_id FROM topic_observations"
+        ).fetchall() for row in [{"market_topic_id": row[0]}]}
+        self.assertTrue({"near-1", "near-2"} <= observed, "the near-dated ones were never surveyed")
+        self.assertTrue({"1", "2", "3"} <= observed, "the venue's own listing stopped being read")
+
+    def test_a_venue_that_cannot_answer_by_date_is_unaffected(self) -> None:
+        from prediction_market_agent.agent.market_discovery import BuiltInMarketDiscovery
+
+        provider = RecordingProvider()
+        DiscoveryEngine(
+            memory=self.memory, provider=provider,
+            strategy=BuiltInMarketDiscovery(horizon_days=3), evolution_enabled=False,
+        ).discover(platform="fake", plugin=FakePlugin(topics=3), maximum_topics=2)
+        self.assertTrue(provider.requests, "the ordinary listing round stopped working")
+
+    def test_an_event_whose_date_has_passed_is_not_a_candidate(self) -> None:
+        from prediction_market_agent.agent.market_discovery import BuiltInMarketDiscovery
+
+        class Expired(FakePlugin):
+            def __init__(self) -> None:
+                super().__init__(topics=2)
+
+            def get_topic(self, topic_id: str):
+                detail = super().get_topic(topic_id)
+                stamp = int(time.time() * 1000) + (86_400_000 if topic_id == "1" else -3_600_000)
+                return replace(detail, end_time_ms=stamp)
+
+        provider = RecordingProvider()
+        DiscoveryEngine(
+            memory=self.memory, provider=provider,
+            strategy=BuiltInMarketDiscovery(horizon_days=3), evolution_enabled=False,
+        ).discover(platform="fake", plugin=Expired(), maximum_topics=2)
+        request = provider.requests[0]
+        self.assertEqual({item["topic_id"] for item in request["candidates"]}, {"1"})
+        self.assertEqual(request["dropped_already_settled"], 1)
+
+
+class TheRoundCanFetchItsOwnCandidatesTests(unittest.TestCase):
+    """What to look at is the agent's call; the plugin only decides when a cycle runs."""
+
+    def setUp(self) -> None:
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.memory = SessionMemory(Path(self.temp.name) / "m.sqlite3")
+
+    class _ListingOnlyVenue(FakePlugin):
+        """Everything it lists settles in two months; what settles tonight is only findable."""
+
+        def __init__(self) -> None:
+            super().__init__(topics=2)
+            self.soon = Topic("soon-1", "Game tonight", "q", "d", "sport", "OPEN", 9_000.0, 50.0, "s1")
+            self.searched: list[str] = []
+
+        def get_topic(self, topic_id: str):
+            if topic_id == "soon-1":
+                detail = super().get_topic("1")
+                return replace(detail, topic=self.soon,
+                               end_time_ms=int(time.time() * 1000) + 6 * 3600 * 1000)
+            detail = super().get_topic(topic_id)
+            return replace(detail, end_time_ms=int(time.time() * 1000) + 60 * 86400 * 1000)
+
+        def search_market_candidates(self, query, limit):
+            self.searched.append(query)
+            return [SimpleNamespace(topic=self.soon)]
+
+    class _Searcher(RecordingProvider):
+        def run(self, payload, **options):
+            super().run(payload, **options)
+            answer = options["tool_executor"]("FIND_TOPICS", {"query": "settling tonight"})
+            found = answer["topics"][0]["topic_id"]
+            return AgentRunResult(
+                value={"selections": [{"topic_id": found, "reason": "settles tonight", "priors": []}],
+                       "skipped_reason": "", "next_scan_seconds": 0, "next_survey_queries": [],
+                       "pacing_reason": "", "headline": "went and found one"},
+                raw_output="{}", provider="searcher", research_trace=[],
+            )
+
+    def test_a_market_it_found_itself_can_be_selected(self) -> None:
+        """An empty shortlist is a fact about the listing, and the round can correct it."""
+        from prediction_market_agent.agent.market_discovery import BuiltInMarketDiscovery
+
+        venue = self._ListingOnlyVenue()
+        provider = self._Searcher()
+        selected = DiscoveryEngine(
+            memory=self.memory, provider=provider,
+            strategy=BuiltInMarketDiscovery(horizon_days=3), evolution_enabled=False,
+        ).discover(platform="fake", plugin=venue, maximum_topics=2)
+        self.assertEqual(provider.requests[0]["candidates"], [], "the listing had nothing in range")
+        self.assertEqual(venue.searched, ["settling tonight"])
+        self.assertEqual([topic.topic_id for topic in selected], ["soon-1"])
+
+    def test_both_ways_of_fetching_are_offered_and_explained(self) -> None:
+        from prediction_market_agent.agent.market_discovery import BuiltInMarketDiscovery
+
+        provider = RecordingProvider()
+        DiscoveryEngine(
+            memory=self.memory, provider=provider,
+            strategy=BuiltInMarketDiscovery(horizon_days=3), evolution_enabled=False,
+        ).discover(platform="fake", plugin=self._ListingOnlyVenue(), maximum_topics=1)
+        self.assertIn("TOPICS_BY_DEADLINE", provider.tool_descriptions)
+        self.assertIn("FIND_TOPICS", provider.tool_descriptions)
+        text = BuiltInMarketDiscovery(horizon_days=3).instructions
+        self.assertIn("THE SHORTLIST IS A STARTING POINT", text)
+        self.assertIn("Going and getting more is an ordinary", text)
+        for reason in ("the wrong reading for what this runtime trades",
+                       "what you just read points elsewhere",
+                       "merely acceptable",
+                       "more of a kind to choose between"):
+            with self.subTest(reason=reason):
+                self.assertIn(reason, text)
+
+    def test_a_venue_already_asked_by_date_is_not_asked_a_model_as_well(self) -> None:
+        """Asked by date and answered with nothing means nothing is there - no call needed."""
+        from prediction_market_agent.agent.market_discovery import BuiltInMarketDiscovery
+
+        class ByDateVenue(self._ListingOnlyVenue):
+            def list_topics_by_deadline(self, *, offset, limit, after_ms, before_ms):
+                return TopicPage((), False, 0)
+
+        provider = RecordingProvider()
+        DiscoveryEngine(
+            memory=self.memory, provider=provider,
+            strategy=BuiltInMarketDiscovery(horizon_days=3), evolution_enabled=False,
+        ).discover(platform="fake", plugin=ByDateVenue(), maximum_topics=1)
+        self.assertEqual(provider.requests, [])
+
+    def test_a_platform_that_cannot_list_by_date_says_so_rather_than_failing(self) -> None:
+        from prediction_market_agent.runtime.market_discovery import _DiscoveryToolbox
+        from prediction_market_agent.agent.market_discovery import BuiltInMarketDiscovery
+
+        toolbox = _DiscoveryToolbox(
+            plugin=FakePlugin(topics=1), memory=self.memory, platform="fake",
+            budget=BuiltInMarketDiscovery().budget(), cross_platform_search=None,
+        )
+        answer = toolbox.execute("TOPICS_BY_DEADLINE", {"within_hours": 72})
+        self.assertFalse(answer["ok"])
+        self.assertFalse(answer["supported"])
+        self.assertIn("FIND_TOPICS", answer["error"])

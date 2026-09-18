@@ -210,6 +210,14 @@ class PredictionMarketApiPlugin(Protocol):
 
     def list_topics(self, *, offset: int, limit: int) -> TopicPage: ...
 
+    # Optional. A venue lists by what is busiest, which is the opposite of what a robot trading
+    # short-dated markets needs: on one venue, nine of the two hundred busiest events settled inside
+    # three days, while asking the same venue by date returned a hundred. A plugin that can answer
+    # by deadline says so with "topic_list_by_deadline" in its capabilities' data features.
+    def list_topics_by_deadline(
+        self, *, offset: int, limit: int, after_ms: int, before_ms: int
+    ) -> TopicPage: ...
+
     def get_topic(self, topic_id: str) -> TopicDetail: ...
 
     def get_order_book(self, market_id: str, outcome_id: str) -> OrderBook: ...

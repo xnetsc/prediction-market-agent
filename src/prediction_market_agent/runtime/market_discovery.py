@@ -166,17 +166,55 @@ class DiscoveryEngine:
 
     # ------------------------------------------------------------------ survey
 
+    def _survey_by_deadline(
+        self, plugin: PredictionMarketApiPlugin, budget: DiscoveryBudget, horizon_days: int
+    ) -> list[Topic]:
+        """What this venue has settling inside the window, when it can answer that question.
+
+        The ordinary listing is by volume, and the busiest markets are the distant ones: on a live
+        venue, nine of the two hundred busiest events settled inside three days. A robot that only
+        trades what settles soon would spend every round reading markets it may not touch.
+        """
+        listing = getattr(plugin, "list_topics_by_deadline", None)
+        if horizon_days <= 0 or not callable(listing):
+            return []
+        now_ms = int(time.time() * 1000)
+        topics: list[Topic] = []
+        offset, page = 0, max(1, plugin.topic_page_size())
+        while len(topics) < budget.survey_topics:
+            try:
+                answer = listing(
+                    offset=offset, limit=page,
+                    after_ms=now_ms, before_ms=now_ms + horizon_days * 86400 * 1000,
+                )
+            except Exception as error:
+                # The venue may not really support it whatever its capabilities say; the ordinary
+                # listing still runs, so a round is never lost over this.
+                LOGGER.warning("%s could not list by deadline: %s", plugin.name, error)
+                break
+            topics.extend(answer.topics)
+            if not answer.has_more or not answer.topics:
+                break
+            offset = answer.next_offset
+        return topics[: budget.survey_topics]
+
     def _survey(
         self, plugin: PredictionMarketApiPlugin, budget: DiscoveryBudget
     ) -> list[Topic]:
+        # What settles inside the window first, because the listing below will not offer it, then
+        # the venue's own order for the rest - the crowd's favourites still have to be seen for the
+        # gates and the priors to mean anything.
+        horizon_days = int(getattr(self.strategy, "horizon_days", 0) or 0)
+        topics: list[Topic] = self._survey_by_deadline(plugin, budget, horizon_days)
+        seen = {topic.topic_id for topic in topics}
         page_size = max(1, int(plugin.topic_page_size()))
-        topics: list[Topic] = []
         offset = 0
         while len(topics) < budget.survey_topics:
             page = plugin.list_topics(
                 offset=offset, limit=min(page_size, budget.survey_topics - len(topics))
             )
-            topics.extend(page.topics)
+            topics.extend(topic for topic in page.topics if topic.topic_id not in seen)
+            seen.update(topic.topic_id for topic in page.topics)
             if not page.has_more or not page.topics:
                 break
             offset = page.next_offset
@@ -331,7 +369,7 @@ class DiscoveryEngine:
         shortlist = ranked[: max(1, budget.shortlist_topics)]
         by_id = {topic.topic_id: topic for topic in surveyed}
 
-        selections, mode, skipped_reason = self._select(
+        selections, mode, skipped_reason, fetched = self._select(
             platform=platform,
             plugin=plugin,
             shortlist=shortlist,
@@ -341,6 +379,8 @@ class DiscoveryEngine:
             now_ms=now_ms,
         )
         strategy_name = self.strategy.name if mode == "agent" else f"{self.strategy.name}:{mode}"
+        # A market the round went and found for itself is selectable like any other.
+        by_id.update(fetched)
 
         chosen: list[Topic] = []
         for position, item in enumerate(selections, start=1):
@@ -475,7 +515,7 @@ class DiscoveryEngine:
         budget: DiscoveryBudget,
         maximum_topics: int,
         now_ms: int,
-    ) -> tuple[list[dict[str, Any]], str, str]:
+    ) -> tuple[list[dict[str, Any]], str, str, dict[str, Topic]]:
         payload = compose_discovery_payload(
             self.strategy,
             priors=self._priors(),
@@ -527,6 +567,7 @@ class DiscoveryEngine:
         # When the closest of the dropped ones becomes tradeable. Asking the round to time its next
         # look to markets entering the window is only answerable if it is told when that happens.
         nearest_outside: float | None = None
+        already_settled = 0
         if horizon_days > 0:
             limit = horizon_days * 86400
             kept = []
@@ -537,15 +578,30 @@ class DiscoveryEngine:
                     entering = float(seconds) - limit
                     nearest_outside = min(nearest_outside or entering, entering)
                     continue
+                # A venue leaves events marked active long after their date has passed. Nothing can
+                # be traded on one, and a round spent explaining that is a round wasted.
+                if isinstance(seconds, (int, float)) and seconds <= 0:
+                    already_settled += 1
+                    continue
                 kept.append(candidate)
             candidates = kept
-        if too_far and not candidates:
+        # Nothing in range, and the venue was already asked by date: there is nothing here to find,
+        # so the round is recorded without a call. Where the venue cannot answer by date, an empty
+        # shortlist only means the listing was the wrong question - the round still runs, and the
+        # agent can go and search for itself.
+        asked_by_date = horizon_days > 0 and callable(
+            getattr(plugin, "list_topics_by_deadline", None)
+        )
+        if asked_by_date and (too_far or already_settled) and not candidates:
             # Nothing left to choose between. Asking a model to pick from an empty list costs a
             # call to be told what the gate already knows, and on a venue where most markets
             # settle months out this is the ordinary case rather than the exception.
-            reason = (
-                f"本轮 {too_far} 个候选都在 {horizon_days} 天之外结算，没有可做的标的，"
-                "没有调用模型"
+            reason = "；".join(
+                part for part in (
+                    f"本轮 {too_far} 个候选在 {horizon_days} 天之外结算" if too_far else "",
+                    f"{already_settled} 个已经过了结算时间" if already_settled else "",
+                    "没有可做的标的，没有调用模型",
+                ) if part
             )
             decision_id = self.memory.begin_decision(
                 platform=platform, market_topic_id="", market_id="", token_id="",
@@ -577,7 +633,7 @@ class DiscoveryEngine:
                                 "headline": f"本轮没有 {horizon_days} 天内结算的标的"},
             )
             LOGGER.info("platform=%s %s", platform, reason)
-            return [], "horizon", reason
+            return [], "horizon", reason, {}
         request = {
             "platform": platform,
             "platform_capabilities": plugin.capabilities.to_dict(),
@@ -588,6 +644,7 @@ class DiscoveryEngine:
                 "horizon_days": horizon_days,
                 "nearest_settlement_outside_horizon_seconds": int(nearest_outside or 0)}
                if too_far else {}),
+            **({"dropped_already_settled": already_settled} if already_settled else {}),
         }
         # Every call to a model leaves a row, this one included. It used to leave none: a discovery
         # round that failed, or that judged nothing worth a slot, produced no ledger entry at all,
@@ -607,7 +664,8 @@ class DiscoveryEngine:
                      **({"dropped_settling_after_horizon": too_far,
                          "horizon_days": horizon_days,
                          "nearest_settlement_outside_horizon_seconds": int(nearest_outside or 0)}
-                        if too_far else {})},
+                        if too_far else {}),
+                     **({"dropped_already_settled": already_settled} if already_settled else {})},
         )
         try:
             result = self.provider.run(
@@ -627,7 +685,7 @@ class DiscoveryEngine:
             # The round's record was deleted while the agent was still choosing. Its choices have
             # nowhere to be recorded, so this round selects nothing rather than acting on them.
             LOGGER.info("discovery round %s on %s was deleted; stopped", decision_id, platform)
-            return [], "cancelled", "deleted while running"
+            return [], "cancelled", "deleted while running", dict(toolbox.found)
         except (DecisionProviderError, AttributeError, TypeError) as error:
             # Losing the Agent must not stop the platform from trading. Fall back to the
             # deterministic prescore order and mark the cycle so the audit trail shows which
@@ -655,10 +713,11 @@ class DiscoveryEngine:
                 ],
                 "mechanical",
                 "",
+                dict(toolbox.found),
             )
         if self.memory.is_cancelled(decision_id):
             LOGGER.info("discovery round %s on %s was deleted after answering", decision_id, platform)
-            return [], "cancelled", "deleted while running"
+            return [], "cancelled", "deleted while running", dict(toolbox.found)
         selections = [item for item in result.value.get("selections", []) if isinstance(item, dict)]
         skipped_reason = str(result.value.get("skipped_reason", ""))
         # How soon to come back and what to go looking for are judgements about this platform right
@@ -689,7 +748,7 @@ class DiscoveryEngine:
             status="OK" if selections else "NO_ACTION",
             error="" if selections else skipped_reason,
         )
-        return selections, "agent", skipped_reason
+        return selections, "agent", skipped_reason, dict(toolbox.found)
 
     # -------------------------------------------------------------- evolution
 
@@ -848,6 +907,9 @@ class _DiscoveryToolbox:
         self.cross_platform_search = cross_platform_search
         self._detail_calls = 0
         self._book_calls = 0
+        # Topics the round went and fetched for itself, which the selection step must be able to
+        # resolve: a market it found and chose is no different from one it was handed.
+        self.found: dict[str, Topic] = {}
         self.descriptions: dict[str, Any] = {
             "TOPIC_DETAIL": {
                 "purpose": "Read one topic's markets, outcomes, resolution data and end time.",
@@ -867,6 +929,29 @@ class _DiscoveryToolbox:
                     "largest buckets."
                 ),
                 "arguments": {"prefix": "optional bucket name prefix filter"},
+            },
+            # The shortlist you were handed is one reading of this venue, taken before you looked
+            # at anything. When it is the wrong reading - everything settles too far out, nothing
+            # in the category that moved today - go and get a better one now rather than asking for
+            # it next round. Anything these return can be selected like any other candidate.
+            "FIND_TOPICS": {
+                "purpose": (
+                    "Search this platform's own catalogue for markets the shortlist did not "
+                    "include. The shortlist is the venue's busiest, which is not the same as what "
+                    "is worth looking at now."
+                ),
+                "arguments": {"query": "required string", "limit": "optional integer"},
+            },
+            "TOPICS_BY_DEADLINE": {
+                "purpose": (
+                    "List this platform's markets by when they settle, soonest first, inside a "
+                    "window you name. The ordinary listing is ordered by how busy a market is, and "
+                    "the busiest are usually the ones settling months out - so this is how what "
+                    "resolves soon gets found at all. A platform that cannot answer by date says so."
+                ),
+                "arguments": {
+                    "within_hours": "required number", "limit": "optional integer",
+                },
             },
         }
         if cross_platform_search is not None:
@@ -894,6 +979,8 @@ class _DiscoveryToolbox:
             "TOPIC_HISTORY": self._topic_history,
             "RECALL_MEASUREMENTS": self._recall_measurements,
             "SEARCH_OTHER_PLATFORMS": self._search,
+            "FIND_TOPICS": self._find_topics,
+            "TOPICS_BY_DEADLINE": self._topics_by_deadline,
         }.get(name.strip().upper())
         if handler is None:
             executor = self._research.get(name.strip().upper())
@@ -901,6 +988,52 @@ class _DiscoveryToolbox:
                 return executor.execute(name.strip().upper(), arguments)
             raise ValueError(f"Unknown discovery tool: {name}")
         return handler(arguments)
+
+    def _offer(self, topics: Any) -> list[dict[str, Any]]:
+        """Put fetched topics into the round's pool so they can be chosen, and describe them."""
+        listed: list[dict[str, Any]] = []
+        for topic in topics or ():
+            if topic is None:
+                continue
+            self.found[topic.topic_id] = topic
+            listed.append({
+                "topic_id": topic.topic_id,
+                "title": topic.title,
+                "status": topic.status,
+                "liquidity_usdt": topic.liquidity_usdt,
+                "volume_usdt": topic.volume_usdt,
+            })
+        return listed
+
+    def _find_topics(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        query = str(arguments.get("query", "")).strip()
+        if not query:
+            raise ValueError("FIND_TOPICS needs a query")
+        limit = max(1, min(int(arguments.get("limit", 10) or 10), self.budget.shortlist_topics))
+        try:
+            candidates = self.plugin.search_market_candidates(query, limit)
+        except Exception as error:
+            return {"ok": False, "error": str(error)[:200]}
+        topics = [getattr(candidate, "topic", None) for candidate in candidates]
+        return {"ok": True, "query": query, "topics": self._offer(topics)}
+
+    def _topics_by_deadline(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        listing = getattr(self.plugin, "list_topics_by_deadline", None)
+        if not callable(listing):
+            return {"ok": False, "supported": False,
+                    "error": "this platform cannot list by settlement time; use FIND_TOPICS"}
+        hours = float(arguments.get("within_hours", 0) or 0)
+        if hours <= 0:
+            raise ValueError("TOPICS_BY_DEADLINE needs within_hours above zero")
+        limit = max(1, min(int(arguments.get("limit", 20) or 20), self.budget.shortlist_topics))
+        now_ms = int(time.time() * 1000)
+        try:
+            page = listing(offset=0, limit=limit, after_ms=now_ms,
+                           before_ms=now_ms + int(hours * 3600 * 1000))
+        except Exception as error:
+            return {"ok": False, "supported": True, "error": str(error)[:200]}
+        return {"ok": True, "supported": True, "within_hours": hours,
+                "topics": self._offer(page.topics)}
 
     def _topic_detail(self, arguments: dict[str, Any]) -> dict[str, Any]:
         if self._detail_calls >= self.budget.detail_lookups:

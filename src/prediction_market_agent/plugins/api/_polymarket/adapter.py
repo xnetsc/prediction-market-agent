@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import re
 from collections.abc import Mapping
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any
 
 from pathlib import Path
@@ -81,6 +81,7 @@ class PolymarketApiPlugin:
         write_workflows=("BUY", "SELL", "CANCEL", "REDEEM", "TRANSFER_OUT"),
         data_features=(
             "event_list_and_detail",
+            "topic_list_by_deadline",
             "market_and_outcome_normalization",
             "top_of_book_and_depth",
             "displayed_probability",
@@ -388,6 +389,20 @@ class PolymarketApiPlugin:
         if offset == 0:
             self._events = []
         self._events.extend(batch)
+        topics = tuple(self._topic(item) for item in batch)
+        return TopicPage(topics, len(batch) == limit, offset + len(batch))
+
+    def list_topics_by_deadline(
+        self, *, offset: int, limit: int, after_ms: int, before_ms: int
+    ) -> TopicPage:
+        """What settles inside a window, soonest first - the listing this venue will not volunteer."""
+        stamp = lambda value: (
+            datetime.fromtimestamp(value / 1000, timezone.utc).isoformat().replace("+00:00", "Z")
+        )
+        batch = self.client.list_events_by_deadline(
+            offset=offset, limit=limit, after=stamp(after_ms), before=stamp(before_ms)
+        )
+        self._events.extend(item for item in batch if item not in self._events)
         topics = tuple(self._topic(item) for item in batch)
         return TopicPage(topics, len(batch) == limit, offset + len(batch))
 
