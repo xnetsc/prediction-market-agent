@@ -294,14 +294,17 @@ class PolymarketWriteTransport:
             "chain": chain,
             "chain_id": chain_id,
             "address": str(client.wallet),
-            "token_symbol": symbol,
-            "token_contract": token,
+            "deposit_currency": "USDC",
+            "account_token_symbol": symbol,
+            "account_token_contract": token,
             "token_decimals": decimals,
             "minimum_confirmations": self.DEPOSIT_CONFIRMATIONS,
             "warnings": [
-                f"只能走 {chain}（chain id {chain_id}），发到别的链上收不回来",
-                f"只能转这个合约的 {symbol}：{token}，同名的其它 {symbol} 不行",
-                f"收款地址是 {client.wallet}，这是交易账户，不是你的签名地址",
+                f"链只能是 {chain}（chain id {chain_id}）。转到别的链上的同名地址，钱找不回来",
+                f"收款地址是 {client.wallet}，这是平台给这个账户的交易地址，不是你的签名地址",
+                f"转 USDC。平台收到后记在账户里叫 {symbol}（{token}），这是平台的记账币，不用你去买",
+                "USDC 在 Polygon 上有不止一个合约。哪个能被这个平台入账，以 Polymarket 官网充值页当时显示的为准 - "
+                "这里不替你猜。不确定就先转一小笔，把交易号填进来，这里会告诉你平台有没有收到",
             ],
         }
 
@@ -368,32 +371,41 @@ class PolymarketWriteTransport:
         if int(str(receipt.get("status", "0x0")), 16) == 0:
             return {"state": "failed", "detail": "这笔交易在链上失败了，钱没有转出去"}
         client = self._require_client()
-        token = str(client.environment.collateral_token).lower()
-        _symbol, decimals = self._token_identity(token)
         wallet = str(client.wallet).lower()
-        credited = 0.0
+        head = int(str(self._rpc("eth_blockNumber", []) or "0x0"), 16)
+        mined = int(str(receipt.get("blockNumber", "0x0")), 16)
+        confirmations = max(0, head - mined + 1) if head and mined else 0
+        # Whatever token actually landed, named. The operator may have sent a different USDC than
+        # the one this platform credits, and "nothing arrived" would be the wrong thing to tell
+        # them when the money is demonstrably at the address.
+        arrived: list[dict[str, Any]] = []
         for log in receipt.get("logs") or []:
             topics = [str(item).lower() for item in (log.get("topics") or [])]
             if len(topics) < 3 or topics[0] != self.TRANSFER_TOPIC:
                 continue
-            if str(log.get("address", "")).lower() != token:
-                continue
             if not topics[2].endswith(wallet[2:]):
                 continue
-            credited += int(str(log.get("data", "0x0")), 16) / 10**decimals
-        head = int(str(self._rpc("eth_blockNumber", []) or "0x0"), 16)
-        mined = int(str(receipt.get("blockNumber", "0x0")), 16)
-        confirmations = max(0, head - mined + 1) if head and mined else 0
-        if not credited:
+            contract = str(log.get("address", ""))
+            symbol, decimals = self._token_identity(contract)
+            arrived.append({
+                "token_symbol": symbol,
+                "token_contract": contract,
+                "amount": int(str(log.get("data", "0x0")), 16) / 10**decimals,
+            })
+        if not arrived:
             return {"state": "wrong_target", "confirmations": confirmations,
-                    "detail": f"这笔交易成功了，但没有把 {_symbol} 转到 {client.wallet}："
-                              "可能是转错了地址、错了代币，或者这根本是另一笔交易"}
+                    "detail": f"这笔交易成功了，但没有任何代币转到 {client.wallet}："
+                              "可能是地址填错了，或者这是另一笔交易"}
+        summary = "、".join(f"{item['amount']:.6f} {item['token_symbol']}" for item in arrived)
         if confirmations < self.DEPOSIT_CONFIRMATIONS:
-            return {"state": "confirming", "amount": credited, "confirmations": confirmations,
+            return {"state": "confirming", "arrived": arrived, "confirmations": confirmations,
                     "required": self.DEPOSIT_CONFIRMATIONS,
-                    "detail": f"链上已经收到 {credited:.6f} {_symbol}，等待确认"}
-        return {"state": "credited", "amount": credited, "confirmations": confirmations,
-                "detail": f"{credited:.6f} {_symbol} 已到账"}
+                    "detail": f"链上已经收到 {summary}，等待确认（{confirmations}/{self.DEPOSIT_CONFIRMATIONS}）"}
+        # The chain says it arrived; whether the platform counts it as spendable is the platform's
+        # answer, and the balance is where that shows.
+        return {"state": "arrived", "arrived": arrived, "confirmations": confirmations,
+                "amount": sum(float(item["amount"]) for item in arrived),
+                "detail": f"链上已确认收到 {summary}"}
 
     def deposit_target(self) -> dict[str, Any]:
         """Where collateral has to arrive, and whether this client could send it there itself.

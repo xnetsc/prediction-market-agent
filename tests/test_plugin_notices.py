@@ -242,14 +242,23 @@ class DepositingIsOfferedWheneverThePluginIsLoadedTests(unittest.TestCase):
     def test_what_a_deposit_needs_is_stated_rather_than_guessed(self) -> None:
         write = Path("src/prediction_market_agent/plugins/api/_polymarket/write.py").read_text()
         block = write[write.index("def deposit_instructions("):write.index("def _token_identity(")]
-        for field in ("chain", "chain_id", "address", "token_symbol", "token_contract", "warnings"):
+        for field in ("chain", "chain_id", "address", "deposit_currency",
+                      "account_token_symbol", "account_token_contract", "warnings"):
             with self.subTest(field=field):
                 self.assertIn(f'"{field}"', block)
+
+    def test_the_instructions_do_not_invent_the_one_thing_they_cannot_know(self) -> None:
+        """Which USDC contract this platform credits is not ours to guess; the rest is certain."""
+        write = Path("src/prediction_market_agent/plugins/api/_polymarket/write.py").read_text()
+        block = write[write.index("def deposit_instructions("):write.index("def _token_identity(")]
+        self.assertIn("以 Polymarket 官网充值页当时显示的为准", block)
+        self.assertIn("先转一小笔", block)
+        self.assertIn("deposit_currency", block)
 
     def test_a_deposit_is_followed_on_the_chain_not_taken_on_trust(self) -> None:
         write = Path("src/prediction_market_agent/plugins/api/_polymarket/write.py").read_text()
         block = write[write.index("def deposit_status("):write.index("def deposit_target(")]
-        for state in ("not_found", "failed", "confirming", "credited", "wrong_target"):
+        for state in ("not_found", "failed", "confirming", "arrived", "wrong_target"):
             with self.subTest(state=state):
                 self.assertIn(f'"{state}"', block)
         self.assertIn("eth_getTransactionReceipt", block)

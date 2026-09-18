@@ -308,8 +308,8 @@ class PolymarketApiPlugin:
         panel.update({
             "链": f"{instructions['chain']}（chain id {instructions['chain_id']}）",
             "收款地址": instructions["address"],
-            "币种": instructions["token_symbol"],
-            "代币合约": instructions["token_contract"],
+            "转什么币": instructions["deposit_currency"],
+            "账户里的记账币": f"{instructions['account_token_symbol']}（{instructions['account_token_contract']}）",
             "到账需要确认数": instructions["minimum_confirmations"],
             "注意": instructions["warnings"],
         })
@@ -346,11 +346,15 @@ class PolymarketApiPlugin:
             f"；当前可用 {available:.6f} {status.get('currency', '')}"
             if isinstance(available, (int, float)) else ""
         )
-        if state != "credited":
+        if state != "arrived":
             return {"ok": False, "state": state, "txid": txid,
                     # Still on its way is a wait, not a mistake, and the page draws the two apart.
                     "pending": state == "confirming",
                     "message": str(status.get("detail", "")) + balance, **status}
+        # The chain says the money is at the address. Whether the platform counts it as spendable
+        # is the platform's own answer, and the balance beside it is where that shows - saying
+        # "arrived" while the balance still reads zero would be the one thing nobody could act on.
+        waiting_on_platform = isinstance(available, (int, float)) and available <= 0
         settled = None
         request = self.funding_requests.pending()
         if request is not None and isinstance(available, (int, float)):
@@ -368,8 +372,10 @@ class PolymarketApiPlugin:
                     detail=shortfall_message(request, available),
                 )
                 settled = "partial"
-        return {"ok": True, "state": "credited", "txid": txid, "request": settled,
-                "message": str(status.get("detail", "")) + balance, **status}
+        note = "；平台还没把它算进可用余额，通常几分钟内" if waiting_on_platform else ""
+        return {"ok": True, "state": "arrived", "txid": txid, "request": settled,
+                "pending": waiting_on_platform,
+                "message": str(status.get("detail", "")) + balance + note, **status}
 
     def funding_panel(self) -> dict[str, Any]:
         funds = self.account_funds()

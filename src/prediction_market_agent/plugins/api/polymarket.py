@@ -137,7 +137,7 @@ def initialize_plugin(context: PluginInitializationContext) -> PluginSpec:
 
     def deposit_watch() -> dict:
         """Re-read a deposit still on its way, so the panel moves on its own once it lands."""
-        if not watched["txid"] or watched["state"] in {"credited", "not_found", "failed", "invalid"}:
+        if not watched["txid"] or watched["state"] in {"arrived", "not_found", "failed", "invalid"}:
             return dict(watched)
         try:
             status = _live_instance().deposit_status(watched["txid"])
