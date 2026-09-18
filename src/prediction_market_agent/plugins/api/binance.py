@@ -1,4 +1,6 @@
 from __future__ import annotations
+
+from typing import Any
 from prediction_market_agent.plugin_system.network_diagnostics import configured_proxy_route
 
 from prediction_market_agent.plugin_system.config_io import json_file_callbacks
@@ -97,6 +99,79 @@ def initialize_plugin(context: PluginInitializationContext) -> PluginSpec:
         except Exception as error:  # configuration incomplete, credentials missing, network down
             return {"error": str(error)[:300], "pending_request": None}
 
+    # The transaction the operator last said they sent, and the chain they asked an address for.
+    watched: dict[str, Any] = {"txid": "", "state": "", "detail": "", "network": ""}
+
+    DEPOSIT_FIELDS = [
+        {"name": "txid", "label": "充值交易号（txid）", "required": True,
+         "placeholder": "0x 或 交易所给的那串交易号；转完账在提币记录里复制"},
+    ]
+
+    def deposit_action(key: str, name: str, payload: dict) -> dict:
+        del key
+        if name == "dismiss":
+            watched.update(txid="", state="", detail="")
+            return {"ok": True, "message": "已清除这笔充值的跟踪"}
+        try:
+            instance = _live_instance()
+        except Exception as error:
+            return {"ok": False, "message": str(error)[:300]}
+        network = str(payload.get("network", "")).strip().upper()
+        if network and not str(payload.get("txid", "")).strip():
+            # Asking for another chain's address is not a claim that anything was sent.
+            watched.update(network=network)
+            return {"ok": True, "message": f"已切到 {network}，地址在上面"}
+        answer = instance.confirm_deposit(payload)
+        watched.update(
+            txid=str(answer.get("txid", "")),
+            state=str(answer.get("state", "")),
+            detail=str(answer.get("message", "")),
+        )
+        return answer
+
+    def deposit_watch() -> dict:
+        if not watched["txid"] or watched["state"] in {"arrived", "not_found", "invalid", "wrong_target"}:
+            return dict(watched)
+        try:
+            status = _live_instance().deposit_status(watched["txid"])
+        except Exception as error:
+            return {**watched, "detail": str(error)[:200]}
+        watched.update(state=str(status.get("state", "")), detail=str(status.get("detail", "")))
+        return dict(watched)
+
+    def deposit_notices() -> list:
+        """Offered whenever the plugin is loaded: topping up is not only an answer to the robot."""
+        try:
+            panel = _live_instance().deposit_panel(watched["network"])
+        except Exception as error:
+            return [{
+                "key": "deposit", "title": '我要充值', "kind": "display",
+                "description": '往这个账户充值的链、地址和币种。填好 API Key 并连上交易所之后才能给出地址。',
+                "content": {"读取失败": str(error)[:300]},
+            }]
+        tracking = deposit_watch()
+        confirming = tracking["state"] == "confirming"
+        content = dict(panel)
+        if tracking["txid"]:
+            content["这笔充值"] = f"{tracking['txid']}：{tracking['detail'] or tracking['state']}"
+        return [{
+            "key": "deposit",
+            "title": '我要充值',
+            "kind": "confirm",
+            "description": '按下面的链、地址、币种充值；转完把交易号填进来，插件去交易所查到账。'
+                           '要换一条链，就只填网络代码、不填交易号。转错链或错币种的钱拿不回来。',
+            "content": content,
+            "action_label": '我已充值，去查',
+            "action_disabled": confirming,
+            "action_note": (tracking["detail"] or '确认中…') if confirming else '',
+            "action_fields": [
+                *DEPOSIT_FIELDS,
+                {"name": "network", "label": "换条链取地址（可选）",
+                 "placeholder": "填上面列出的网络代码，比如 BSC、MATIC；只填这个不填交易号就是换地址"},
+            ],
+            "dismiss_label": '清除这笔跟踪' if tracking["txid"] else "",
+        }]
+
     def funding_notices() -> list:
         """Answer only when there is something outstanding, so a quiet plugin shows nothing."""
         try:
@@ -118,7 +193,11 @@ def initialize_plugin(context: PluginInitializationContext) -> PluginSpec:
             "description": '机器人请求预测账户达到某个可用金额时，这里会出现待批准的划转。批准后才会从配置的资金账户划入，在此之前不会动任何钱。',
             "content": panel,
             "action_label": '批准并转账',
-            "action_fields": [{"name": "note", "label": "附言（可选）", "placeholder": '同意时可以顺带告诉机器人一句话，比如「我只剩这些了，别再要了」——它会读到。', "multiline": True}],
+            "action_fields": [
+                {"name": "note", "label": "附言（可选）", "placeholder": '同意时可以顺带告诉机器人一句话，比如「我只剩这些了，别再要了」——它会读到。', "multiline": True},
+                {"name": "txid", "label": "刚充值的交易号（可选）",
+                 "placeholder": "如果你是刚充的钱来满足这笔请求，填交易号，这里先去交易所确认到账"},
+            ],
             "dismiss_fields": [{"name": "note", "label": "拒绝理由", "required": True, "placeholder": '拒绝理由（会给到机器人，让它别再原样问一遍）', "multiline": True}],
             "dismiss_label": '驳回',
         }]
@@ -129,6 +208,12 @@ def initialize_plugin(context: PluginInitializationContext) -> PluginSpec:
             instance = _live_instance()
         except Exception as error:
             return {"ok": False, "message": str(error)[:300]}
+        # A deposit made to answer this request is checked at the exchange before any transfer:
+        # approving a move of money that has not landed is how an account ends up short twice.
+        if name == "confirm" and str(payload.get("txid", "")).strip():
+            answer = deposit_action("funding", "confirm", payload)
+            if not answer.get("ok"):
+                return answer
         handler = {"confirm": instance.approve_funding, "dismiss": instance.reject_funding}.get(name)
         if handler is None:
             return {"ok": False, "message": f"Unknown funding action: {name}"}
@@ -153,8 +238,11 @@ def initialize_plugin(context: PluginInitializationContext) -> PluginSpec:
             ),
         ),
         teardown=lambda: close_plugin_instances(instances),
-        notices_callback=funding_notices,
-        notice_action_callback=funding_action,
+        notices_callback=lambda: [*deposit_notices(), *funding_notices()],
+        notice_action_callback=lambda key, name, payload: (
+            deposit_action(key, name, payload) if key == "deposit"
+            else funding_action(key, name, payload)
+        ),
         readiness_callback=readiness,
         runtime=PluginRuntime(
             event_loop.start, event_loop.stop, event_loop.status,

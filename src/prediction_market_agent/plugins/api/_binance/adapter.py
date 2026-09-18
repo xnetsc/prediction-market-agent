@@ -262,6 +262,121 @@ class BinancePredictionApiPlugin:
         )
         return {"ok": True, "message": "The funding request was dismissed; nothing moved"}
 
+    DEPOSIT_COIN = "USDT"
+    """What this account settles in, so it is what a deposit has to be."""
+
+    def deposit_panel(self, network: str = "") -> dict[str, Any]:
+        """Where money enters this account, on which chain, and what it holds now.
+
+        Two steps here rather than one: a deposit lands in the exchange account, and only an
+        inbound transfer makes it spendable on predictions. Saying so up front is the difference
+        between an operator who tops up and one who tops up and then waits for a balance that was
+        never going to move on its own.
+        """
+        funds = self.account_funds()
+        panel: dict[str, Any] = {
+            "预测账户可用": f"{funds.available:.6f} {funds.currency}（{funds.source}）",
+            "现货账户可划转": funds.detail.get("fundable_from_spot", "读不到"),
+            "充值币种": self.DEPOSIT_COIN,
+            "两步": "先充值到币安账户，再由这里划转进预测钱包才可下单",
+        }
+        try:
+            networks = self.client.deposit_networks(self.DEPOSIT_COIN)
+        except Exception as error:
+            panel["读取可充值网络失败"] = str(error)[:300]
+            return panel
+        open_networks = [item for item in networks if item["deposit_open"]]
+        panel["可充值网络"] = [
+            f"{item['network']}（{item['name']}，{item['minimum_confirmations']} 个确认"
+            + ("，需要 memo/tag" if item["needs_memo"] else "") + "）"
+            for item in open_networks
+        ] or ["交易所目前没有开放这个币的充值网络"]
+        chosen = str(network or "").upper()
+        if not chosen:
+            preferred = next((item for item in open_networks if item["default"]), None)
+            chosen = str((preferred or (open_networks[0] if open_networks else {})).get("network", ""))
+        if not chosen:
+            return panel
+        try:
+            address = self.client.deposit_address(self.DEPOSIT_COIN, chosen)
+        except Exception as error:
+            panel["读取充值地址失败"] = f"{chosen}：{str(error)[:250]}"
+            return panel
+        entry = next((item for item in networks if item["network"] == chosen), {})
+        panel.update({
+            "链": f"{chosen}（{entry.get('name', '')}）",
+            "收款地址": address["address"],
+            "到账需要确认数": entry.get("minimum_confirmations", "?"),
+        })
+        if address["memo"]:
+            panel["memo / tag"] = address["memo"] + "（不填这个，钱到不了你的账户）"
+        if entry.get("note"):
+            panel["交易所提示"] = entry["note"]
+        panel["注意"] = [
+            f"链只能是 {chosen}。同一个地址在别的链上收到的钱，交易所不认",
+            f"币种只能是 {self.DEPOSIT_COIN}",
+            "充值先进币安账户，还要在这里划转进预测钱包才能下单",
+        ]
+        return panel
+
+    def deposit_status(self, txid: str) -> dict[str, Any]:
+        """What the exchange says about one deposit. It is the only thing that can say it arrived."""
+        reference = str(txid or "").strip()
+        if not reference:
+            return {"state": "invalid", "detail": "请填写充值交易号（txid）"}
+        records = self.client.deposit_history(self.DEPOSIT_COIN, limit=100)
+        found = next(
+            (item for item in records if str(item.get("txId", "")).strip().lower() == reference.lower()),
+            None,
+        )
+        if found is None:
+            return {"state": "not_found",
+                    "detail": "交易所最近的充值记录里没有这笔：可能还没被它看到（刚转出的先等等），"
+                              "也可能交易号复制错了，或者这笔不是转到这个账户的"}
+        # 0 pending, 6 credited but not withdrawable, 1 success, 7 wrong deposit, 8 waiting confirm.
+        code = int(found.get("status", 0) or 0)
+        amount = float(found.get("amount", 0) or 0)
+        network = str(found.get("network", ""))
+        confirmations = str(found.get("confirmTimes", "")).strip()
+        common = {"amount": amount, "network": network, "confirmations": confirmations}
+        if code in (0, 8):
+            return {**common, "state": "confirming",
+                    "detail": f"交易所看到了这笔 {amount:.6f} {self.DEPOSIT_COIN}（{network}），还在确认"
+                              + (f"（{confirmations}）" if confirmations else "")}
+        if code == 7:
+            return {**common, "state": "wrong_target",
+                    "detail": "交易所把这笔标成了异常充值，需要在币安站内处理"}
+        if code in (1, 6):
+            return {**common, "state": "arrived",
+                    "detail": f"{amount:.6f} {self.DEPOSIT_COIN} 已入币安账户（{network}）"
+                              + ("，暂不可提现" if code == 6 else "")}
+        return {**common, "state": "confirming", "detail": f"交易所返回的状态码是 {code}"}
+
+    def confirm_deposit(self, values: dict[str, Any] | None = None) -> dict[str, Any]:
+        """Follow a deposit, and say what still has to happen before the robot can spend it."""
+        txid = str((values or {}).get("txid", "")).strip()
+        if not txid:
+            return {"ok": False, "state": "invalid", "message": "请填写充值交易号（txid）"}
+        try:
+            status = self.deposit_status(txid)
+        except Exception as error:
+            return {"ok": False, "state": "error", "message": str(error)[:300]}
+        state = str(status.get("state", ""))
+        try:
+            funds = self.account_funds()
+            spot = funds.detail.get("fundable_from_spot")
+            balance = f"；现货可划转 {spot}" if spot is not None else ""
+        except Exception:
+            balance = ""
+        if state != "arrived":
+            return {"ok": False, "state": state, "txid": txid, "pending": state == "confirming",
+                    "message": str(status.get("detail", "")) + balance, **status}
+        return {"ok": True, "state": "arrived", "txid": txid,
+                "message": str(status.get("detail", "")) + balance
+                           + "。这笔钱在币安账户里，机器人要用还需要一次划转："
+                           "有待批的资金请求就在下面批准，没有的话等机器人下次开口。",
+                **status}
+
     def funding_panel(self) -> dict[str, Any]:
         funds = self.account_funds()
         return {

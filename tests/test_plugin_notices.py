@@ -263,3 +263,156 @@ class DepositingIsOfferedWheneverThePluginIsLoadedTests(unittest.TestCase):
                 self.assertIn(f'"{state}"', block)
         self.assertIn("eth_getTransactionReceipt", block)
         self.assertIn("eth_blockNumber", block)
+
+
+class BothVenuesOfferTheSameDepositFlowTests(unittest.TestCase):
+    """Each venue states its own chain, coin and address; the framework only draws them."""
+
+    def _source(self, name: str) -> str:
+        return Path(f"src/prediction_market_agent/plugins/api/{name}.py").read_text()
+
+    def test_binance_offers_depositing_without_waiting_to_be_asked(self) -> None:
+        source = self._source("binance")
+        self.assertIn("def deposit_notices()", source)
+        self.assertIn("*deposit_notices()", source)
+        block = source[source.index("def deposit_notices()"):source.index("def funding_notices()")]
+        self.assertIn("我要充值", block)
+        self.assertNotIn("pending_request", block)
+
+    def test_the_exchange_is_asked_which_chains_it_takes_rather_than_told(self) -> None:
+        """Which networks an exchange credits changes; a remembered list deposits to the wrong one."""
+        read = Path("src/prediction_market_agent/plugins/api/_binance/read.py").read_text()
+        self.assertIn("/sapi/v1/capital/config/getall", read)
+        self.assertIn("/sapi/v1/capital/deposit/address", read)
+        self.assertIn("/sapi/v1/capital/deposit/hisrec", read)
+
+    def test_binance_says_a_deposit_is_not_yet_spendable_on_predictions(self) -> None:
+        """It lands in the exchange account; a transfer makes it tradeable, and that is a step."""
+        adapter = Path("src/prediction_market_agent/plugins/api/_binance/adapter.py").read_text()
+        panel = adapter[adapter.index("def deposit_panel("):adapter.index("def deposit_status(")]
+        self.assertIn("再由这里划转进预测钱包", panel)
+        confirm = adapter[adapter.index("def confirm_deposit("):adapter.index("def funding_panel(")]
+        self.assertIn("还需要一次划转", confirm)
+
+    def test_a_deposit_offered_to_answer_a_request_is_checked_before_money_moves(self) -> None:
+        source = self._source("binance")
+        block = source[source.index("def funding_action("):source.index("return PluginSpec(")]
+        self.assertIn('deposit_action("funding", "confirm", payload)', block)
+        self.assertIn("if not answer.get(\"ok\"):", block)
+
+    def test_every_deposit_state_the_exchange_reports_is_translated(self) -> None:
+        adapter = Path("src/prediction_market_agent/plugins/api/_binance/adapter.py").read_text()
+        block = adapter[adapter.index("def deposit_status("):adapter.index("def confirm_deposit(")]
+        for state in ("invalid", "not_found", "confirming", "wrong_target", "arrived"):
+            with self.subTest(state=state):
+                self.assertIn(f'"{state}"', block)
+
+
+class WhatTheBinanceDepositPanelActuallySaysTests(unittest.TestCase):
+    """Run the panel against a stand-in exchange: the wrong chain is unrecoverable, so it is tested."""
+
+    def _plugin(self, *, networks=None, history=None, address=None, fail=None):
+        from types import SimpleNamespace
+
+        from prediction_market_agent.plugins.api._binance.adapter import BinancePredictionApiPlugin
+        from tests._support import BINANCE_ENV
+
+        plugin = BinancePredictionApiPlugin({**BINANCE_ENV, "BINANCE_TRADING_CAPITAL": "0",
+                                             "BINANCE_API_KEY": "k", "BINANCE_API_SECRET": "s"})
+        asked: dict = {}
+
+        def deposit_networks(coin):
+            asked["coin"] = coin
+            if fail == "networks":
+                raise RuntimeError("Binance HTTP 451")
+            return networks if networks is not None else [
+                {"network": "BSC", "name": "BNB Smart Chain", "deposit_open": True,
+                 "minimum_confirmations": 15, "confirmations_before_withdrawal": 15,
+                 "contract": "0x55d", "needs_memo": False, "note": "", "default": False},
+                {"network": "MATIC", "name": "Polygon", "deposit_open": True,
+                 "minimum_confirmations": 300, "confirmations_before_withdrawal": 300,
+                 "contract": "0xc21", "needs_memo": False, "note": "手续费低", "default": True},
+                {"network": "TRX", "name": "Tron", "deposit_open": False,
+                 "minimum_confirmations": 1, "confirmations_before_withdrawal": 1,
+                 "contract": "", "needs_memo": True, "note": "", "default": False},
+            ]
+
+        def deposit_address(coin, network=""):
+            asked["network"] = network
+            return address or {"address": f"addr-{network}", "memo": "", "coin": coin,
+                               "network": network, "url": ""}
+
+        plugin.client = SimpleNamespace(
+            deposit_networks=deposit_networks,
+            deposit_address=deposit_address,
+            deposit_history=lambda coin="", limit=50: history or [],
+            spot_balances=lambda: {"USDT": {"free": 40.0, "locked": 0.0}},
+        )
+        plugin.asked = asked
+        return plugin
+
+    def test_the_default_chain_is_used_and_the_others_are_listed(self) -> None:
+        plugin = self._plugin()
+        panel = plugin.deposit_panel()
+        self.assertEqual(plugin.asked["coin"], "USDT", "this account settles in USDT, so that is the coin")
+        self.assertEqual(plugin.asked["network"], "MATIC", "the exchange's own default")
+        self.assertEqual(panel["收款地址"], "addr-MATIC")
+        self.assertEqual(panel["到账需要确认数"], 300)
+        listed = " ".join(panel["可充值网络"])
+        self.assertIn("BSC", listed)
+        self.assertIn("MATIC", listed)
+        self.assertNotIn("TRX", listed, "a chain the exchange has closed is not an option")
+
+    def test_a_chain_that_needs_a_memo_says_so_where_it_is_used(self) -> None:
+        plugin = self._plugin(
+            networks=[{"network": "XRP", "name": "Ripple", "deposit_open": True,
+                       "minimum_confirmations": 1, "confirmations_before_withdrawal": 1,
+                       "contract": "", "needs_memo": True, "note": "", "default": True}],
+            address={"address": "r9y", "memo": "12345", "coin": "USDT", "network": "XRP", "url": ""},
+        )
+        panel = plugin.deposit_panel()
+        self.assertIn("memo / tag", panel)
+        self.assertIn("钱到不了", panel["memo / tag"])
+
+    def test_the_operator_can_ask_for_another_chains_address(self) -> None:
+        plugin = self._plugin()
+        panel = plugin.deposit_panel("bsc")
+        self.assertEqual(plugin.asked["network"], "BSC")
+        self.assertEqual(panel["收款地址"], "addr-BSC")
+
+    def test_an_exchange_that_will_not_answer_says_so_instead_of_an_address(self) -> None:
+        panel = self._plugin(fail="networks").deposit_panel()
+        self.assertIn("读取可充值网络失败", panel)
+        self.assertNotIn("收款地址", panel, "an address nobody confirmed is worse than none")
+
+    def test_each_status_the_exchange_reports_becomes_something_actionable(self) -> None:
+        cases = {0: "confirming", 8: "confirming", 1: "arrived", 6: "arrived", 7: "wrong_target"}
+        for code, expected in cases.items():
+            with self.subTest(status=code):
+                plugin = self._plugin(history=[{"txId": "0xabc", "amount": "25", "network": "MATIC",
+                                                "status": code, "confirmTimes": "10/300"}])
+                self.assertEqual(plugin.deposit_status("0xABC")["state"], expected,
+                                 "the transaction id is matched regardless of case")
+
+    def test_a_transaction_the_exchange_has_not_seen_is_not_called_arrived(self) -> None:
+        plugin = self._plugin(history=[{"txId": "0xother", "amount": "5", "status": 1}])
+        status = plugin.deposit_status("0xabc")
+        self.assertEqual(status["state"], "not_found")
+        self.assertIn("还没被它看到", status["detail"])
+
+    def test_arriving_is_not_the_same_as_being_spendable(self) -> None:
+        """It lands in the exchange account; predictions trade out of a different wallet."""
+        plugin = self._plugin(history=[{"txId": "0xabc", "amount": "25", "network": "MATIC",
+                                        "status": 1, "confirmTimes": "300/300"}])
+        answer = plugin.confirm_deposit({"txid": "0xabc"})
+        self.assertTrue(answer["ok"])
+        self.assertIn("还需要一次划转", answer["message"])
+        self.assertIn("现货可划转 40.0", answer["message"])
+
+    def test_still_confirming_is_a_wait_not_a_failure(self) -> None:
+        plugin = self._plugin(history=[{"txId": "0xabc", "amount": "25", "status": 0,
+                                        "confirmTimes": "2/300", "network": "MATIC"}])
+        answer = plugin.confirm_deposit({"txid": "0xabc"})
+        self.assertFalse(answer["ok"])
+        self.assertTrue(answer["pending"])
+        self.assertIn("2/300", answer["message"])
