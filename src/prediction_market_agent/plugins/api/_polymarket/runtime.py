@@ -20,6 +20,8 @@ class PolymarketEventLoop:
         self._lock = threading.RLock()
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
+        # A worker that was told to stop and is still finishing the model call it was in.
+        self._settling: threading.Thread | None = None
         self._status: dict[str, object] = {
             "running": False,
             "cycles": 0,
@@ -51,6 +53,15 @@ class PolymarketEventLoop:
         with self._lock:
             if self._thread is not None and self._thread.is_alive():
                 return
+            # The previous worker was told to stop and has not got there yet - it is inside a model
+            # call that cannot be interrupted. Starting now would put two cycles on one account,
+            # both trading. The caller retries, and by then the old one has finished.
+            if self._settling is not None and self._settling.is_alive():
+                self._status["settling"] = True
+                return
+            self._settling = None
+            self._status["settling"] = False
+            self._status.pop("settling_reason", None)
             self._stop.clear()
             self._status.update({"running": True, "last_error": ""})
             self._thread = threading.Thread(
@@ -136,17 +147,35 @@ class PolymarketEventLoop:
         else:
             self._may_decide.clear()
 
+    STOP_WAIT_SECONDS = 5.0
+    """How long stopping waits for the worker before answering. See the note inside stop()."""
+
     def stop(self) -> None:
         with self._lock:
             thread = self._thread
             self._stop.set()
         self._may_decide.set()
         if thread is not None and thread is not threading.current_thread():
-            thread.join()
+            # Bounded on purpose. A cycle that is inside a model call cannot be interrupted - the
+            # answer is already being paid for - and waiting for it here means holding whatever
+            # lock the caller took, which is how one slow decision froze every page of the console.
+            # The thread is a daemon, it stops at its next check, and the status below says so.
+            thread.join(timeout=self.STOP_WAIT_SECONDS)
         with self._lock:
+            still_running = thread is not None and thread.is_alive()
+            # Kept, not dropped: whoever starts next has to be able to see that it is still there.
+            self._settling = thread if still_running else None
             self._thread = None
             self._status["running"] = False
             self._status["next_delay_seconds"] = None
+            self._status["settling"] = still_running
+            if still_running:
+                self._status["settling_reason"] = (
+                    "已经要求停止，但上一轮还在一次模型调用里，要等它自己结束才会真正退出；"
+                    "这期间不会开始新的一轮。"
+                )
+            else:
+                self._status.pop("settling_reason", None)
 
     def status(self) -> dict[str, object]:
         with self._lock:

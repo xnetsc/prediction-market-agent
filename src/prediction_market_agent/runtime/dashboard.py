@@ -4,6 +4,7 @@ import hashlib
 import json
 import re
 import sqlite3
+import logging
 import threading
 import time
 from contextlib import asynccontextmanager
@@ -158,7 +159,7 @@ async function switchRemoteLogin(){return switchLoginMethod('remote')}
 async function switchLoginMethod(method){LOGIN_METHODS.set(ACTIVE_LOGIN.name,method);document.getElementById('wizardLoginMethod').value=method;document.getElementById('remoteLoginCode').value='';try{await wizardAction('cancel');updateLoginWizard(await wizardAction(loginAction(ACTIVE_LOGIN.name)));await refreshClientControls()}catch(e){document.getElementById('loginWizardError').textContent=e.message}}
 async function submitRemoteCode(){const field=document.getElementById('remoteLoginCode'),code=field.value;field.value='';try{updateLoginWizard(await wizardAction('login_code',{flow_id:LAST_LOGIN_STATUS?.flow_id,code}))}catch(e){document.getElementById('loginWizardError').textContent=e.message}}
 async function cancelWizard(){try{await wizardAction('cancel');document.getElementById('loginWizard').close();await refreshClientControls()}catch(e){document.getElementById('loginWizardError').textContent=e.message}}
-setInterval(()=>{if(document.getElementById('loginWizard').open)refreshClientControls()},2000);
+let WIZARD_POLL_IN_FLIGHT=false;setInterval(()=>{if(WIZARD_POLL_IN_FLIGHT||!document.getElementById('loginWizard').open)return;WIZARD_POLL_IN_FLIGHT=true;Promise.resolve(refreshClientControls()).finally(()=>{WIZARD_POLL_IN_FLIGHT=false})},2000);
 function renderConfigurationPresets(m){for(let [kind,plugins]of Object.entries(m.plugins)){for(let plugin of plugins){let presets=plugin.configuration?.presets||[];if(!presets.length)continue;let root=document.getElementById('plugin_'+kind+'_'+plugin.name).querySelector('.preset-slot'),bar=controlNode('div','',null);bar.className='toolbar';controlNode('span','预置配置（可编辑，保存后生效）：',bar);for(let preset of presets){let button=controlNode('button',preset.label,bar);button.onclick=()=>{if(!confirm('套用 '+preset.label+'？请重新填写此服务的 API Key；保存时会清除旧密钥。'))return;for(let [name,value]of Object.entries(preset.values)){let input=document.getElementById('cfg_'+kind+'_'+plugin.name+'_'+name);if(!input)continue;if(input.type==='checkbox')input.checked=!!value;else input.value=value;if(input.dataset.type==='secret'){input.dataset.clearSecret='true';input.placeholder='请填写此服务的密钥，保存时不会保留旧密钥'}}}}root.prepend(bar)}}}
 
 
@@ -196,7 +197,7 @@ async function kickSessions(ids){let current=ids.includes(SESSION_ID);await post
 async function kickSelectedSessions(){await kickSessions([...document.querySelectorAll('.sessionPick:checked')].map(e=>e.value))}
 async function logout(){try{await post('/api/auth/logout',{})}finally{await dropKey();location='/'}}
 async function refreshAudit(){setLedgerLoading(true);try{let p=document.getElementById('platform').value,q=p?'&platform='+encodeURIComponent(p):'',dq=q+'&provider='+encodeURIComponent(document.getElementById('providerFilter').value)+'&status='+encodeURIComponent(document.getElementById('statusFilter').value);dq+='&group='+encodeURIComponent(LEDGER_TAB);LEDGER_QUERY=dq;LEDGER_PLATFORM_QUERY=q;let [s,d,m]=await Promise.all([get('/api/summary'),get('/api/decisions?limit='+LEDGER_FIRST_PAGE+'&offset=0'+dq+ledgerResultsQuery()),get('/api/manifest')]);let ag=s.aggregate_account||{},cards=[['权益',ag.equity],['决策',s.summary?.decisions],['模型调用错误',s.summary?.provider_errors],['信息收集步骤',s.summary?.agent_steps]];document.getElementById('cards').innerHTML=cards.map(x=>'<div class=card><div class=muted>'+esc(x[0])+'</div><h2>'+esc(x[1]??'—')+'</h2></div>').join('');renderDecisionLedger(d.items);refreshLedgerTabCounts(q);resetDiagnosticPanels();document.getElementById('manifest').textContent=JSON.stringify(m,null,2);document.getElementById('stamp').textContent='更新 '+new Date().toLocaleTimeString();document.getElementById('ledgerStamp').textContent='读取于 '+new Date().toLocaleTimeString()}catch(e){document.getElementById('stamp').textContent='错误: '+e;document.getElementById('decisions').innerHTML='<div class="empty-state"><strong>没能读到决策记录</strong><p>'+esc(String(e&&e.message||e))+'</p></div>'}finally{setLedgerLoading(false)}}
-document.addEventListener('toggle',()=>activateChoiceLists(),true);document.getElementById('platform').onchange=refreshAudit;renderResultChips();Promise.all([refreshSecurity(),refreshManager(),refreshConfiguration(),refreshAudit()]);setInterval(()=>Promise.all([refreshRuntime(),refreshClientControls()]),REFRESH_MS);
+document.addEventListener('toggle',()=>activateChoiceLists(),true);document.getElementById('platform').onchange=refreshAudit;renderResultChips();Promise.all([refreshSecurity(),refreshManager(),refreshConfiguration(),refreshAudit()]);let POLL_IN_FLIGHT=false;setInterval(()=>{if(POLL_IN_FLIGHT)return;POLL_IN_FLIGHT=true;Promise.all([refreshRuntime(),refreshClientControls()]).finally(()=>{POLL_IN_FLIGHT=false})},REFRESH_MS);
 </script><script src="/assets/dashboard-shell.js?v=__CONSOLE_VERSION__"></script><script src="/assets/environment.js?v=__CONSOLE_VERSION__"></script></body></html>"""
 
 
@@ -461,6 +462,9 @@ def _slim_decision(item: dict[str, Any]) -> dict[str, Any]:
     return slim
 
 
+LOGGER = logging.getLogger(__name__)
+
+
 class AuditData:
     def __init__(
         self,
@@ -598,9 +602,14 @@ class AuditData:
         """
         memory = SessionMemory(self.config.session_db)
         try:
-            return memory.forget_decisions(
+            answer = memory.forget_decisions(
                 decision_ids=decision_ids or None, status=status, platform=platform
             )
+            if not decision_ids:
+                # A delete by category with no explicit list is the unbounded one - "every failed
+                # record", "everything concluded" - and the one that leaves the log enormous.
+                answer["log"] = memory.reclaim_log()
+            return answer
         finally:
             memory.connection.close()
 
@@ -736,7 +745,19 @@ class AuditData:
             for key in ("decisions", "provider_turns", "agent_steps", "kept_executed", "cancelled_in_progress"):
                 total[key] += int(answer.get(key, 0))
             total["kept_ids"].extend(answer.get("kept_ids", []))
-        return {**total, "matching": len(ids)}
+        return {**total, "matching": len(ids), "log": self._reclaim_log()}
+
+    def _reclaim_log(self) -> dict[str, Any]:
+        """Hand back the space a large delete took, instead of leaving it to a checkpoint that may
+        never come: deleting a whole ledger once left a write-ahead log larger than the database."""
+        memory = SessionMemory(self.config.session_db)
+        try:
+            return memory.reclaim_log()
+        except Exception as error:
+            LOGGER.warning("could not drain the write-ahead log after a delete: %s", error)
+            return {"reclaimed": False, "why": str(error)[:200]}
+        finally:
+            memory.connection.close()
 
     def decisions(
         self,

@@ -44,6 +44,12 @@ class RobotRuntimeManager:
             "robot_paused": False,
             "platforms": {},
         }
+        # The last answer status() managed to build, kept so that reading the state never has to
+        # wait for whatever is holding the lock. Stopping the robot means waiting for a cycle that
+        # may be inside a model call minutes long, and a console that cannot say so until that
+        # finishes is a console that looks broken exactly when it has the most to report.
+        self._snapshot: dict[str, Any] = dict(self._status)
+        self._busy_since = 0.0
 
     @staticmethod
     def _safe_readiness(catalog: PluginCatalog, kind: str, name: str) -> PluginReadiness:
@@ -78,6 +84,7 @@ class RobotRuntimeManager:
 
     def stop(self) -> None:
         with self._lock:
+            self._busy_since = time.time()
             self._cancel_retry_locked()
             self._stop_locked()
             self._status["running"] = False
@@ -111,6 +118,7 @@ class RobotRuntimeManager:
         once the condition clears.
         """
         with self._lock:
+            self._busy_since = time.time()
             self._cancel_retry_locked()
             status = self._reconcile_locked(start_runtimes=start_runtimes)
             wanted = not status.get("robot_paused") and any(
@@ -410,37 +418,64 @@ class RobotRuntimeManager:
                 self._stop_locked()
                 self._status["running"] = False
 
+    STATUS_WAIT_SECONDS = 0.5
+    """How long reading the state waits for the lock before answering from the last snapshot.
+
+    Long enough that an ordinary read - nothing else going on - takes the fresh path every time.
+    Short enough that a console polling every few seconds never queues behind a restart: the
+    requests used to pile up until the server ran out of worker threads and answered nothing at all.
+    """
+
     def status(self) -> dict[str, Any]:
-        with self._lock:
-            engine = self._engine
-            result = {
-                **self._status,
-                "global_reasons": list(self._status.get("global_reasons", [])),
-                "platforms": {
-                    name: dict(value)
-                    for name, value in self._status.get("platforms", {}).items()
-                },
-            }
-            if self._capacity is not None:
-                result["decision_capacity"] = self._capacity.state()
-            if engine is not None:
-                try:
-                    result["decision_provider_health"] = engine.provider_quality.manifest()
-                except Exception:
-                    LOGGER.exception("provider health manifest failed")
-            if self._catalog is not None:
-                for name, platform in result["platforms"].items():
-                    try:
-                        spec = self._catalog.get("api", name)
-                    except ValueError:
-                        continue
-                    if spec.runtime is not None:
-                        platform["runtime"] = spec.runtime.status()
-                        platform["running"] = bool(platform["runtime"].get("running"))
-                result["running"] = any(
-                    item.get("running", False) for item in result["platforms"].values()
-                )
-            result["event_loop"] = (
-                self._events.status() if self._events is not None else {"running": False}
+        if not self._lock.acquire(timeout=self.STATUS_WAIT_SECONDS):
+            # Something long is holding it. Say what is known, and say that it is stale, rather
+            # than joining the queue: the operator asked what the robot is doing, and "busy
+            # changing" is an answer where a hung request is not.
+            stale = dict(self._snapshot)
+            stale["settling"] = True
+            stale["settling_seconds"] = int(max(0.0, time.time() - self._busy_since))
+            stale["settling_reason"] = (
+                "正在按你的设置重启机器人。上一轮可能正卡在一次模型调用里，要等它自己结束；"
+                "这里显示的是它开始重启前的状态。"
             )
-            return result
+            return stale
+        try:
+            return self._status_locked()
+        finally:
+            self._lock.release()
+
+    def _status_locked(self) -> dict[str, Any]:
+        """The fresh answer, built while holding the lock, and kept as the snapshot."""
+        engine = self._engine
+        result = {
+            **self._status,
+            "global_reasons": list(self._status.get("global_reasons", [])),
+            "platforms": {
+                name: dict(value)
+                for name, value in self._status.get("platforms", {}).items()
+            },
+        }
+        if self._capacity is not None:
+            result["decision_capacity"] = self._capacity.state()
+        if engine is not None:
+            try:
+                result["decision_provider_health"] = engine.provider_quality.manifest()
+            except Exception:
+                LOGGER.exception("provider health manifest failed")
+        if self._catalog is not None:
+            for name, platform in result["platforms"].items():
+                try:
+                    spec = self._catalog.get("api", name)
+                except ValueError:
+                    continue
+                if spec.runtime is not None:
+                    platform["runtime"] = spec.runtime.status()
+                    platform["running"] = bool(platform["runtime"].get("running"))
+            result["running"] = any(
+                item.get("running", False) for item in result["platforms"].values()
+            )
+        result["event_loop"] = (
+            self._events.status() if self._events is not None else {"running": False}
+        )
+        self._snapshot = result
+        return result

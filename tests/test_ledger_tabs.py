@@ -132,8 +132,17 @@ class ReadingIsNotInterruptedTests(unittest.TestCase):
 
     def test_the_ledger_is_not_on_the_timer(self) -> None:
         shell = self._shell()
-        timer = shell[shell.index("setInterval(()=>Promise.all("):]
-        self.assertNotIn("refreshAudit", timer[:200], "history does not change once written")
+        timer = shell[shell.index("if(POLL_IN_FLIGHT)return;"):]
+        self.assertNotIn("refreshAudit", timer[:300], "history does not change once written")
+
+    def test_the_timer_waits_for_the_last_answer_before_asking_again(self) -> None:
+        """A poll that fires regardless queues on a slow restart until no worker thread is left,
+        and then every page of the console stops answering, not just the one that was polling."""
+        shell = self._shell()
+        timer = shell[shell.index("let POLL_IN_FLIGHT=false;"):][:400]
+        self.assertIn("if(POLL_IN_FLIGHT)return;", timer)
+        self.assertIn("POLL_IN_FLIGHT=true;", timer)
+        self.assertIn("finally(()=>{POLL_IN_FLIGHT=false})", timer)
 
     def test_there_is_a_refresh_control_and_it_says_when_it_last_read(self) -> None:
         shell = self._shell()

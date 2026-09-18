@@ -27,6 +27,9 @@ def _instruction_conditions(value: Any) -> dict[str, Any]:
 class SessionMemory:
     """Append-only provider turns and actions, plus bounded context recall."""
 
+    WAL_LIMIT_BYTES = 64 * 1024 * 1024
+    """What the write-ahead log is allowed to keep after a checkpoint has drained it."""
+
     def __init__(self, path: Path):
         self.path = path
         self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -354,6 +357,11 @@ class SessionMemory:
         connection.execute("PRAGMA journal_mode=WAL")
         connection.execute("PRAGMA synchronous=FULL")
         connection.execute("PRAGMA busy_timeout=30000")
+        # Without this the write-ahead log keeps whatever size its largest transaction needed, for
+        # good. Deleting a whole ledger touches nearly every page in the database and copies each
+        # one into that log: one such delete here left a 290 MB log beside a 311 MB database, and
+        # nothing shrinks it back on its own. Checkpoints now return the space.
+        connection.execute(f"PRAGMA journal_size_limit={self.WAL_LIMIT_BYTES}")
         self._local.connection = connection
         return connection
 
@@ -928,6 +936,22 @@ class SessionMemory:
             (json.dumps(value, ensure_ascii=False), int(decision_id)),
         )
         self.connection.commit()
+
+    def reclaim_log(self) -> dict[str, Any]:
+        """Drain the write-ahead log and hand the space back, after something large was deleted.
+
+        SQLite checkpoints on its own, but only when a writer happens to cross a page threshold and
+        no reader is holding an older view of the database. A console that deletes a whole ledger
+        and then sits idle satisfies neither, so the log stays at whatever size that delete needed -
+        here, 290 MB - until something asks. This asks.
+        """
+        try:
+            busy, written, moved = self.connection.execute(
+                "PRAGMA wal_checkpoint(TRUNCATE)"
+            ).fetchone()
+        except sqlite3.OperationalError as error:
+            return {"reclaimed": False, "why": str(error)}
+        return {"reclaimed": not busy, "pages_written": written, "pages_moved": moved}
 
     def forget_decisions(
         self,
