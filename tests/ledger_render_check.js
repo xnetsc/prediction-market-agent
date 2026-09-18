@@ -71,10 +71,10 @@ const discoveryFull = { ...base, id: 6, status: 'OK', group: 'concluded', result
     { tool: 'SEARCH_OTHER_PLATFORMS', arguments: { query: 'fed decision' }, reason: '对照' },
   ],
   final_decision: { selections: [{ topic_id: '48930', reason: '成交量 +67%' }] } };
-const discoveryHtml = render([{ ...discoveryFull, context: { ...discoveryFull.context, dropped_settling_after_horizon: 5, horizon_days: 3 } }]);
+const discoveryHtml = render([{ ...discoveryFull, context: { ...discoveryFull.context, preferred_window_days: 3, verified_count: 4 } }]);
 expect('discovery (opened)', discoveryHtml, ['查了 3 次：看以往记录 ×2、跨平台搜同类市场', '选出 1 个', 'NATO x Russia 冲突',
   '没读到价格：平台上这个结果没有订单簿', '0.14 / 0.15', '6.9%', '$88.3k', '这个事件下没有开放交易的市场', '本轮没去核实',
-  '「fed decision」', '内置发现策略', '1 个读到了真实价差', '另有 5 个结算太远（超过 3 天）']);
+  '「fed decision」', '内置发现策略', '1 个读到了真实价差', '（偏好 3 天内揭标）', 'AI 挑了 4 个去核实']);
 if (discoveryHtml.includes('没有调用研究工具')) failures.push('discovery (opened): its steps were not counted');
 if (discoveryHtml.includes('&lt;/reason&gt;')) failures.push('discovery (opened): a stray tag reached the page');
 

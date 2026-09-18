@@ -1199,6 +1199,32 @@ class SessionMemory:
             if entry["reviews"]
         }
 
+    def merge_decision_context(self, decision_id: int, extra: dict[str, Any]) -> None:
+        """Fold what a round learned back into the context it was working from.
+
+        A round is recorded before it runs, because a round that dies has to leave a trace. What it
+        then reads - a deadline, a spread, a resolution it went and checked - is part of the same
+        picture, and a record that shows only the unpriced list it started with tells the operator
+        the round was flying blind when it was not.
+        """
+        row = self.connection.execute(
+            "SELECT context_json FROM decision_ledger WHERE id = ?", (int(decision_id),)
+        ).fetchone()
+        if row is None:
+            return
+        try:
+            context = json.loads(row[0] or "{}")
+        except json.JSONDecodeError:
+            context = {}
+        if not isinstance(context, dict):
+            context = {}
+        context.update(extra)
+        self.connection.execute(
+            "UPDATE decision_ledger SET context_json = ?, updated_at = ? WHERE id = ?",
+            (json.dumps(context, ensure_ascii=False), int(time.time() * 1000), int(decision_id)),
+        )
+        self.connection.commit()
+
     def save_survey_plan(
         self, *, platform: str, queries: list[str], next_scan_seconds: int, reason: str
     ) -> None:

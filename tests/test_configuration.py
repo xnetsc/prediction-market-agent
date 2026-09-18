@@ -169,5 +169,6 @@ class TradingStyleIsNotBuriedTests(unittest.TestCase):
         self.assertIn('id="strategySettings"', shell)
         self.assertIn("styleNames=new Set(['strategy_horizon_days','strategy_max_trade_usdt'])", shell)
         panel = shell[shell.index("<h2>交易风格</h2>"):shell.index("统一网络代理")]
-        self.assertIn("只做这么多天内揭标的标的", panel)
+        self.assertIn("偏好", panel, "the numbers are preferences, not rules the robot may not cross")
+        self.assertIn("必须在理由里说清楚凭什么", panel)
         self.assertIn("业务风控", panel, "a hard limit is a filter plugin's job, and the page should say so")

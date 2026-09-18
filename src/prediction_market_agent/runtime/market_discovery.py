@@ -24,14 +24,6 @@ from .memory import SessionMemory
 
 LOGGER = logging.getLogger(__name__)
 
-HORIZON_WAIT_CEILING_SECONDS = 6 * 3600
-"""Longest the framework will pace itself on arithmetic alone.
-
-Waiting exactly until the nearest market enters the window is right about that market and blind to
-everything else: a venue lists new ones, and nobody asked this robot to be asleep for two days.
-"""
-
-
 DISCOVERY_SCHEMA: dict[str, Any] = {
     "type": "object",
     "additionalProperties": False,
@@ -200,12 +192,13 @@ class DiscoveryEngine:
 
     def _survey(
         self, plugin: PredictionMarketApiPlugin, budget: DiscoveryBudget
-    ) -> list[Topic]:
+    ) -> tuple[list[Topic], set[str]]:
         # What settles inside the window first, because the listing below will not offer it, then
         # the venue's own order for the rest - the crowd's favourites still have to be seen for the
         # gates and the priors to mean anything.
         horizon_days = int(getattr(self.strategy, "horizon_days", 0) or 0)
-        topics: list[Topic] = self._survey_by_deadline(plugin, budget, horizon_days)
+        near_dated: list[Topic] = self._survey_by_deadline(plugin, budget, horizon_days)
+        topics: list[Topic] = list(near_dated)
         seen = {topic.topic_id for topic in topics}
         page_size = max(1, int(plugin.topic_page_size()))
         offset = 0
@@ -218,7 +211,7 @@ class DiscoveryEngine:
             if not page.has_more or not page.topics:
                 break
             offset = page.next_offset
-        return self._with_requested(plugin, topics, budget)
+        return self._with_requested(plugin, topics, budget), {topic.topic_id for topic in topics[:len(near_dated)]}
 
     def _with_requested(
         self,
@@ -331,7 +324,7 @@ class DiscoveryEngine:
     ) -> tuple[Topic, ...]:
         budget = self.strategy.budget()
         now_ms = int(time.time() * 1000)
-        surveyed = self._survey(plugin, budget)
+        surveyed, near_dated = self._survey(plugin, budget)
         if not surveyed:
             return ()
 
@@ -361,18 +354,25 @@ class DiscoveryEngine:
             )
         self.memory.record_topic_observations(platform=platform, observations=observations)
 
-        ranked = sorted(
+        # An order, offered as an opinion. What settles soon leads it, because those markets are
+        # small - a five-minute crypto market has almost no volume next to an election months out -
+        # and ranking them together buries exactly the ones this runtime prefers. Which of them to
+        # read, in what order and how many, is the round's own call; this is the framework saying
+        # where it would start, not where the round must.
+        suggested = sorted(
             surveyed,
-            key=lambda item: self._prescore(features_by_topic[item.topic_id], weights, budget),
-            reverse=True,
+            key=lambda item: (
+                item.topic_id not in near_dated,
+                -self._prescore(features_by_topic[item.topic_id], weights, budget),
+            ),
         )
-        shortlist = ranked[: max(1, budget.shortlist_topics)]
         by_id = {topic.topic_id: topic for topic in surveyed}
 
         selections, mode, skipped_reason, fetched = self._select(
             platform=platform,
             plugin=plugin,
-            shortlist=shortlist,
+            pool=suggested,
+            near_dated=near_dated,
             features_by_topic=features_by_topic,
             budget=budget,
             maximum_topics=maximum_topics,
@@ -404,113 +404,29 @@ class DiscoveryEngine:
             # stated judgement into a silent zero, which reads as a broken cycle rather than as a
             # round where nothing was worth a decision slot.
             LOGGER.info(
-                "platform=%s selected nothing from %d shortlisted: %s",
+                "platform=%s selected nothing from %d surveyed: %s",
                 platform,
-                len(shortlist),
+                len(surveyed),
                 skipped_reason or "no reason was given",
             )
         LOGGER.info(
-            "platform=%s surveyed=%d shortlist=%d selected=%d strategy=%s evolution=%s",
+            "platform=%s surveyed=%d near_dated=%d selected=%d strategy=%s evolution=%s",
             platform,
             len(surveyed),
-            len(shortlist),
+            len(near_dated),
             len(chosen),
             strategy_name,
             self.evolution_enabled,
         )
         return tuple(chosen)
 
-    def _verify(
-        self,
-        toolbox: "_DiscoveryToolbox",
-        shortlist: list[Topic],
-        now_ms: int,
-    ) -> dict[str, dict[str, Any]]:
-        """Spend part of the read allowance up front on what the gates actually ask about.
-
-        The allowance existed only as a ceiling on what the agent could request for itself, and the
-        agent's tool budget is far smaller than the shortlist - so most candidates arrived with no
-        deadline and no spread and were refused as unverifiable, which is a construction rather than
-        a judgement. Buying those facts here, through the same toolbox so the platform is read once
-        and not twice, means the gates can be applied to every candidate this reaches. A candidate
-        that could not be read says so, instead of arriving indistinguishable from one nobody looked at.
-        """
-        verified: dict[str, dict[str, Any]] = {}
-        for topic in shortlist:
-            # A candidate the venue will not describe is one candidate the agent has to judge
-            # without help. It is not a reason to abandon the round - which is exactly what it
-            # became when one topic on a shortlist of twenty-four had no order book and the 404
-            # took the whole cycle down with it.
-            try:
-                detail = toolbox.execute("TOPIC_DETAIL", {"topic_id": topic.topic_id})
-            except Exception as error:
-                verified[topic.topic_id] = {
-                    "verified": False, "lookup_error": str(error)[:200]
-                }
-                continue
-            if not detail.get("ok"):
-                # The allowance is gone; the rest of the shortlist is honestly unexamined.
-                break
-            entry: dict[str, Any] = {"verified": True, "resolution": detail.get("resolution")}
-            end_time = detail.get("end_time_ms")
-            if end_time:
-                entry["seconds_remaining"] = max(0, (int(end_time) - now_ms) // 1000)
-            markets = detail.get("markets") or []
-            entry["markets"] = int(detail.get("markets_total", len(markets)))
-            entry["markets_open"] = int(detail.get("markets_open", 0))
-            # Only an open market has a book. Asking for one on a closed market is a guaranteed 404
-            # that spends the allowance and tells the agent nothing - whereas "nothing here is open"
-            # is itself the fact a status gate needs.
-            priced = next(
-                (market for market in markets if str(market.get("status", "")).upper() == "OPEN"),
-                None,
-            )
-            if priced is None:
-                entry["tradeable"] = False
-                entry["why_not_priced"] = "no market in this event is open for trading"
-            outcomes = (priced.get("outcomes") or []) if priced else []
-            if outcomes:
-                entry["tradeable"] = True
-                # Which market the price belongs to matters: in a ladder of deadlines, a spread on
-                # "by December" says nothing about "by June".
-                entry["priced_market"] = str(priced.get("question", ""))[:160]
-                entry["priced_outcome"] = outcomes[0].get("name")
-                try:
-                    book = toolbox.execute("OUTCOME_BOOK", {
-                        "market_id": priced.get("market_id"),
-                        "outcome_id": outcomes[0].get("outcome_id"),
-                    })
-                except Exception as error:
-                    book = {"ok": False, "error": str(error)[:200]}
-                if book.get("ok"):
-                    entry.update({
-                        key: book[key] for key in ("best_bid", "best_ask", "spread")
-                        if key in book
-                    })
-                    bid, ask = book.get("best_bid"), book.get("best_ask")
-                    if bid and ask:
-                        mid = (float(bid) + float(ask)) / 2
-                        entry["spread_pct_of_mid"] = (
-                            round((float(ask) - float(bid)) / mid * 100, 2) if mid else None
-                        )
-                    else:
-                        # A book with one side has no spread to report, and saying nothing made it
-                        # look like a candidate nobody had checked. It is a finding: there is no
-                        # price to buy at, or none to sell at.
-                        entry["book_one_sided"] = (
-                            "nobody is selling" if not ask else "nobody is buying"
-                        ) if (bid or ask) else "the book is empty"
-                else:
-                    entry["book_error"] = book.get("error", "")
-            verified[topic.topic_id] = entry
-        return verified
-
     def _select(
         self,
         *,
         platform: str,
         plugin: PredictionMarketApiPlugin,
-        shortlist: list[Topic],
+        pool: list[Topic],
+        near_dated: set[str],
         features_by_topic: dict[str, dict[str, Any]],
         budget: DiscoveryBudget,
         maximum_topics: int,
@@ -533,118 +449,46 @@ class DiscoveryEngine:
             measurements=self.measurements,
             research=self.research_contributions,
         )
-        verified = self._verify(toolbox, shortlist, now_ms)
+        horizon_days = int(getattr(self.strategy, "horizon_days", 0) or 0)
+        # Everything surveyed, described with what a listing already tells you and nothing that
+        # costs a read: the round decides which of these are worth reading, in what order, and how
+        # many. `suggested_rank` is where the framework would start, offered as an opinion - what
+        # settles inside the operator's preferred window leads it, because those markets are small
+        # and get buried when ranked against months-out elections.
         candidates = [
             {
                 "topic_id": topic.topic_id,
+                "rank_suggestion": position,
                 "title": topic.title,
-                # The gates ask about the resolution wording, the deadline and the round-trip cost.
-                # None of that was here, so every candidate had to be bought with a tool step, and
-                # a shortlist far larger than the tool budget meant most of it was refused as
-                # unverifiable - by construction rather than by judgement. The question and the
-                # description were already in hand and cost nothing to pass on.
                 "question": topic.question,
-                "description": topic.description[:600],
+                "description": topic.description[:400],
                 "category": topic.category,
                 "status": topic.status,
                 "liquidity_usdt": topic.liquidity_usdt,
                 "volume_usdt": topic.volume_usdt,
+                "settles_inside_preferred_window": topic.topic_id in near_dated or None,
                 "signals": {
                     key: value
                     for key, value in features_by_topic.get(topic.topic_id, {}).items()
                     if key != "buckets"
                 },
-                **verified.get(topic.topic_id, {"verified": False}),
             }
-            for topic in shortlist
+            for position, topic in enumerate(pool, start=1)
         ]
-        # Candidates that settle past the horizon are dropped here rather than argued about by the
-        # model: it costs nothing to leave them out, and a shortlist made mostly of them wastes the
-        # round on markets no decision would be allowed to trade anyway. How many went, and why, is
-        # part of what the round is told, so an empty shortlist is not a mystery.
-        horizon_days = int(getattr(self.strategy, "horizon_days", 0) or 0)
-        too_far = 0
-        # When the closest of the dropped ones becomes tradeable. Asking the round to time its next
-        # look to markets entering the window is only answerable if it is told when that happens.
-        nearest_outside: float | None = None
-        already_settled = 0
-        if horizon_days > 0:
-            limit = horizon_days * 86400
-            kept = []
-            for candidate in candidates:
-                seconds = candidate.get("seconds_remaining")
-                if isinstance(seconds, (int, float)) and seconds > limit:
-                    too_far += 1
-                    entering = float(seconds) - limit
-                    nearest_outside = min(nearest_outside or entering, entering)
-                    continue
-                # A venue leaves events marked active long after their date has passed. Nothing can
-                # be traded on one, and a round spent explaining that is a round wasted.
-                if isinstance(seconds, (int, float)) and seconds <= 0:
-                    already_settled += 1
-                    continue
-                kept.append(candidate)
-            candidates = kept
-        # Nothing in range, and the venue was already asked by date: there is nothing here to find,
-        # so the round is recorded without a call. Where the venue cannot answer by date, an empty
-        # shortlist only means the listing was the wrong question - the round still runs, and the
-        # agent can go and search for itself.
-        asked_by_date = horizon_days > 0 and callable(
-            getattr(plugin, "list_topics_by_deadline", None)
-        )
-        if asked_by_date and (too_far or already_settled) and not candidates:
-            # Nothing left to choose between. Asking a model to pick from an empty list costs a
-            # call to be told what the gate already knows, and on a venue where most markets
-            # settle months out this is the ordinary case rather than the exception.
-            reason = "；".join(
-                part for part in (
-                    f"本轮 {too_far} 个候选在 {horizon_days} 天之外结算" if too_far else "",
-                    f"{already_settled} 个已经过了结算时间" if already_settled else "",
-                    "没有可做的标的，没有调用模型",
-                ) if part
-            )
-            decision_id = self.memory.begin_decision(
-                platform=platform, market_topic_id="", market_id="", token_id="",
-                strategy_name=f"{self.strategy.name}:discovery",
-                strategy_sha256=self.strategy.sha256,
-                context={"stage": "discovery", "candidates": [],
-                         "maximum_selections": maximum_topics,
-                         "dropped_settling_after_horizon": too_far,
-                         "horizon_days": horizon_days,
-                         "nearest_settlement_outside_horizon_seconds": int(nearest_outside or 0)},
-            )
-            # When to come back is arithmetic here rather than judgement: nothing is tradeable
-            # until the closest of these enters the window, and surveying before then finds the
-            # same nothing. The plugin's own minimum still applies, and the searches the last round
-            # asked for are kept - they are how anything new gets found in the meantime.
-            waiting = int(min(nearest_outside or 0, HORIZON_WAIT_CEILING_SECONDS))
-            if waiting > 0:
-                self.memory.save_survey_plan(
-                    platform=platform,
-                    queries=[str(item) for item in (self.memory.survey_plan(platform).get("queries") or [])],
-                    next_scan_seconds=waiting,
-                    reason=f"{reason}；最近的一个还要 {waiting // 3600} 小时 {waiting % 3600 // 60} 分钟才进入窗口",
-                )
-            self.memory.complete_decision(
-                decision_id, provider="", status="NO_ACTION",
-                final_decision={"selections": [], "skipped_reason": reason,
-                                "next_scan_seconds": waiting, "next_survey_queries": [],
-                                "pacing_reason": f"没有可做的标的，等最近的一个进入 {horizon_days} 天窗口",
-                                "headline": f"本轮没有 {horizon_days} 天内结算的标的"},
-            )
-            LOGGER.info("platform=%s %s", platform, reason)
-            return [], "horizon", reason, {}
         request = {
             "platform": platform,
             "platform_capabilities": plugin.capabilities.to_dict(),
             "maximum_selections": maximum_topics,
             "discovery_strategy": prompt_json_payload(payload),
             "candidates": candidates,
-            **({"dropped_settling_after_horizon": too_far,
-                "horizon_days": horizon_days,
-                "nearest_settlement_outside_horizon_seconds": int(nearest_outside or 0)}
-               if too_far else {}),
-            **({"dropped_already_settled": already_settled} if already_settled else {}),
+            # Preferences, not gates. The operator's are about how the money is made, and the
+            # round may go outside them when it can say what makes that worth doing.
+            "operator_preferences": {
+                "settles_within_days": horizon_days,
+                "why": "short-dated, small and often: money back soon, mistakes cheap, evidence fast",
+                "may_be_exceeded": "with a concrete reason about this opportunity, stated in the selection",
+            },
+            "nothing_here_is_priced_yet": "VERIFY_TOPICS reads deadlines, resolutions and spreads for the ids you name",
         }
         # Every call to a model leaves a row, this one included. It used to leave none: a discovery
         # round that failed, or that judged nothing worth a slot, produced no ledger entry at all,
@@ -657,15 +501,11 @@ class DiscoveryEngine:
             token_id="",
             strategy_name=f"{self.strategy.name}:discovery",
             strategy_sha256=self.strategy.sha256,
-            # What the round was working from, including what it never saw: a shortlist of one is
-            # a different story depending on whether five were dropped for settling too far out.
+            # What the round was working from. What it went on to read about these is merged in
+            # when the round ends, so the record shows the same picture the round had.
             context={"stage": "discovery", "candidates": candidates,
                      "maximum_selections": maximum_topics,
-                     **({"dropped_settling_after_horizon": too_far,
-                         "horizon_days": horizon_days,
-                         "nearest_settlement_outside_horizon_seconds": int(nearest_outside or 0)}
-                        if too_far else {}),
-                     **({"dropped_already_settled": already_settled} if already_settled else {})},
+                     "preferred_window_days": horizon_days},
         )
         try:
             result = self.provider.run(
@@ -709,7 +549,7 @@ class DiscoveryEngine:
                         "reason": f"prescore order; discovery agent unavailable: {error}"[:400],
                         "priors": [],
                     }
-                    for topic in shortlist[:maximum_topics]
+                    for topic in pool[:maximum_topics]
                 ],
                 "mechanical",
                 "",
@@ -718,6 +558,16 @@ class DiscoveryEngine:
         if self.memory.is_cancelled(decision_id):
             LOGGER.info("discovery round %s on %s was deleted after answering", decision_id, platform)
             return [], "cancelled", "deleted while running", dict(toolbox.found)
+        if toolbox.verified:
+            # The round's own reading of the candidates, kept where the candidates are.
+            self.memory.merge_decision_context(
+                decision_id,
+                {"candidates": [
+                    {**candidate, **toolbox.verified.get(str(candidate.get("topic_id")), {})}
+                    for candidate in candidates
+                ],
+                 "verified_count": len(toolbox.verified)},
+            )
         selections = [item for item in result.value.get("selections", []) if isinstance(item, dict)]
         skipped_reason = str(result.value.get("skipped_reason", ""))
         # How soon to come back and what to go looking for are judgements about this platform right
@@ -910,6 +760,8 @@ class _DiscoveryToolbox:
         # Topics the round went and fetched for itself, which the selection step must be able to
         # resolve: a market it found and chose is no different from one it was handed.
         self.found: dict[str, Topic] = {}
+        # What it read about candidates this round, merged into the record afterwards.
+        self.verified: dict[str, dict[str, Any]] = {}
         self.descriptions: dict[str, Any] = {
             "TOPIC_DETAIL": {
                 "purpose": "Read one topic's markets, outcomes, resolution data and end time.",
@@ -934,6 +786,16 @@ class _DiscoveryToolbox:
             # at anything. When it is the wrong reading - everything settles too far out, nothing
             # in the category that moved today - go and get a better one now rather than asking for
             # it next round. Anything these return can be selected like any other candidate.
+            "VERIFY_TOPICS": {
+                "purpose": (
+                    "Read the deadline, the resolution wording, how many markets are open and the "
+                    "real spread for the candidates you name - all in this one step. Nothing in the "
+                    "list arrives priced, because which ones are worth reading is your call: name "
+                    "the few you would actually give a slot to. Costs one platform read per "
+                    "candidate, inside this round's read allowance."
+                ),
+                "arguments": {"topic_ids": "required list of candidate ids"},
+            },
             "FIND_TOPICS": {
                 "purpose": (
                     "Search this platform's own catalogue for markets the shortlist did not "
@@ -979,6 +841,7 @@ class _DiscoveryToolbox:
             "TOPIC_HISTORY": self._topic_history,
             "RECALL_MEASUREMENTS": self._recall_measurements,
             "SEARCH_OTHER_PLATFORMS": self._search,
+            "VERIFY_TOPICS": self._verify_topics,
             "FIND_TOPICS": self._find_topics,
             "TOPICS_BY_DEADLINE": self._topics_by_deadline,
         }.get(name.strip().upper())
@@ -1004,6 +867,17 @@ class _DiscoveryToolbox:
                 "volume_usdt": topic.volume_usdt,
             })
         return listed
+
+    def _verify_topics(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        ids = arguments.get("topic_ids") or []
+        if isinstance(ids, str):
+            ids = [ids]
+        if not isinstance(ids, list) or not ids:
+            raise ValueError("VERIFY_TOPICS needs topic_ids")
+        answer = self.verify([str(item) for item in ids])
+        # Kept so the round's record shows what it was working from, not only what it chose.
+        self.verified.update(answer)
+        return {"ok": True, "verified": answer}
 
     def _find_topics(self, arguments: dict[str, Any]) -> dict[str, Any]:
         query = str(arguments.get("query", "")).strip()
@@ -1034,6 +908,88 @@ class _DiscoveryToolbox:
             return {"ok": False, "supported": True, "error": str(error)[:200]}
         return {"ok": True, "supported": True, "within_hours": hours,
                 "topics": self._offer(page.topics)}
+
+    def verify(self, topic_ids: list[str]) -> dict[str, dict[str, Any]]:
+        """Read the deadline, the resolution and the real spread for the named candidates.
+
+        One tool step, many candidates: what the gates ask about costs a platform read each, and
+        making the round spend a model call per candidate to learn them is how a shortlist of
+        twenty-four turns into "unverifiable" by construction. Which ones are worth it, and how
+        many, is the round's own call - this only does as it is told, within the read allowance.
+        """
+        verified: dict[str, dict[str, Any]] = {}
+        topic_ids = [str(item) for item in topic_ids][: self.budget.detail_lookups]
+        now_ms = int(time.time() * 1000)
+        for topic_id in topic_ids:
+            # A candidate the venue will not describe is one candidate the agent has to judge
+            # without help. It is not a reason to abandon the round - which is exactly what it
+            # became when one topic on a shortlist of twenty-four had no order book and the 404
+            # took the whole cycle down with it.
+            try:
+                detail = self.execute("TOPIC_DETAIL", {"topic_id": topic_id})
+            except Exception as error:
+                verified[topic_id] = {
+                    "verified": False, "lookup_error": str(error)[:200]
+                }
+                continue
+            if not detail.get("ok"):
+                # The allowance is gone; the rest of what was asked for is honestly unexamined.
+                verified[topic_id] = {"verified": False,
+                                      "lookup_error": str(detail.get("error", "budget exhausted"))}
+                break
+            entry: dict[str, Any] = {"verified": True, "resolution": detail.get("resolution")}
+            end_time = detail.get("end_time_ms")
+            if end_time:
+                entry["seconds_remaining"] = max(0, (int(end_time) - now_ms) // 1000)
+            markets = detail.get("markets") or []
+            entry["markets"] = int(detail.get("markets_total", len(markets)))
+            entry["markets_open"] = int(detail.get("markets_open", 0))
+            # Only an open market has a book. Asking for one on a closed market is a guaranteed 404
+            # that spends the allowance and tells the agent nothing - whereas "nothing here is open"
+            # is itself the fact a status gate needs.
+            priced = next(
+                (market for market in markets if str(market.get("status", "")).upper() == "OPEN"),
+                None,
+            )
+            if priced is None:
+                entry["tradeable"] = False
+                entry["why_not_priced"] = "no market in this event is open for trading"
+            outcomes = (priced.get("outcomes") or []) if priced else []
+            if outcomes:
+                entry["tradeable"] = True
+                # Which market the price belongs to matters: in a ladder of deadlines, a spread on
+                # "by December" says nothing about "by June".
+                entry["priced_market"] = str(priced.get("question", ""))[:160]
+                entry["priced_outcome"] = outcomes[0].get("name")
+                try:
+                    book = self.execute("OUTCOME_BOOK", {
+                        "market_id": priced.get("market_id"),
+                        "outcome_id": outcomes[0].get("outcome_id"),
+                    })
+                except Exception as error:
+                    book = {"ok": False, "error": str(error)[:200]}
+                if book.get("ok"):
+                    entry.update({
+                        key: book[key] for key in ("best_bid", "best_ask", "spread")
+                        if key in book
+                    })
+                    bid, ask = book.get("best_bid"), book.get("best_ask")
+                    if bid and ask:
+                        mid = (float(bid) + float(ask)) / 2
+                        entry["spread_pct_of_mid"] = (
+                            round((float(ask) - float(bid)) / mid * 100, 2) if mid else None
+                        )
+                    else:
+                        # A book with one side has no spread to report, and saying nothing made it
+                        # look like a candidate nobody had checked. It is a finding: there is no
+                        # price to buy at, or none to sell at.
+                        entry["book_one_sided"] = (
+                            "nobody is selling" if not ask else "nobody is buying"
+                        ) if (bid or ask) else "the book is empty"
+                else:
+                    entry["book_error"] = book.get("error", "")
+            verified[topic_id] = entry
+        return verified
 
     def _topic_detail(self, arguments: dict[str, Any]) -> dict[str, Any]:
         if self._detail_calls >= self.budget.detail_lookups:

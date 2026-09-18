@@ -191,22 +191,34 @@ class DiscoveryTests(unittest.TestCase):
         self.assertIn("MARKET_DISCOVERY_STRATEGY", provider.instructions)
         self.assertIn("MISSION", provider.instructions)
 
-    def test_the_gates_can_be_judged_without_spending_the_agents_tool_steps(self) -> None:
-        """Candidates arrived without a deadline or a spread, which the gates are written about."""
+    def test_the_gates_are_read_for_the_candidates_the_round_names_in_one_step(self) -> None:
+        """Which candidates are worth a read is the round's judgement; one step reads them all."""
         plugin = FakePlugin(30)
-        provider = RecordingProvider()
+
+        class Verifier(RecordingProvider):
+            steps = 0
+
+            def run(inner, payload, **options):
+                inner.steps += 1
+                ids = [item["topic_id"] for item in payload["candidates"][:6]]
+                inner.verified = options["tool_executor"]("VERIFY_TOPICS", {"topic_ids": ids})
+                return super().run(payload, **options)
+
+        provider = Verifier()
         self._engine(provider).discover(platform="fake", plugin=plugin, maximum_topics=3)
         candidates = provider.requests[0]["candidates"]
         self.assertTrue(candidates)
-        verified = [item for item in candidates if item.get("verified")]
-        self.assertTrue(verified, "no candidate was verified before the agent was asked")
-        first = verified[0]
-        for field in ("question", "description", "seconds_remaining"):
-            self.assertIn(field, first, f"the gates ask about {field}")
-        self.assertTrue(
-            any("spread" in item for item in verified),
-            "the cost gate is about the round trip, which nothing supplied",
-        )
+        self.assertFalse(any("spread" in item for item in candidates),
+                         "the list arrives unpriced; reading it is the round's call")
+        for field in ("question", "description", "rank_suggestion"):
+            self.assertIn(field, candidates[0], f"the list has to be judgeable on {field}")
+        verified = provider.verified["verified"]
+        self.assertEqual(len(verified), 6, "one step, six candidates")
+        self.assertEqual(provider.steps, 1)
+        entry = next(iter(verified.values()))
+        self.assertIn("seconds_remaining", entry)
+        self.assertTrue(any("spread" in item for item in verified.values()),
+                        "the cost gate is about the round trip, which this has to supply")
 
     def test_missing_agent_degrades_to_prescore_and_is_recorded_as_such(self) -> None:
         plugin = FakePlugin(20)
@@ -746,17 +758,26 @@ class OneBadCandidateDoesNotEndTheRoundTests(unittest.TestCase):
         return selected, provider
 
     def test_a_market_with_no_order_book_still_leaves_a_round(self) -> None:
-        selected, provider = self._discover(self._plugin_that_refuses("book"))
+        selected, _provider = self._discover(self._plugin_that_refuses("book"))
         self.assertTrue(selected, "the whole cycle was abandoned over one unreadable book")
-        candidates = provider.requests[0]["candidates"]
-        self.assertTrue(any("book_error" in item for item in candidates))
+        self.assertTrue(any("book_error" in entry for entry in self._read(self._plugin_that_refuses("book"))))
 
     def test_a_topic_that_cannot_be_read_is_marked_unverified_not_fatal(self) -> None:
-        selected, provider = self._discover(self._plugin_that_refuses("detail"))
+        selected, _provider = self._discover(self._plugin_that_refuses("detail"))
         self.assertTrue(selected)
-        candidates = provider.requests[0]["candidates"]
-        self.assertTrue(all(not item.get("verified") for item in candidates))
-        self.assertTrue(any("lookup_error" in item for item in candidates))
+        entries = self._read(self._plugin_that_refuses("detail"))
+        self.assertTrue(all(not entry.get("verified") for entry in entries))
+        self.assertTrue(any("lookup_error" in entry for entry in entries))
+
+    def _read(self, plugin):
+        """What the round learns when it asks about a venue that refuses part of the read."""
+        from prediction_market_agent.runtime.market_discovery import _DiscoveryToolbox
+
+        toolbox = _DiscoveryToolbox(
+            plugin=plugin, memory=self.memory, platform="fake",
+            budget=BuiltInMarketDiscovery().budget(), cross_platform_search=None,
+        )
+        return list(toolbox.verify([topic.topic_id for topic in plugin.topics[:3]]).values())
 
 
 class TheAgentSetsTheNextLookTests(unittest.TestCase):
@@ -894,12 +915,14 @@ class DeadlineLadderTests(unittest.TestCase):
         return plugin, asked
 
     def _candidates(self, plugin):
-        provider = RecordingProvider()
-        DiscoveryEngine(
-            memory=self.memory, provider=provider, strategy=BuiltInMarketDiscovery(),
-            evolution_enabled=True,
-        ).discover(platform="fake", plugin=plugin, maximum_topics=2)
-        return provider.requests[0]["candidates"]
+        """What the round learns when it asks about every candidate it was shown."""
+        from prediction_market_agent.runtime.market_discovery import _DiscoveryToolbox
+
+        toolbox = _DiscoveryToolbox(
+            plugin=plugin, memory=self.memory, platform="fake",
+            budget=BuiltInMarketDiscovery().budget(), cross_platform_search=None,
+        )
+        return list(toolbox.verify([topic.topic_id for topic in plugin.topics]).values())
 
     def test_the_open_market_is_priced_even_when_it_is_listed_last(self) -> None:
         plugin, asked = self._ladder_plugin(open_markets=1, total=10)
@@ -948,12 +971,15 @@ class ShortDatedSmallAndOutAgainTests(unittest.TestCase):
         from prediction_market_agent.agent.strategy import BuiltInDecisionStrategy
 
         discovery = BuiltInMarketDiscovery(horizon_days=3)
-        self.assertIn("settling within 3 days", discovery.instructions)
+        self.assertIn("prefers what settles within 3 days", discovery.instructions)
         decision = BuiltInDecisionStrategy(horizon_days=3, max_trade_usdt=25)
-        self.assertIn("Only outcomes settling within 3 days", decision.instructions)
-        self.assertIn("Size each buy at or under 25 USDT", decision.instructions)
-        self.assertIn("Settling later than 3 days is a HOLD", decision.instructions)
-        self.assertIn("Never propose a buy larger than 25 USDT", decision.instructions)
+        text = decision.instructions.replace("\n", " ")
+        self.assertIn("prefers outcomes settling within 3 days", text)
+        self.assertIn("bought at or under 25 USDT", text)
+        # Preferences about method, which money may overrule with a reason on the record.
+        self.assertIn("The objective is money", text)
+        self.assertIn("say concretely why this opportunity is worth it", text)
+        self.assertNotIn("Settling later than 3 days is a HOLD", text)
 
     def test_changing_the_setting_changes_the_text_and_its_hash(self) -> None:
         """The hash is what the ledger records, so it has to follow what the model was told."""
@@ -969,8 +995,8 @@ class ShortDatedSmallAndOutAgainTests(unittest.TestCase):
         self.assertIn("horizon_days=config.strategy_horizon_days", source)
         self.assertIn("max_trade_usdt=config.strategy_max_trade_usdt", source)
 
-    def test_a_settlement_past_the_horizon_never_reaches_the_round(self) -> None:
-        """Arguing with the model about markets it may not trade spends a call to be refused."""
+    def test_a_distant_settlement_still_reaches_the_round(self) -> None:
+        """The window is the operator's preference about method, not a rule about what exists."""
         from prediction_market_agent.agent.market_discovery import BuiltInMarketDiscovery
 
         provider = RecordingProvider()
@@ -979,22 +1005,24 @@ class ShortDatedSmallAndOutAgainTests(unittest.TestCase):
             strategy=BuiltInMarketDiscovery(horizon_days=3), evolution_enabled=False,
         ).discover(platform="fake", plugin=_HorizonPlatform(), maximum_topics=2)
         request = provider.requests[0]
-        self.assertEqual({item["topic_id"] for item in request["candidates"]}, {"1", "2"},
-                         "the near-dated ones are what a quick trade can use")
-        for item in request["candidates"]:
-            self.assertLessEqual(item["seconds_remaining"], 3 * 86400)
-        self.assertEqual(request["dropped_settling_after_horizon"], 2)
+        self.assertEqual(len(request["candidates"]), 4, "nothing is withheld from the round")
+        preferences = request["operator_preferences"]
+        self.assertEqual(preferences["settles_within_days"], 3)
+        self.assertIn("concrete reason", preferences["may_be_exceeded"])
 
-    def test_a_strategy_without_a_horizon_is_left_alone(self) -> None:
+    def test_what_settles_soon_is_suggested_first(self) -> None:
+        """A five-minute crypto market has no volume next to an election; ranked together it sinks."""
         from prediction_market_agent.agent.market_discovery import BuiltInMarketDiscovery
 
         provider = RecordingProvider()
         DiscoveryEngine(
             memory=self.memory, provider=provider,
-            strategy=BuiltInMarketDiscovery(horizon_days=0), evolution_enabled=False,
-        ).discover(platform="fake", plugin=_HorizonPlatform(), maximum_topics=2)
-        self.assertEqual(len(provider.requests[0]["candidates"]), 4)
-        self.assertNotIn("dropped_settling_after_horizon", provider.requests[0])
+            strategy=BuiltInMarketDiscovery(horizon_days=3), evolution_enabled=False,
+        ).discover(platform="fake", plugin=_NearAndFarPlatform(), maximum_topics=2)
+        candidates = provider.requests[0]["candidates"]
+        self.assertEqual(candidates[0]["topic_id"], "near-1")
+        self.assertTrue(candidates[0]["settles_inside_preferred_window"])
+        self.assertIsNone(candidates[-1]["settles_inside_preferred_window"])
 
     def setUp(self) -> None:
         self.temp = tempfile.TemporaryDirectory()
@@ -1003,6 +1031,19 @@ class ShortDatedSmallAndOutAgainTests(unittest.TestCase):
 
 
 _HORIZONS = {"1": 2 * 86400, "2": 12 * 3600, "3": 40 * 86400, "4": 400 * 86400}
+
+
+class _NearAndFarPlatform(FakePlugin):
+    """Two crowded markets months out, one small one settling tonight."""
+
+    def __init__(self) -> None:
+        super().__init__(topics=2)
+        for topic in self.topics:
+            object.__setattr__(topic, "volume_usdt", 5_000_000.0)
+        self.near = Topic("near-1", "Game tonight", "q", "d", "sport", "OPEN", 9_000.0, 40.0, "n1")
+
+    def list_topics_by_deadline(self, *, offset, limit, after_ms, before_ms):
+        return TopicPage((self.near,) if offset == 0 else (), False, 1)
 
 
 class _HorizonPlatform(FakePlugin):
@@ -1014,48 +1055,6 @@ class _HorizonPlatform(FakePlugin):
     def get_topic(self, topic_id: str):
         detail = super().get_topic(topic_id)
         return replace(detail, end_time_ms=int(time.time() * 1000) + _HORIZONS[topic_id] * 1000)
-
-
-class AnEmptyHorizonCostsNothingTests(unittest.TestCase):
-    """Most markets on a venue settle months out; that must not be a model call each round."""
-
-    def setUp(self) -> None:
-        self.temp = tempfile.TemporaryDirectory()
-        self.addCleanup(self.temp.cleanup)
-        self.memory = SessionMemory(Path(self.temp.name) / "m.sqlite3")
-
-    class _Distant(FakePlugin):
-        """Asked by date, it answers with nothing: this venue really has nothing settling soon."""
-
-        def __init__(self) -> None:
-            super().__init__(topics=3)
-
-        def get_topic(self, topic_id: str):
-            detail = super().get_topic(topic_id)
-            return replace(detail, end_time_ms=int(time.time() * 1000) + 90 * 86400 * 1000)
-
-        def list_topics_by_deadline(self, *, offset, limit, after_ms, before_ms):
-            return TopicPage((), False, 0)
-
-    def test_nothing_in_range_is_recorded_without_asking_a_model(self) -> None:
-        from prediction_market_agent.agent.market_discovery import BuiltInMarketDiscovery
-
-        provider = RecordingProvider()
-        selected = DiscoveryEngine(
-            memory=self.memory, provider=provider,
-            strategy=BuiltInMarketDiscovery(horizon_days=3), evolution_enabled=False,
-        ).discover(platform="fake", plugin=self._Distant(), maximum_topics=2)
-        self.assertEqual(selected, ())
-        self.assertEqual(provider.requests, [], "a model was asked to choose from an empty list")
-        row = self.memory.connection.execute(
-            "SELECT status, provider, final_decision_json FROM decision_ledger ORDER BY id DESC LIMIT 1"
-        ).fetchone()
-        self.assertEqual(row[0], "NO_ACTION")
-        self.assertEqual(row[1], "", "no provider was used, so none is named")
-        decision = json.loads(row[2])
-        self.assertIn("3 天之外结算", decision["skipped_reason"])
-        self.assertIn("没有调用模型", decision["skipped_reason"])
-        self.assertEqual(decision["headline"], "本轮没有 3 天内结算的标的")
 
 
 class WhenToComeBackTests(unittest.TestCase):
@@ -1084,14 +1083,14 @@ class WhenToComeBackTests(unittest.TestCase):
             with self.subTest(factor=factor):
                 self.assertIn(factor, text)
         self.assertIn("A survey is not free", text)
-        self.assertIn("nearest_settlement_outside_horizon_seconds", text)
+        self.assertIn("the preferred window is in the request", text.replace("\n    ", " "))
         # Markets are listed late; the ones worth naming are the ones the world has but the venue
         # does not yet - a tournament under way, an election days out.
         self.assertIn("a tournament in progress", text)
         self.assertIn("Read the news for the few events", text)
 
-    def test_how_long_until_the_closest_one_is_tradeable_is_supplied(self) -> None:
-        """Timing the next look to a market entering the window needs the number, not a hint."""
+    def test_the_preferred_window_travels_with_the_request(self) -> None:
+        """Pacing around markets entering the window needs to know where the window is."""
         from prediction_market_agent.agent.market_discovery import BuiltInMarketDiscovery
 
         provider = RecordingProvider()
@@ -1100,29 +1099,8 @@ class WhenToComeBackTests(unittest.TestCase):
             strategy=BuiltInMarketDiscovery(horizon_days=3), evolution_enabled=False,
         ).discover(platform="fake", plugin=_HorizonPlatform(), maximum_topics=2)
         request = provider.requests[0]
-        # Topic 3 settles in 40 days, so it becomes tradeable 37 days from now.
-        self.assertAlmostEqual(
-            request["nearest_settlement_outside_horizon_seconds"], 37 * 86400, delta=120
-        )
-        self.assertEqual(request["horizon_days"], 3)
-
-    def test_an_empty_window_paces_itself_without_a_model(self) -> None:
-        from prediction_market_agent.agent.market_discovery import BuiltInMarketDiscovery
-        from prediction_market_agent.runtime.market_discovery import HORIZON_WAIT_CEILING_SECONDS
-
-        self.memory.save_survey_plan(platform="fake", queries=["fed decision"],
-                                     next_scan_seconds=900, reason="earlier round")
-        provider = RecordingProvider()
-        DiscoveryEngine(
-            memory=self.memory, provider=provider,
-            strategy=BuiltInMarketDiscovery(horizon_days=3), evolution_enabled=False,
-        ).discover(platform="fake", plugin=_DistantPlatform(), maximum_topics=2)
-        self.assertEqual(provider.requests, [])
-        plan = self.memory.survey_plan("fake")
-        self.assertEqual(plan["next_scan_seconds"], HORIZON_WAIT_CEILING_SECONDS,
-                         "a wait on arithmetic alone is capped; the venue lists new markets too")
-        self.assertEqual(plan["queries"], ["fed decision"], "the searches still have work to do")
-        self.assertIn("没有可做的标的", plan["reason"])
+        self.assertEqual(request["operator_preferences"]["settles_within_days"], 3)
+        self.assertIn("VERIFY_TOPICS", request["nothing_here_is_priced_yet"])
 
 
 class _DistantPlatform(FakePlugin):
@@ -1189,8 +1167,10 @@ class TheVenueIsAskedForWhatSettlesSoonTests(unittest.TestCase):
         ).discover(platform="fake", plugin=FakePlugin(topics=3), maximum_topics=2)
         self.assertTrue(provider.requests, "the ordinary listing round stopped working")
 
-    def test_an_event_whose_date_has_passed_is_not_a_candidate(self) -> None:
+    def test_an_event_whose_date_has_passed_reads_as_settled(self) -> None:
+        """Nothing can be traded on it, and the round can see that the moment it reads it."""
         from prediction_market_agent.agent.market_discovery import BuiltInMarketDiscovery
+        from prediction_market_agent.runtime.market_discovery import _DiscoveryToolbox
 
         class Expired(FakePlugin):
             def __init__(self) -> None:
@@ -1201,14 +1181,13 @@ class TheVenueIsAskedForWhatSettlesSoonTests(unittest.TestCase):
                 stamp = int(time.time() * 1000) + (86_400_000 if topic_id == "1" else -3_600_000)
                 return replace(detail, end_time_ms=stamp)
 
-        provider = RecordingProvider()
-        DiscoveryEngine(
-            memory=self.memory, provider=provider,
-            strategy=BuiltInMarketDiscovery(horizon_days=3), evolution_enabled=False,
-        ).discover(platform="fake", plugin=Expired(), maximum_topics=2)
-        request = provider.requests[0]
-        self.assertEqual({item["topic_id"] for item in request["candidates"]}, {"1"})
-        self.assertEqual(request["dropped_already_settled"], 1)
+        toolbox = _DiscoveryToolbox(
+            plugin=Expired(), memory=self.memory, platform="fake",
+            budget=BuiltInMarketDiscovery().budget(), cross_platform_search=None,
+        )
+        verified = toolbox.verify(["1", "2"])
+        self.assertGreater(verified["1"]["seconds_remaining"], 0)
+        self.assertEqual(verified["2"]["seconds_remaining"], 0)
 
 
 class TheRoundCanFetchItsOwnCandidatesTests(unittest.TestCase):
@@ -1261,7 +1240,6 @@ class TheRoundCanFetchItsOwnCandidatesTests(unittest.TestCase):
             memory=self.memory, provider=provider,
             strategy=BuiltInMarketDiscovery(horizon_days=3), evolution_enabled=False,
         ).discover(platform="fake", plugin=venue, maximum_topics=2)
-        self.assertEqual(provider.requests[0]["candidates"], [], "the listing had nothing in range")
         self.assertEqual(venue.searched, ["settling tonight"])
         self.assertEqual([topic.topic_id for topic in selected], ["soon-1"])
 
@@ -1276,7 +1254,8 @@ class TheRoundCanFetchItsOwnCandidatesTests(unittest.TestCase):
         self.assertIn("TOPICS_BY_DEADLINE", provider.tool_descriptions)
         self.assertIn("FIND_TOPICS", provider.tool_descriptions)
         text = BuiltInMarketDiscovery(horizon_days=3).instructions
-        self.assertIn("THE SHORTLIST IS A STARTING POINT", text)
+        self.assertIn("NOTHING HERE IS ORDERED OR PRICED FOR YOU", text)
+        self.assertIn("rank_suggestion", text)
         self.assertIn("Going and getting more is an ordinary", text)
         for reason in ("the wrong reading for what this runtime trades",
                        "what you just read points elsewhere",
@@ -1284,21 +1263,6 @@ class TheRoundCanFetchItsOwnCandidatesTests(unittest.TestCase):
                        "more of a kind to choose between"):
             with self.subTest(reason=reason):
                 self.assertIn(reason, text)
-
-    def test_a_venue_already_asked_by_date_is_not_asked_a_model_as_well(self) -> None:
-        """Asked by date and answered with nothing means nothing is there - no call needed."""
-        from prediction_market_agent.agent.market_discovery import BuiltInMarketDiscovery
-
-        class ByDateVenue(self._ListingOnlyVenue):
-            def list_topics_by_deadline(self, *, offset, limit, after_ms, before_ms):
-                return TopicPage((), False, 0)
-
-        provider = RecordingProvider()
-        DiscoveryEngine(
-            memory=self.memory, provider=provider,
-            strategy=BuiltInMarketDiscovery(horizon_days=3), evolution_enabled=False,
-        ).discover(platform="fake", plugin=ByDateVenue(), maximum_topics=1)
-        self.assertEqual(provider.requests, [])
 
     def test_a_platform_that_cannot_list_by_date_says_so_rather_than_failing(self) -> None:
         from prediction_market_agent.runtime.market_discovery import _DiscoveryToolbox
