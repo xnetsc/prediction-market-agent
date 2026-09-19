@@ -158,6 +158,7 @@ OpenRouter、模型和新扩展安装只在 `#models` 管理，不在插件中�
 - `examples/api_plugins/static_demo.py`：标准化读取、私有 JSON、线上 HTTP 写传输和卸载。
 - `examples/decision_provider_plugins/static_provider.py`：严格 schema 的结构化 Provider。
 - `examples/decision_strategy_plugins/example_strategy.py`：策略文本和私有候选筛选。
+- `examples/market_discovery_plugins/example_discovery.py`：私有发现文本、读取预算和进化开关。
 - `examples/research_tool_plugins/static_evidence.py`：动态加入 Agent 控制 schema 的工具。
 - `examples/risk_plugins/reject_operation.py`：业务风控完整插件，`market:*` 目标和标准规则结果。
 - `examples/risk_rules/refuse_large_orders.py`：业务风控 `custom_rules` 加载的受信任 Python 规则脚本。

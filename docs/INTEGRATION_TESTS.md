@@ -1,160 +1,106 @@
 # 测试与验收
 
-完整测试默认包含生产联网，不使用跳过开关：
+测试分成确定性回归、生产 API 联网矩阵、浏览器验收、真实 Provider 探针和最终安装态容器五层。各层回答的
+问题不同，不能用 mock、纸面交易或单元测试结果代替生产网络结论。
+
+## 确定性回归
+
+日常开发先运行不依赖交易平台网络的完整套件：
 
 ```bash
 PYTHONPATH=src .venv/bin/python -m compileall -q src tests examples
-PYTHONPATH=src .venv/bin/python -m pytest -q
+PYTHONPATH=src .venv/bin/python -m pytest -q --ignore=tests/test_api_integration.py
 ```
 
-当前依赖修复后的完整结果为 `160 passed, 2 failed, 101 subtests passed, 0 skipped`。两项失败都来自
-Binance 公共时间接口的真实 `HTTP 451`；Polymarket 与其余本地/联网测试通过。另在 Python 3.12 干净
-环境从 PyPI 安装项目后执行 `pip check`，确认 `cryptography 50.0.1`、`webauthn 3.0.0` 与
-`polymarket-client 0.3.0` 无依赖冲突；Linux Python 3.13 slim 容器安装同一 wheel 也通过。
-终端助手另覆盖系统代理被故意设为不可达时，宿主机回环管理端点仍直接可达；远程 HTTPS 管理地址仍使用
-系统代理。该分支在本机 Bash 与 PowerShell 各 7 项通过，Windows PowerShell 5.1 由 Actions 实际运行。
-出口诊断的相同目标断言不依赖并发 worker 的完成顺序，并已连续运行 50 次通过。
+2026-09-19 本轮文档与 OpenRouter 校对后的结果为 `604 passed, 244 subtests passed`。其中覆盖：
 
-当前矩阵覆盖：
+- 七类插件发现、禁用不导入、启停/刷新/teardown、动态配置和示例 schema 一致性；
+- 平台自有 runtime、立即首轮、可中断等待、失败退避和通用业务事件队列；
+- 内置/用户发现与决策策略、策略进化、Provider 健康与质量排序；
+- Codex、Claude、OpenRouter 的模型目录、结构化输出、代理、登录和凭据迁移；
+- 两类过滤插件、资金请求、实盘网关与独立纸面交易状态；
+- SQLite 台账、分页/筛选/删除、并发 HTTP、Passkey/ECDH、回环与公网访问隔离；
+- 本地启动器、宿主机代理、回调转发、registry 拉取和云部署契约；
+- 公共示例字段完整、无退役字段、默认值一致，管理示例不启用不存在的插件；
+- 测试树不允许 `skip`、`xfail` 或 `expectedFailure` 装饰器。
 
-- 配置字段说明、默认值、秘密保留和 JSON 存储约束；
-- 各类示例插件全部扫描、初始化、工厂调用及卸载；
-- 禁用不导入、启用/禁用、排序、手动刷新、删除文件后的卸载注销；
-- 从管理界面服务安装新插件源码、写入配置目录、保持禁用且不执行模块顶层代码；
-- 平台插件自己的扫描线程、可中断等待、成功间隔和失败退避；
-- 通用业务事件循环接收标准化扫描结果，再执行策略、研究、Agent、风控和平台写动作；
-- 全局与按平台暂停、配置不完整阻止对应平台启动、就绪平台独立启动；
-- Provider 多步工具 schema、优先级与运行时故障转移；
-- 策略文件、动态工具、过滤插件串链和在线执行网关；
-- SQLite 会话、滑动召回、动作记录、决策台账与界面查询；
-- Binance、Polymarket 各自生产读取和双平台同进程读取/决策；
-- 真实生产写拒绝探测：Binance quote/order/cancel/redeem/双向 transfer，以及 Polymarket
-  order/cancel/Relayer submit。探测必须收到服务器 HTTP/平台拒绝；若在本地提前失败，测试不通过。
-- 架构契约：插件系统不得出现平台/凭证/策略/风控私有字段，运行时不得出现执行模式或本地写分支，测试套件
-  不得出现 skip/xfail，决策账本和专用 UI 必须持续存在；通用运行层不得拥有平台扫描间隔或失败退避，
-  AWS/阿里云模板不得用外部计划任务替代平台插件调度。
+完整 `pytest` 默认包含生产联网测试，因此在 Binance 受限网络中会保留真实失败，而不是显示全绿。需要只看
+确定性回归时必须显式使用上面的 `--ignore`，不要给联网用例添加 skip。
 
-正式运行就绪检查与生产网络集成测试是两条独立路径：`serve`、`run` 和正式 `once` 会先检查全局结构、
-插件私有配置及暂停状态；`test_api_integration.py` 直接实例化 API 插件并访问线上接口，不经过运行监督器，
-因此缺少交易权限仍会把请求发送到服务器并验证真实拒绝，而不会在本地被“配置不完整”截断。
-
-写拒绝探测使用无效测试资源标识和极小标准化金额，目的在于证明请求穿过插件签名/代理并到达
-服务器。当前无写权限凭证的拒绝是测试预期；权限或服务器行为改变会让测试失败并要求人工复核，而不会
-被当成通过。
-
-最近一次本地非交易确定性回归结果：`149 passed, 87 subtests passed, 0 skipped`。命令为
-`PYTHONPATH=src .venv/bin/python -m pytest -q --ignore=tests/test_api_integration.py`；
-这是管理、客户端和运行架构回归，不是完整生产联网验收。包含私网/回环明文、公网认证、跨域拒绝、
-客户端账号/升级、模型预置及列表、助手能力令牌和回调映射证明。
-新增回归覆盖回调 302 → 同源 `/success` → 客户端进程退出 → 状态变为 authenticated；
-直接转发和助手通道均覆盖，并拒绝跨主机/端口/未声明路径及非 2xx 完成响应。
-同时覆盖临时容器精确归属、端口冲突、不挂载 Docker socket、流程切换/结束移除映射、每次探测随机 challenge、
-真实 TCP 监听在回调完成/超时/取消后关闭，以及助手发现服务端流程结束后释放端口。Shell 启动器在本机执行过；
-PowerShell 实现尚未在 Windows 上实际运行，不能将这些测试等同于 Windows 端到端验收。
-
-浏览器探测函数另由 `node --test tests/login_probe.test.cjs` 覆盖匹配、旧证明、其他客户端 HTML、
-错误端口、CORS 拒绝、超时及禁止跨目标探测。实测临时 Docker 同端口映射下的真实 Codex 登录入口，
-完整管理 UI 自动验证成功并隐藏助手；未映射 Claude 动态端口时显示助手而不开放官方登录链接。
-实测仅启动官方登录等待并取消，未授权用户账号。可在隔离容器中运行
-`python tests/probe_browser_login.py --client codex --serve-port 17778`，同时发布 17778:17778 和 1455:1455，
-然后在浏览器打开 `http://127.0.0.1:17778` 重现；页面与等待最多保留两分钟，不访问宿主机凭据。
-
-上述未授权探测之后，用户在独立持久容器中完成了真实 Codex 网页授权，客户端确认凭据已保存；旧转发实现未跟随
-`/success` 导致 dashboard 等待。补发该本地完成请求后，后台真实状态恢复为 authenticated。
-这一用户流程验证了故障原因与恢复，不等同于修改后又执行过一次新的真实账号授权；新实现另由上述回归验证。
-
-随后本机 Chrome 实测 Claude 动态回调端口自动发布，页面验证当前容器的本次证明后不再要求助手，
-用户完成了真实网页登录，dashboard 确认为 authenticated。两客户端登录完成后临时转发容器均已退出。
-去掉测试容器旧的永久回调端口映射、保留原数据目录替换容器后，两客户端仍为 authenticated，
-当前只发布管理页面 18765，不常驻回调端口。这是本机 macOS Docker 的真实账号验证，尚未发布新镜像，
-也不代表 Windows、远程下载助手或所有平台账号路径已完成验收。
-
-远程助手随后改为一次性终端脚本：新增 `tests/test_helper_terminal.py`，Bash 与 macOS 上的
-PowerShell 7.6.6 分别运行均为 `6 passed, 6 subtests passed, 0 skipped`。测试实际执行界面生成格式的
-命令，通过本机 HTTP 服务获取脚本、核对 SHA-256，再建立真实 TCP 回调监听并与 Python 服务端交换
-加密消息。覆盖引号、反斜杠、美元变量/命令替换、反引号、中文和 LF/CRLF；篡改、截断、HTTP 失败不执行；
-取消、过期、端口冲突及密文篡改不报告成功，退出后监听释放。插件测试还覆盖旧 HELPER_DIRECTORY
-配置兼容读取、一次性获取、当前 flow 绑定和公共脚本端点的能力令牌校验。
+## 生产 API 联网矩阵
 
 ```bash
-PYTHONPATH=src .venv/bin/python -m pytest -q tests/test_helper_terminal.py
-TEST_HELPER_SHELL=powershell TEST_HELPER_EXECUTABLE=/path/to/pwsh \
-  PYTHONPATH=src .venv/bin/python -m pytest -q tests/test_helper_terminal.py
+PYTHONPATH=src .venv/bin/python -m pytest -q tests/test_api_integration.py
 ```
 
-Actions 已改为 macOS/Linux Bash 和 Windows 系统 PowerShell 原生脚本测试，不再编译助手二进制。
-本机 PowerShell 7 测试不能替代 Windows PowerShell 5.1 实测；新的 Actions 尚未推送运行，不宣称已通过。
+这些测试直接实例化 API 插件，不经过 runtime readiness，也不读取 `paper_trading`。它们向真实服务器发送：
 
-宿主机代理新增 `tests/test_host_proxy.py`：覆盖 macOS/Windows/Linux 配置解析、环境变量优先级、
-PAC/SOCKS 显式错误、容器回环地址改写、不可达时请求转发、私有配置手动覆盖、凭据脱敏和客户端环境。
-真实 TCP 测试覆盖无凭据拒绝、带随机凭据的 CONNECT/二进制转发、上游代理认证替换、快照变化关闭监听，
-以及生命周期监测继承启动器 Docker 权限。Python 与 macOS PowerShell 7.6.6 路径分别通过 6 项测试及
-10 个子测试，无跳过。启动器测试确认代理检测早于 Compose 启动；四个 PowerShell 文件语法解析通过。
+- Binance：公开读取以及 quote、order、cancel、redeem、TRANSFER_IN、TRANSFER_OUT；
+- Polymarket：公开读取以及 order、cancel、Relayer submit 的未认证拒绝探针。
+
+写探针使用无效资源标识和极小金额，成功标准是请求确实到达服务器并收到预期拒绝；若本地配置检查、mock
+或纸面传输提前返回，测试失败。权限或远端行为改变时必须人工复核输入，不能把意外接受当作通过。
+
+2026-09-19 结果为 `2 passed, 2 failed, 9 subtests passed`：Polymarket 两项通过；Binance 两项都在最先
+访问官方公开时间接口时收到 HTTP 451，因此后续写矩阵没有执行。这个结果只说明当前运行网络受 Binance
+地域策略限制，不说明 Binance 适配器通过，也不允许在本地吞掉错误。
+
+## OpenRouter 严格 schema 验收
+
+后端专项位于 `tests/test_model_catalog.py` 和 `tests/test_plugin_system.py`，验证：
+
+- 模型目录请求带 `supported_parameters=structured_outputs`，响应项再次逐个检查该能力；
+- `OPENROUTER_MODEL` 为只选字段，不能从 UI 手填绕过目录；
+- 插件私有回环桥把 Responses schema 转成 Chat Completions `response_format.json_schema`；
+- 推理请求强制 `provider.require_parameters=true`；
+- 本机回环加入 `NO_PROXY`，桥到 OpenRouter 的远端请求仍经过该插件解析后的统一或独立代理；
+- 真实本地 HTTP 代理收到远端目录/推理请求，证明桥接没有屏蔽原有网络代理层；
+- `openrouter_*` 文件各自拥有独立配置，不把多 Key/模型逻辑放入通用框架。
+
+另使用生产容器中已保存的 OpenRouter Key 做过单次 schema 探针，模型 `z-ai/glm-5.3` 返回严格对象
+`{"number": 7, "word": "ok"}`。探针没有输出、复制或写回 Key，测试前后 `robot_paused=true`。这一结果
+证明当时账号与路由可用，不保证未来额度、模型端点或供应商状态。
+
+## 浏览器验收
+
+`tests/dashboard_ui.cjs` 使用本机 Chrome，在 390、768、1440px 检查六区导航、插件中心六类二级页、
+模型服务、OpenRouter 受限模型选择与独立配置生成、未保存草稿、启用顺序、决策五步、网络折叠和远程登录
+弹窗。模型列表和写请求由浏览器测试局部 fixture 拦截，不向运行部署提交测试 Key、配置、验证码或交易。
 
 ```bash
-PYTHONPATH=src .venv/bin/python -m pytest -q tests/test_host_proxy.py
-TEST_HELPER_SHELL=powershell TEST_HELPER_EXECUTABLE=/path/to/pwsh \
-  PYTHONPATH=src .venv/bin/python -m pytest -q tests/test_host_proxy.py
+npm install --no-save --package-lock=false playwright
+DASHBOARD_TEST_URL=http://127.0.0.1:18765 \
+  DASHBOARD_SCREENSHOTS=runtime-data/ui-review node tests/dashboard_ui.cjs
 ```
 
-本机实际读取 macOS 系统代理，容器预检成功；另实际建立认证转发，容器经宿主机脚本、本机代理访问公开
-HTTPS npm 软件源成功，验证后关闭临时转发。管理测试容器中 Codex/Claude 均保持 authenticated，
-代理来源为 macOS system。该验证不调用模型或交易，不代表 Windows、所有代理协议/域名或远程 Docker
-环境均已验收。Windows 原生代理测试已加入 Actions，尚未推送运行。详情见 [宿主机代理](HOST_PROXY.md)。
+2026-09-19 三种宽度均通过，无 JavaScript 错误和整页横向溢出。目标必须是隔离的管理测试实例；这不替代
+iOS Safari、Android 真机、Windows 原生浏览器或真实账号授权验收。
 
-远程登录新增真实子进程 fixture 测试：Codex 设备码等待/取消/成功；Claude 标准输入验证码成功、错误码、
-跨流程拒绝、多行拒绝、超时清理及逾期提交拒绝。另实际启动容器内官方 Codex 0.154.0 和 Claude 2.1.267，
-使用隔离临时凭据目录，确认前者返回设备码及官方设备页，后者返回官方 code callback 页和输入提示；
-两个流程均无机器人回调监听。检测完取消并清理，没有替用户完成官网授权，不能声称真实远程账号已登录验收。
+登录、回调和代理的非浏览器专项分别位于：
 
-`tests/dashboard_ui.cjs` 已在本机 Chrome 的 390、768、1440px 三种视口通过：六区导航、插件表单展开、
-长表局部滚动、两种远程向导、移动设备提示，没有整页溢出或 JS 异常。页面演示数据只在测试浏览器 DOM
-里生成，不写数据库、不提交验证码、不改配置。截图位于被忽略的 `runtime-data/ui-review/`；这不替代
-iOS Safari / Android 真机测试。运行方法见 [Web UI 文档](WEB_UI.md)。新增 CSS/JS 已构建进入 wheel。
-静态资源路由仅允许指定资源，公开访问 CSS 不会开放受保护业务端点。
+- `tests/login_probe.test.cjs`、`tests/test_callback_mapping.py`、`tests/test_login_relay.py`；
+- `tests/test_helper_terminal.py`、`tests/test_local_callback_transport.py`；
+- `tests/test_host_proxy.py`、`tests/test_local_launcher.py`、`tests/test_registry_pull.py`。
 
-界面可用性重整后再次运行同一非交易套件，结果仍为 `142 passed, 81 subtests passed`。三尺寸 Chrome
-增加插件中心六类二级导航及说明、模型服务独立管理 Provider、模型页 OpenRouter 直达、配置表单页内保留、受限模型列表选择、保存
-Key/模型/启用顺序载荷检查、决策五步展开与中文状态、网络技术详情默认折叠。保存与模型列表请求
-在测试浏览器拦截并返回 fixture 响应，不把测试 Key 或配置修改发送给运行服务；后端读写另由原有测试
-验证。没有执行交易、调用付费模型或登录新账号。三尺寸截图和工作记录不进入 Git。
+## wheel 与容器
 
-环境诊断新增 `tests/test_environment.py`：7 项测试、4 个子测试通过，覆盖公网地址校验、可选源端口、
-服务配置、空列表禁用、代理认证隔离、NO_PROXY、凭据脱敏、多源分歧、部分失败、缓存过期、插件仅贡献
-网络配置及受保护访问。三尺寸 Chrome 还验证环境详情展开、路径选项加载和页面无横向溢出。
-本机管理容器实际分别沿直连和 Codex 当前配置代理访问 ipify IPv4、ipify 双栈与 ifconfig.me；六次结果
-均为 `154.23.242.4`，ifconfig.me 返回临时源端口。此地址只是当时观测，不是默认配置或固定出口承诺。
+```bash
+.venv/bin/python -m build --wheel --outdir runtime-data/build-openrouter
+```
 
-## 2026-09-10 最终代理与 UI 回归
+2026-09-19 wheel 为 397617 字节，SHA-256
+`c4c66dc6b7d06824c3ad4989b23c72e6c2361851a7c957a733a01060d2a50a95`。已检查包内包含
+`plugins/providers/openrouter.py` 和新版 dashboard 静态资源，不包含任何已退役的通用兼容 Provider 模块。
 
-- 启动代理检查：容器内真实 HTTPS 成功、失败时不泄露底层错误、用户明确改为直连、非交互退出及 Shell
-  调用顺序均有测试；当前 macOS `7892` 路径实际通过 ipify。
-- 出口诊断：`direct` 与 `inherited` 使用相同服务清单，缓存与配置指纹独立；实际三项服务均成功并观察到
-  `154.23.242.4`。代理访问 Binance 时间接口仍返回 451，不把地区限制伪装成通过。
-- 平台循环：Binance/Polymarket 均验证首轮立即扫描、长间隔可即时停止、扫描结果进入通用事件循环。
-- UI：390/768/1440px 均通过；模型 Provider 只在模型服务页管理，插件中心为其余六类；暂停不在启动
-  必需清单；直连/继承出口并列卡片和模型/插件保存反馈均无脚本错误。
-- 完整 pytest 没有 skip/xfail：`159 passed, 2 failed, 101 subtests passed`。两项失败都是 Binance 官方
-  HTTP 451；包含生产读取与无权限写请求测试，没有删减失败用例。
-当前隔离管理部署中 Binance/Polymarket 网络配置未就绪，因此未宣称测得它们的实际出口；没有调用模型、
-下单、转账或修改白名单。新模块与 environment.js 已确认进入 wheel。操作与限制见
-[运行环境诊断](ENVIRONMENT.md)。
+`.github/workflows/container.yml` 的 `login-helpers` 作业在 macOS、Ubuntu 和 Windows 原生运行终端助手与
+宿主代理测试；`publish` 作业构建安装态镜像，执行 `deploy/check-container.sh`，再发布 amd64/arm64。
+容器检查覆盖 CLI、Codex/Claude/npm、健康端点、回环明文通道和公网认证页。当前工作流不运行完整 pytest，
+所以本地确定性回归和生产 API 矩阵仍是发布前的独立必做项。
 
-运行指引与客户端选项新增 `tests/test_setup_and_client_models.py`：缺失字段、单个就绪模型回退、暂停、
-部分运行、管理专用启动、模型特定强度、客户端初始化/分页、无 prompt 请求、失败信息脱敏和实际 CLI
-强度参数传递均有回归。全套非交易回归为 `149 passed, 87 subtests passed`，无跳过；后续相关专项
-25 项复测通过。浏览器三尺寸还实际读取本机容器两个客户端的模型列表，并检查模型改变后的强度列表。
-Codex 当前返回 6 个模型；Claude 返回 5 个条目（含默认别名），各自保留支持的强度，不发送推理请求。
-账号/订阅变化、网络失败或旧客户端缺少接口会明确报错，这不是对所有账号权限的保证。
+## 不能由这些结果推出的结论
 
-OpenRouter 模型选择在三种 Chrome 宽度验证：打开自动加载、仅下拉选择、接口错误及重试。页面重开读取
-当前保存值，存在未保存草稿时提示保留；目录响应不会静默改选。浏览器查询带
-`supported_parameters=structured_outputs` 的只读 fixture；真实目录筛选由 Python HTTP 测试独立覆盖，
-避免浏览器验收依赖外网、用户正在编辑的账号或代理。保存、服务器配置变化、请求失败和生成第二份
-`openrouter_*` 配置用浏览器局部 fixture 验证，不向部署提交测试配置或推理/交易请求。后端测试另验证
-目录双重筛选、具体端点强制参数、schema 翻译，以及本机桥绕过代理但远端请求继续经过继承代理。
-
-容器工作流另用 `deploy/check-container.sh` 检查最终安装态。最近一次交易 API 生产联网测试结果为
-`2 passed, 2 failed, 9 subtests passed, 0 skipped`：Polymarket 读取和三个写路由拒绝探测全部通过；
-Binance 的两个用例在最先访问公开时间接口时收到官方主机 `HTTP 451`，因此按“不得把远端错误伪装成通过”
-的约束保留为失败。该结果说明当前运行网络受 Binance 地域策略限制，不是本地跳过或模拟结果。
+- 纸面交易立即按真实报价完全成交，不模拟排队、部分成交、额外滑点或真实权限。
+- HTTP 代理出口探针不等于交易平台实际看到的 IP；同一代理可按域名、协议或地区分流。
+- 一次真实 schema 返回不保证所有 OpenRouter 模型、路由端点或未来请求都可用。
+- Chrome 响应式验收不等于所有移动设备、辅助技术或浏览器扩展行为一致。
+- 历史决策、模型输出、纸面盈亏和测试通过都不构成收益保证。

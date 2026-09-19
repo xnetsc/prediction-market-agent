@@ -237,7 +237,7 @@ class BuiltInDecisionStrategy:
     """How far out a settlement may be and still be worth a slot."""
 
     max_trade_usdt: float = 25.0
-    """The most this strategy will put into one buy. The operator sets both in program settings."""
+    """The strategy's preferred size for one buy. The operator sets both preferences."""
 
     @property
     def instructions(self) -> str:

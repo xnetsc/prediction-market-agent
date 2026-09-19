@@ -5,8 +5,9 @@ Prediction 与 Polymarket API 插件，以及 Codex、Claude、OpenRouter Provid
 市场平台共享同一 Agent 决策与交叉验证流程，但各自保留能力清单、账户、凭证、URL、代理和
 执行配置。
 
-通用内核没有线上/模拟选择：产生写动作时一定调用启用 API 插件的线上传输。内核不内置本金、止损、
-或具体交易策略；API 插件决定自己的传输，过滤插件决定账户和动作约束，策略插件
+实盘模式下，产生写动作时一定调用启用 API 插件的线上传输；默认关闭的纸面交易模式只在最终写传输处
+模拟成交，市场、报价、模型、过滤和结算判断仍使用真实链路，并使用独立账户镜像。内核不内置实盘本金、
+止损或具体交易策略；API 插件决定自己的传输，过滤插件决定账户和动作约束，策略插件
 决定候选筛选与系统决策文本。没有规则插件适用于某个目标时，通用协调器不额外增加允许或拒绝政策。
 当前运维值都在各插件私有 JSON 中；API 凭证权限变化可能改变真实请求结果，运行前应检查管理界面中的
 插件配置与能力清单。
@@ -33,6 +34,8 @@ Prediction 与 Polymarket API 插件，以及 Codex、Claude、OpenRouter Provid
 - 研究工具由插件动态贡献，工具名会动态进入 Agent 控制 schema；内置网页、URL、跨市场、行情刷新、
   K 线和历史召回工具集。
 - SQLite 保存每轮完整输入输出、Agent 工具轨迹、风险判定、执行请求/结果以及专门的决策台账。
+- 可选纸面交易使用用户明确填写的模拟金额，按平台真实报价和费率在本地立即成交；所有模拟余额、订单和
+  台账都标记为 simulated，并与实盘账户镜像分开。它不模拟排队、部分成交或滑点，不能替代实盘验收。
 - Web 界面通过回环或明确的局域网私有 IP 访问时无需认证或加解密（地址范围见[认证说明](docs/AUTHENTICATION.md)）；其他主机首次访问注册 admin Passkey，每次登录把 P-256 ECDH 参数绑定进 WebAuthn challenge，登录后的
   业务请求与响应使用 AES-GCM 会话密钥加密，并可管理 Passkey 与设备会话。
 - Web 界面可筛选查看“上下文 → 证据 → 模型提案 → 风控调整 → 最终动作 → 执行 → 后续盘口”，并查看、
@@ -62,7 +65,8 @@ Prediction 与 Polymarket API 插件，以及 Codex、Claude、OpenRouter Provid
 - **样本门槛 + 向基线收缩。** 桶样本不足不予保留；权重按样本量向基线收缩并封顶，一段短期连胜不会把
   权重打满。
 - **偏离消失自动淘汰。** 不再成立的条款会被退役，长期未复证的会过期。
-- **硬闸不可学。** 成本、结算风险、时间、状态四道闸写在内置内核里，任何学到的条款都不能放松它们。
+- **硬闸不可学。** 成本、结算风险、不可交易的临近截止时间和关闭状态写在内置内核里，任何学到的条款
+  都不能放松；偏好的揭标天数不是硬上限。
 
 **你的策略不会被改写**
 
@@ -158,6 +162,9 @@ Windows 更新时将最后一条替换为 `.\start-local.ps1`。`once` 是明确
 - [Provider、策略与研究工具](docs/DECISION_PLUGINS.md)
 - [两类过滤插件](docs/RISK_FILTERS.md)
 - [决策台账与管理界面](docs/CONSOLE_AND_LEDGER.md)
+- [模型客户端账号、回调与 OpenRouter](docs/CLIENT_ACCOUNTS.md)
+- [宿主机代理检测与转发](docs/HOST_PROXY.md)
+- [运行环境与公网出口诊断](docs/ENVIRONMENT.md)
 - [管理员 Passkey、ECDH 与加密会话](docs/AUTHENTICATION.md)
 - [集成测试](docs/INTEGRATION_TESTS.md)
 - [时区信息延迟案例研究](docs/STRATEGY_RESEARCH.md)
@@ -186,9 +193,10 @@ PYTHONPATH=src .venv/bin/python -m pytest -q
 PYTHONPATH=src .venv/bin/python -m pytest -q tests/test_api_integration.py
 ```
 
-生产集成矩阵会向 Binance 发送真实 quote/order/cancel/redeem/双向 transfer 请求，并向 Polymarket
+生产集成矩阵不读取 `paper_trading`，会直接实例化 API 插件，向 Binance 发送真实
+quote/order/cancel/redeem/双向 transfer 请求，并向 Polymarket
 写端点发送真实未认证请求；使用无效资源标识和极小金额，当前预期是服务器拒绝，本地提前失败不算通过。
-它没有执行模式或测试跳过开关。API 权限或远端行为改变前应重新复核这些测试输入。历史测试和模型输出
+它没有纸面交易分支或测试跳过开关。API 权限或远端行为改变前应重新复核这些测试输入。历史测试和模型输出
 都不构成收益保证。
 
 插件私有配置由插件回调读写；内置插件使用 `config/plugins/*.json`。运行配置和私有配置均已被版本控制

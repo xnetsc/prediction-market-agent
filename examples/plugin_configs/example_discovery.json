@@ -1,0 +1,11 @@
+{
+  "DISCOVERY_FILE": "examples/market_discovery_plugins/example_discovery.md",
+  "HORIZON_DAYS": 3,
+  "SURVEY_TOPICS": 200,
+  "SHORTLIST_TOPICS": 24,
+  "DETAIL_LOOKUPS": 12,
+  "BOOK_LOOKUPS": 12,
+  "AGENT_TOOL_STEPS": 14,
+  "EXPLORATION_SLOTS": 1,
+  "COOLDOWN_SECONDS": 900
+}

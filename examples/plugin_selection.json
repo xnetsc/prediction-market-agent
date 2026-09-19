@@ -21,11 +21,11 @@
       "agent_actions"
     ],
     "risk": [
-      "portfolio_limits",
       "custom_rules"
     ]
   },
   "decision_strategy": "general_agent",
+  "strategy_evolution": true,
   "robot_paused": false,
   "paused_platforms": []
 }

@@ -76,12 +76,12 @@ APPLICATION_FIELDS = (
     ),
     ApplicationConfigField(
         "plugin_directories_file", "插件目录文件", "string",
-        "保存六类插件扫描目录的 JSON 文件；文件不存在时使用安装包内置目录，界面保存后创建该文件。",
+        "保存七类插件扫描目录的 JSON 文件；文件不存在时使用安装包内置目录，界面保存后创建该文件。",
         "config/plugin_directories.json",
     ),
     ApplicationConfigField(
         "state_file", "账户状态文件", "string",
-        "已确认远端结果的本地账户镜像路径；多平台会自动加入平台后缀。", "agent_state.json",
+        "账户镜像基准路径；多平台与纸面交易会自动使用相互隔离的后缀。", "agent_state.json",
     ),
     ApplicationConfigField(
         "session_db", "决策数据库", "string",
@@ -108,8 +108,8 @@ APPLICATION_FIELDS = (
     ),
     ApplicationConfigField(
         "paper_trading", "纸面交易模式", "enum",
-        "开启后，除了真正的买卖，一切都按真实情况走：真实平台、真实价格、真实模型、真实结算判定。"
-        "订单不会发到平台，而是按平台当时报出的价格和费率在本地成交，持仓、现金和已实现盈亏照常记账，"
+        "开启后，平台读取、价格、模型、过滤和结算判定仍走真实链路。下单、撤单、赎回和转账不会发到平台；"
+        "订单按平台当时报出的价格和费率在本地成交，持仓、现金和已实现盈亏照常记账，"
         "标的揭晓后按平台给出的真实胜负结算，所以你能看到「如果当初真买了，现在赚赔多少」。"
         "账户可用金额用下面填的模拟金额，界面和给 AI 的数据都会标成 simulated。确认效果满意后关掉它，"
         "才会真正花钱。",
@@ -322,7 +322,7 @@ class Config:
     """How far out the built-in strategy will look. Beyond it, capital is committed for too long."""
 
     strategy_max_trade_usdt: float = 25.0
-    """The built-in strategy's own ceiling on one buy. Not a framework limit; a risk plugin is that."""
+    """The built-in strategy's preferred size for one buy. A risk plugin supplies a hard limit."""
 
     agent_max_tool_steps: int = 12
     agent_tool_result_chars: int = 12_000

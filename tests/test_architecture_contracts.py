@@ -62,7 +62,7 @@ class ArchitectureContractTests(unittest.TestCase):
             {"agent", "config", "core", "plugins", "plugin_system", "runtime"},
         )
 
-    def test_runtime_has_no_execution_mode_or_local_write_branch(self) -> None:
+    def test_runtime_has_no_ambiguous_legacy_execution_mode(self) -> None:
         combined = "\n".join(
             path.read_text(encoding="utf-8")
             for path in PACKAGE.rglob("*.py")
@@ -207,6 +207,7 @@ class ArchitectureContractTests(unittest.TestCase):
             "api_plugins": "*.py",
             "decision_provider_plugins": "*.py",
             "decision_strategy_plugins": "*.py",
+            "market_discovery_plugins": "*.py",
             "research_tool_plugins": "*.py",
             "risk_plugins": "*.py",
             "risk_rules": "*.py",
@@ -244,7 +245,7 @@ class ArchitectureContractTests(unittest.TestCase):
                     self.assertTrue(path.is_file(), f"missing sanitized config example: {path}")
                     values = json.loads(path.read_text(encoding="utf-8"))
                     expected = {field.name for field in spec.configuration.fields}
-                    self.assertEqual(expected - values.keys(), set(), f"incomplete example: {path}")
+                    self.assertEqual(expected, set(values), f"schema drift in example: {path}")
                     for field in spec.configuration.fields:
                         if field.field_type != "secret":
                             continue
@@ -256,6 +257,47 @@ class ArchitectureContractTests(unittest.TestCase):
                         )
         finally:
             catalog.shutdown()
+
+    def test_application_example_is_complete_and_matches_shipped_defaults(self) -> None:
+        from prediction_market_agent.core.config import APPLICATION_FIELDS
+
+        values = json.loads(
+            (ROOT / "examples" / "application.json").read_text(encoding="utf-8")
+        )["values"]
+        defaults = {field.name: field.default for field in APPLICATION_FIELDS}
+        self.assertEqual(set(values), set(defaults))
+        self.assertEqual(values, defaults)
+
+    def test_shipped_selection_examples_only_enable_existing_builtin_plugins(self) -> None:
+        package_plugins = PACKAGE / "plugins"
+        locations = {
+            "api": package_plugins / "api",
+            "decision_provider": package_plugins / "providers",
+            "decision_strategy": package_plugins / "strategies",
+            "market_discovery": package_plugins / "market_discovery",
+            "research_tool": package_plugins / "research",
+            "agent_policy": package_plugins / "agent_policy",
+            "risk": package_plugins / "risk",
+        }
+        available = {
+            kind: {
+                path.stem for path in directory.glob("*.py")
+                if not path.name.startswith("_")
+            }
+            for kind, directory in locations.items()
+        }
+        for relative in (
+            "examples/plugin_selection.json",
+            "src/prediction_market_agent/config/plugin_selection.default.json",
+        ):
+            document = json.loads((ROOT / relative).read_text(encoding="utf-8"))
+            for kind, names in document["enabled"].items():
+                self.assertEqual(
+                    set(names) - available[kind], set(),
+                    f"unknown built-in plugin in {relative}:{kind}",
+                )
+            strategy = document.get("decision_strategy", "")
+            self.assertTrue(not strategy or strategy in available["decision_strategy"])
 
     def test_provider_model_choices_are_dynamic_plugin_fields(self) -> None:
         catalog = load_plugin_catalog(Config.load())

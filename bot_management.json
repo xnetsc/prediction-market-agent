@@ -20,5 +20,8 @@
     "agent_policy": [],
     "risk": []
   },
-  "decision_strategy": "general_agent"
+  "decision_strategy": "general_agent",
+  "strategy_evolution": true,
+  "robot_paused": false,
+  "paused_platforms": []
 }

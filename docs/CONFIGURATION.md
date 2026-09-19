@@ -35,11 +35,16 @@
 | `working_directory` | 所有相对配置和运行数据路径的基准目录 |
 | `management_file` | 插件启用、禁用、优先级和当前策略文件 |
 | `plugin_directories_file` | 七类插件扫描目录文件 |
-| `state_file` | 已确认远端结果的账户镜像；多平台自动加后缀 |
+| `state_file` | 账户镜像基准路径；多平台及纸面交易会自动使用彼此独立的后缀 |
 | `session_db` | 会话、研究步骤、执行动作和决策台账 SQLite |
 | `auth_db` | admin Passkey、公钥计数器和登录会话 SQLite |
 | `admin_session_hours` | 连续无操作失效小时数，默认 72；有效请求会刷新闲置计时 |
 | `admin_absolute_session_hours` | 从登录起的绝对有效上限，默认 168 小时（7 天） |
+| `agent_language` | 模型写给人看的散文语言；不翻译 schema、枚举、ID、URL 或市场原文 |
+| `paper_trading` | `off` 为实盘写传输；`on` 时只在最终写动作处本地模拟成交 |
+| `paper_trading_funds` | 纸面账户初始模拟金额；只在纸面交易开启时生效，不代表平台余额 |
+| `strategy_horizon_days` | 内置发现/决策策略偏好的揭标天数；是偏好，不是风控硬上限 |
+| `strategy_max_trade_usdt` | 内置决策策略偏好的单笔金额；硬上限应由过滤插件实现 |
 | `agent_max_tool_steps` | 每次最终决策前最多研究工具步骤 |
 | `agent_tool_result_chars` | 单个工具结果进入上下文的字符预算 |
 | `context_window_chars` | Provider 输入窗口预算 |
@@ -49,10 +54,13 @@
 | `host_proxy_file` | 一键启动器写入的宿主机代理检测/转发信息文件 |
 | `dashboard_host`、`dashboard_port` | 管理服务监听地址和端口 |
 | `dashboard_refresh_seconds` | 页面自动刷新间隔 |
+| `environment_probe_services` | 手动公网出口查询的 HTTPS 服务列表 JSON；空数组禁用 |
+| `environment_probe_timeout` | 每个出口查询服务的超时秒数，范围 1–30 |
 
 应用配置示例见 `examples/application.json`。通用 Config 只提供各插件可选择继承的统一网络代理，不包含
-任何平台专属代理、平台 URL、API Key、私钥、资金、扫描间隔、分页/每轮规模、失败退避、
-Agent 动作策略或具体交易策略；这些只能由对应插件定义。OpenRouter 的插件私有代理字段默认 `INHERIT`。
+任何平台专属代理、平台 URL、API Key、私钥、实盘账户资金、扫描间隔、分页/每轮规模、失败退避、
+Agent 动作策略或具体交易策略；这些只能由对应插件定义。通用配置中的 `paper_trading_funds` 只是假设的
+纸面账户金额，不是任何平台的实盘资金。OpenRouter 的插件私有代理字段默认 `INHERIT`。
 
 `shared_http_proxy` 支持 `HOST`、`ENVIRONMENT`、`DIRECT`、`SYSTEM`（仅原生 macOS）或完整 HTTP(S) URL。
 平台、客户端和研究插件的私有代理字段默认 `INHERIT`；改成 `DIRECT` 或 URL 后只覆盖该插件。
@@ -68,7 +76,8 @@ Agent 动作策略或具体交易策略；这些只能由对应插件定义。Op
 导入或初始化，因此只能在启用后显示和管理其动态私有字段。API/Provider/策略允许暂时为空；运行状态页会
 显示全局或平台阻塞原因，补齐后自动激活。完整文件结构见 `examples/plugin_selection.json`。
 
-显式保存空 `decision_strategy` 表示不启用策略，不能回退到进程启动时的旧策略；此时使用中性候选透传。
+显式保存空 `decision_strategy` 表示不启用用户策略插件，不能回退到进程启动时的旧插件；此时使用框架内置
+决策策略。内置策略没有配置卡片，但当前生效全文可以导出。
 
 ## 插件私有配置
 
@@ -76,8 +85,9 @@ Agent 动作策略或具体交易策略；这些只能由对应插件定义。Op
 如何持久化，只调用插件提供的回调。内置插件当前使用 `config/plugins/*.json`：
 
 - API 插件：端点、认证、钱包、代理、交易账户起始资金和平台参数；
-- Provider 插件：客户端路径或 API 端点、模型、凭证、代理、超时；
+- Provider 插件：客户端路径、模型、凭证、代理和超时；OpenRouter 的远端端点固定在其插件实现内；
 - 策略插件：策略文本路径和候选筛选字段；
+- 标的发现插件：发现文本、读取预算及其私有参数；
 - 研究插件：搜索端点、代理、网络约束及结果限制；
 - 业务风控插件：账户分配、损益规则和自定义 Python 规则文件；
 - Agent 行为风控插件：允许的工具名与交易动作白名单。

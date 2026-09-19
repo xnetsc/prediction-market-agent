@@ -80,14 +80,16 @@
 
 ## 账户的钱从哪来
 
-买卖要有本金,所以每个 API 插件在自己的配置里声明这个平台的**交易账户起始资金**
-（`BINANCE_TRADING_CAPITAL` / `POLYMARKET_TRADING_CAPITAL`）。
+买卖要有本金，但平台获取方式不同。Binance Prediction 没有当前适配器可用的预测钱包余额接口，因此
+`BINANCE_TRADING_CAPITAL` 是用户声明的可用金额，来源明确标记为 `declared`；转账或交易后需要手工更新。
+Polymarket 不再接受配置本金，插件直接查询钱包抵押品余额，查询失败就返回 0 和错误，不拿旧数字冒充余额。
 
-这是**账户设置,不是风控上限**——框架从不拿它拦任何动作,它只是记账的起点：模型 `READ_ACCOUNT` 看到的
-`starting_capital` 和 `net_result` 都以它为基准。填 0 就是账户没钱,买不了任何东西。
+这些都是**账户状态，不是风控上限**——框架不拿它们当用户定义的仓位规则。模型 `READ_ACCOUNT` 看到的
+`starting_capital` 和 `net_result` 以账户初始化时的可用金额为基准。Binance 在钱包和预测账户之间双向划转，
+Polymarket 直接用钱包里的抵押品交易、只支持转出。
 
-由插件声明而不是框架分配，是因为只有插件知道自己的账户是什么：Binance 在钱包和预测账户之间双向划转，
-Polymarket 直接用钱包里的抵押品交易、**只支持转出**。所以框架里没有"给各平台分多少钱"这种逻辑。
+开启纸面交易时，所有平台统一改用 `paper_trading_funds` 作为明确标记的 simulated 金额，并写入独立纸面
+状态文件；关闭后恢复各平台自己的实盘资金来源。纸面金额仍不是硬性风控规则。
 
 `TRANSFER` 是运行中的资金通路：`INBOUND` 给交易账户入金；`OUTBOUND` 把卖出和赎回赚到的收回钱包。
 各平台支持哪个方向见 `LIST_PLATFORMS`——Polymarket 只有 `OUTBOUND`。
@@ -128,8 +130,8 @@ Agent 行为风控。`agent_actions` 的交易动作白名单管的正是这些�
 两个 `custom_rules` 同名但分属不同类别，各自在自己的类别页配置，配置文件分别是
 `config/plugins/risk_custom_rules.json` 和 `config/plugins/agent_policy_custom_rules.json`。
 
-没有硬编码永久写拦截，也没有执行模式。规则允许的动作会进入线上传输；API 权限、签名和业务参数由
-远端最终判定。例子按类别分开放，照抄哪一类就用哪一份：
+没有硬编码永久写拦截。实盘中，规则允许的动作会进入线上传输，API 权限、签名和业务参数由远端最终判定；
+纸面交易中，同一过滤链执行完后，最终写动作进入明确标记的本地纸面传输。例子按类别分开放：
 
 | 例子 | 类别 | 演示 |
 | --- | --- | --- |

@@ -9,8 +9,8 @@ API 插件归一化 `Topic`、`Market`、`Outcome`、`OrderBook`、`Candle`、�
 通用写接口传递标准化计价金额或份额；签名、链 ID、代币精度、请求字段和响应差异由插件内部抹平。
 API 插件还必须把平台订单状态归一化为 `OPEN`、`FILLED`、`CANCELED`、`REJECTED` 或 `FAILED`；原始
 平台状态可另存为 `platformStatus`，通用执行网关不识别平台私有状态字符串。
-网络主机/方法/路径规则同样由 API 插件私有 JSON 构造，内核没有平台白名单。所有写工作流只走线上
-传输；不存在本地撮合分支。
+网络主机/方法/路径规则同样由 API 插件私有 JSON 构造，内核没有平台白名单。实盘写工作流只走线上
+传输；显式开启 `paper_trading` 时，平台读取和报价保持真实，只有最终写动作由通用纸面包装在本地记账。
 
 API 插件还提供两组互补能力：标准业务接口供通用框架随时主动调用；正式后台运行所需的 runtime 只负责
 该平台何时执行扫描。没有 runtime 的 API 插件仍可被显式调用，但运行监督器会把它标为未就绪，不会假装
@@ -210,14 +210,15 @@ wallet address/id 齐全；直接集成测试不走该 readiness 门，因此仍
 - 从可赎回持仓映射 token 到 condition 后提交赎回；
 - pUSD OUTBOUND 转账。
 
-私有 JSON 拥有所有端点、链、钱包私钥、CLOB L2、funder、用户/Builder Relayer、Builder Code、转出
-地址和代理。当前适配器不能可靠判定 winner，因此能力清单明确把 `settlement_status` 设为
-false；这不是占位成功值。
+私有 JSON 拥有所有端点、链、钱包私钥、可选 CLOB L2/funder、用户/Builder Relayer、Builder Code、
+转出地址和代理。当前适配器把 `settlement_status` 声明为 true，但只在 outcome 价格达到结算阈值时返回
+胜负；仍在交易区间的市场返回未结算，不会把暂时领先当成 winner。
 
 代理字段默认 `INHERIT`，使用程序设置中的统一代理；改成 `DIRECT` 或完整 HTTP(S) URL 只覆盖 Polymarket。
 
-Polymarket 的同一私有 JSON 提供与 Binance 等价的六个 runtime 字段和相同默认值。正式 runtime 还要求
-private key、CLOB L2 三件套和 funder address；可选 Builder/Relayer 凭证与转出地址只影响相应工作流。
+Polymarket 的同一私有 JSON 提供与 Binance 等价的六个 runtime 字段和相同默认值。正式 runtime 只把
+private key 标为运行必需；CLOB L2 三件套可由私钥派生，funder 地址可由钱包推导。可选 Builder/Relayer
+凭证与转出地址只影响相应工作流。
 
 官方参考：[Gasless 交易](https://docs.polymarket.com/trading/gasless)、
 [市场结算](https://docs.polymarket.com/concepts/resolution)。

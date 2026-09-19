@@ -91,6 +91,7 @@ class PluginSystemTests(unittest.TestCase):
                 "api": [str(project / "examples/api_plugins")],
                 "decision_provider": [str(project / "examples/decision_provider_plugins")],
                 "decision_strategy": [str(project / "examples/decision_strategy_plugins")],
+                "market_discovery": [str(project / "examples/market_discovery_plugins")],
                 "research_tool": [str(project / "examples/research_tool_plugins")],
                 "risk": [str(project / "examples/risk_plugins")],
                 "agent_policy": [str(project / "examples/agent_policy_plugins")],
@@ -100,6 +101,7 @@ class PluginSystemTests(unittest.TestCase):
                 "api": ("static_demo",),
                 "decision_provider": ("static_provider",),
                 "decision_strategy": ("example_strategy",),
+                "market_discovery": ("example_discovery",),
                 "research_tool": ("static_evidence",),
                 "risk": ("reject_operation",),
                 "agent_policy": ("refuse_tool",),
@@ -115,6 +117,9 @@ class PluginSystemTests(unittest.TestCase):
                 self.assertEqual(catalog.get("decision_provider", "static_provider").factory(runtime).name, "static_provider")
                 strategy = catalog.get("decision_strategy", "example_strategy").factory(runtime)
                 self.assertIn("evidence", strategy.instructions.lower())
+                discovery = catalog.get("market_discovery", "example_discovery").factory(runtime)
+                self.assertEqual(discovery.budget().survey_topics, 200)
+                self.assertIn("attention", discovery.instructions.lower())
                 research = catalog.get("research_tool", "static_evidence").factory(runtime)
                 self.assertIn("READ_STATIC_EVIDENCE", research.descriptions)
                 risk = catalog.get("risk", "reject_operation").factory(runtime, {})
