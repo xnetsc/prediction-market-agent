@@ -27,15 +27,19 @@
 
 ## 额度与登录状态
 
-两个客户端都没有把额度做成普通子命令，`--help` 里看不到，但都能**非交互地、且不消耗模型额度**回答：
+模型服务页把三种 Provider 的账号/额度摘要直接显示在卡片上，不再藏在登录维护折叠区。查询均不发送
+模型 prompt，也不消耗模型额度：
 
-| 客户端 | 入口 | 返回 |
+| Provider | 入口 | 返回 |
 | --- | --- | --- |
 | Claude | `claude -p "/usage" --output-format json` | 会话与本周的已用百分比和重置时间（`num_turns` 为 0，不产生模型调用） |
 | Codex | app-server 协议 `initialize` → `account/rateLimits/read` | `usedPercent`、`resetsAt`、`ordinaryUsageAllowed` |
+| OpenRouter | `GET /api/v1/key` | 当前推理 Key 的累计、日、周、月消费以及可选消费上限和剩余额度 |
+| OpenRouter（可选） | Management Key 调用 `GET /api/v1/credits` | 账户累计充值、累计消费和余额 |
 
-模型服务页的每个客户端卡片显示这些读数和查询时间，并有“刷新账号状态”按钮。恢复探测也走同一条路：
-用发一次请求来判断还能不能发请求，既要花额度，又在额度已经耗尽时什么都问不出来。
+Codex/Claude 提供“刷新账号状态”，OpenRouter 提供“刷新余额与用量”。OpenRouter Management Key 只用于
+余额接口，推理 Key 仍只负责目录、推理和本 Key 状态；两种密钥不互换。恢复探测也使用这些无推理请求的
+入口：用发一次 completion 判断还能不能发请求，既要花额度，又在额度已经耗尽时什么都问不出来。
 
 ## 可用性监控与质量排序
 

@@ -193,6 +193,59 @@ async function loadCurrentModelConfig(name){
     }catch(e){if(CONFIG_READS.get(card)===ticket&&card.isConnected){note.textContent='读取当前配置失败：'+e.message+'；保留原有输入，请重新打开页面重试。';note.className='description config-load-status danger'}}
 }
 let CLIENT_STATUS=[];
+function accountMoney(value){
+    return typeof value==='number'&&Number.isFinite(value)
+        ?'$'+value.toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:6})
+        :'—';
+}
+function renderAccountUsage(card,s,item,name){
+    const usage=s.usage||{},openrouter=s.control_type==='openrouter';
+    const box=controlNode('section','',card);box.className='usage-readout';
+    controlNode('h5',openrouter?'OpenRouter 账号与额度':'账号状态与额度',box);
+    if(s.message)controlNode('p',s.message,box).className='description';
+    if(!usage.checked_at&&!usage.error){
+        controlNode('p',openrouter?'尚未查询余额与 Key 用量。':'尚未查询当前账号额度。',box).className='description';
+    }else if(usage.error){
+        controlNode('p','查询失败：'+usage.error,box).className='description danger';
+    }else if(openrouter){
+        controlNode('p',usage.available===false?'本 Key 剩余额度已用尽':'本 Key 可用',box).className='description';
+        if(usage.account){
+            const rows=controlNode('ul','',box);rows.className='usage-windows money-usage';
+            for(const [label,value] of [['账户余额',usage.account.balance],['累计充值',usage.account.total_credits],['账户累计消费',usage.account.total_usage]]){
+                const row=controlNode('li','',rows);controlNode('span',label,row);controlNode('b',accountMoney(value),row);
+            }
+        }
+        if(usage.account_error)controlNode('p','账户余额查询失败：'+usage.account_error,box).className='description danger';
+        else if(usage.account_note)controlNode('p',usage.account_note,box).className='description';
+        if(usage.key){
+            const rows=controlNode('ul','',box);rows.className='usage-windows money-usage';
+            for(const [label,value] of [['本 Key 累计消费',usage.key.usage],['今日',usage.key.usage_daily],['本周',usage.key.usage_weekly],['本月',usage.key.usage_monthly]]){
+                const row=controlNode('li','',rows);controlNode('span',label,row);controlNode('b',accountMoney(value),row);
+            }
+            const limit=controlNode('p',usage.key.limit==null?'本 Key 未设置消费上限':'本 Key 消费上限 '+accountMoney(usage.key.limit)+' · 剩余 '+accountMoney(usage.key.limit_remaining),box);limit.className='description';
+            if(usage.key.limit_reset)limit.append(' · '+usage.key.limit_reset+' 重置');
+            if(usage.key.expires_at)controlNode('p','Key 到期时间：'+new Date(usage.key.expires_at).toLocaleString(),box).className='description';
+        }
+    }else{
+        controlNode('p',(usage.available===false?'额度已用尽':usage.available===true?'额度可用':'额度未知')+(usage.note?' · '+usage.note:''),box).className='description';
+        if((usage.windows||[]).length){
+            const rows=controlNode('ul','',box);rows.className='usage-windows';
+            for(const window of usage.windows){
+                const reset=window.resets_text||(window.resets_at?new Date(window.resets_at*1000).toLocaleString():'');
+                const row=controlNode('li','',rows);controlNode('span',window.label,row);controlNode('b',window.used_percent==null?'— 已用':Math.round(window.used_percent)+'% 已用',row);if(reset)controlNode('small','重置 '+reset,row);
+            }
+        }
+    }
+    const model=s.model||(openrouter?'未选择':'客户端默认');
+    controlNode('p','模型：'+model+(usage.checked_at?' · 查询于 '+new Date(usage.checked_at*1000).toLocaleString()+(usage.source?' · '+usage.source:''):''),box).className='description usage-stamp';
+    const action=(s.actions||[]).find(candidate=>candidate.id==='refresh_usage');
+    if(action){
+        const toolbar=controlNode('div','',box);toolbar.className='toolbar account-actions';
+        const button=controlNode('button',action.label,toolbar);button.disabled=!!action.disabled;
+        button.onclick=async()=>{button.disabled=true;try{await post('/api/plugins/controls/action',{kind:item.kind,name,action:action.id,values:{}});document.getElementById('clientControlError').textContent='';button.blur();await refreshClientControls()}catch(e){document.getElementById('clientControlError').textContent=e.message}finally{button.disabled=!!action.disabled}};
+        if(action.group_note)controlNode('small',action.group_note,toolbar);
+    }
+}
 function renderServiceConnections(){
     const root=document.getElementById('clientControls');
     if(root.contains(document.activeElement))return;
@@ -204,16 +257,19 @@ function renderServiceConnections(){
         const plugin=providers.find(p=>p.name===name),item=CLIENT_STATUS.find(p=>p.name===name),s=item?.status;
         const card=controlNode('article','',root);card.className='service-card';card.id='control_decision_provider_'+name;
         const head=controlNode('div','',card);head.className='section-heading';controlNode('h4',plugin?.enabled===false?name:serviceTitle(name),head);
-        const badge=controlNode('span',s?({authenticated:'已登录',authorizing:'等待授权',login_required:'需要登录',missing:'未安装'}[s.state]||'待检查'):plugin?.enabled===false?'未启用':plugin?.readiness?.ready?'已配置':'需要配置',head);badge.className='badge '+(s?.state==='authenticated'||plugin?.readiness?.ready?'ready':'');
+        const badge=controlNode('span',s?({authenticated:'已登录',authorizing:'等待授权',login_required:'需要登录',missing:'未安装',configured:'已配置',incomplete:'需要配置'}[s.state]||'待检查'):plugin?.enabled===false?'未启用':plugin?.readiness?.ready?'已配置':'需要配置',head);badge.className='badge '+(['authenticated','configured'].includes(s?.state)||plugin?.readiness?.ready?'ready':'');
         const selection=controlNode('div','',card);selection.className='selection-row model-selection';
         const enabledLabel=controlNode('label','',selection),enabled=controlNode('input','',enabledLabel);enabled.type='checkbox';enabled.className='model-enable';enabled.dataset.name=name;enabled.checked=plugin?.enabled!==false;enabledLabel.append(' 启用此服务');
         const priorityLabel=controlNode('label','顺序 ',selection),priority=controlNode('input','',priorityLabel);priority.type='number';priority.min='1';priority.className='model-priority';priority.dataset.name=name;priority.value=plugin?.priority??99;priority.setAttribute('aria-label',name+' 模型服务顺序');
         const selectionStatus=controlNode('p','',card);selectionStatus.id='modelSelectionStatus_'+name;selectionStatus.className='status selection-status';selectionStatus.setAttribute('role','status');
-        controlNode('p',s?'使用客户端账号提供模型；登录和模型配置分别管理。':plugin?.enabled===false?'启用后才能加载配置。保存启用状态会重新检查运行条件。':'填写 OpenRouter API Key 并选择支持结构化输出的模型。',card).className='muted';
+        controlNode('p',s?.control_type==='openrouter'?'使用 OpenRouter 推理 Key；余额与用量由该插件单独查询。':s?'使用客户端账号提供模型；登录和模型配置分别管理。':plugin?.enabled===false?'启用后才能加载配置。保存启用状态会重新检查运行条件。':'填写 OpenRouter API Key 并选择支持结构化输出的模型。',card).className='muted';
         const bar=controlNode('div','',card);bar.className='toolbar service-actions';
-        if(plugin?.enabled!==false){const config=controlNode('a',s?'配置模型':'配置 OpenRouter',bar);config.className='button-link '+(!s?'primary':'');config.href=configLink('decision_provider',name)}
+        if(plugin?.enabled!==false){const config=controlNode('a',s?.control_type==='openrouter'?'配置 OpenRouter':s?'配置模型':'配置 OpenRouter',bar);config.className='button-link '+(!s?'primary':'');config.href=configLink('decision_provider',name)}
         let more;
         if(s){
+            renderAccountUsage(card,s,item,name);
+        }
+        if(s&&s.control_type!=='openrouter'){
             more=controlNode('details','',card);more.className='client-options';more.dataset.client=name;more.open=expanded.has(name);controlNode('summary','登录选项与客户端维护',more);
             const methodLabel=controlNode('label','登录方式',more);methodLabel.className='field';const select=controlNode('select','',methodLabel);select.setAttribute('aria-label',name+' 验证方式');
             for(const [value,label] of [['auto','自动选择（'+(preferredLoginMethod()==='remote'?'设备码 / 验证码':'本机网页回调')+'）'],['local','本机网页回调'],['remote','设备码 / 验证码']]){const option=controlNode('option',label,select);option.value=value}
@@ -222,26 +278,11 @@ function renderServiceConnections(){
             controlNode('p','客户端版本：'+(s.installed_version||'未检测')+' · '+(s.update_available?'有新版可升级':s.update_message||'尚未检查更新'),more).className='description';
             if(s.update_checked_at)controlNode('p','最近检查：'+new Date(s.update_checked_at*1000).toLocaleString(),more).className='description';
             const diagnostics=controlNode('details','',more);diagnostics.className='diagnostic-detail';controlNode('summary','连接技术信息',diagnostics);controlNode('p',s.proxy_message||'未提供连接信息',diagnostics);
-            const usage=s.usage||{};
-            if(usage.checked_at||usage.error){
-                const box=controlNode('div','',more);box.className='usage-readout';
-                const fresh=new Date(usage.checked_at*1000).toLocaleString();
-                const rows=(usage.windows||[]).map(w=>{
-                    const reset=w.resets_text||(w.resets_at?new Date(w.resets_at*1000).toLocaleString():'');
-                    const pct=w.used_percent==null?'—':Math.round(w.used_percent)+'%';
-                    return '<li><span>'+esc(w.label)+'</span><b>'+esc(pct)+' 已用</b>'+(reset?'<small>重置 '+esc(reset)+'</small>':'')+'</li>'}).join('');
-                box.innerHTML='<h5>账号状态</h5>'
-                    +'<p class="description">'+(usage.error?'查询失败：'+esc(usage.error)
-                        :(usage.available===false?'额度已用尽':usage.available===true?'额度可用':'额度未知')
-                         +(usage.note?' · '+esc(usage.note):''))+'</p>'
-                    +(rows?'<ul class="usage-windows">'+rows+'</ul>':'')
-                    +'<p class="description">模型：'+esc(s.model||'客户端默认')+' · 查询于 '+esc(fresh)
-                    +(usage.source?' · '+esc(usage.source):'')+'</p>';
-            }
             const maintenance=controlNode('div','',more);maintenance.className='toolbar';
             if(s.state==='authorizing'){const resume=controlNode('button','继续登录',bar);resume.className='primary';resume.onclick=()=>showLoginWizard(item)}
             const groups=new Map();
             for(const action of s.actions||[]){
+                if(action.id==='refresh_usage')continue;
                 if(action.id==='cancel'&&s.state!=='authorizing')continue;
                 const prominent=action.id==='login'&&s.state!=='authenticated'&&s.state!=='authorizing';
                 // Actions the plugin puts in a group get their own labelled block. A plain toolbar

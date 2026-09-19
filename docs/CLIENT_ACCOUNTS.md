@@ -2,8 +2,9 @@
 
 界面的“模型服务”并列提供 Codex、Claude 客户端账号与 OpenRouter。登录向导内有完整步骤，
 无需先阅读此文档。Codex/Claude 卡片展开“登录选项与客户端维护”即可选择登录方式：自动选择、
-本机网页回调、设备码 / 验证码。已登录时维护按钮默认收起，主要按钮是“配置模型”。OpenRouter 卡片的
-“配置 OpenRouter”直接在模型页展示 Key、受限模型列表和代理；端点固定由插件实现，不提供任意 URL。
+本机网页回调、设备码 / 验证码。账号状态和额度常驻显示在卡片上；登录方式、凭据和升级维护仍默认收起，
+主要按钮是“配置模型”。OpenRouter 卡片同样常驻显示 Key 用量和可选账户余额；“配置 OpenRouter”展示
+推理 Key、可选 Management Key、受限模型列表和代理，端点固定由插件实现，不提供任意 URL。
 默认自动：手机/平板或非回环访问地址选择远程码流程，桌面 localhost/127.0.0.1/::1 选择本地回调。
 这是可覆盖的环境提示，不是服务器同机证明；任何本地回调仍必须通过逐流程映射验证。
 手动选择对各客户端独立生效，当前页面保留选择，重新加载后恢复自动；登录向导里也能切换，
@@ -191,4 +192,6 @@ Bash/Python 或 PowerShell 转发脚本处理。模型服务卡片显示脱敏�
 
 参考：[Codex 认证](https://developers.openai.com/codex/auth/)、
 [Claude 认证](https://code.claude.com/docs/en/authentication)、
-[OpenRouter 模型列表](https://openrouter.ai/docs/api/api-reference/models/list-all-models-and-their-properties)。
+[OpenRouter 模型列表](https://openrouter.ai/docs/api/api-reference/models/list-all-models-and-their-properties)、
+[OpenRouter 当前 Key](https://openrouter.ai/docs/api/api-reference/api-keys/get-current-key)、
+[OpenRouter 账户余额](https://openrouter.ai/docs/api/api-reference/credits/get-credits)。

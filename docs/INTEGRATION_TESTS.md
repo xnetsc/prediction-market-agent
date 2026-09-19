@@ -55,6 +55,7 @@ PYTHONPATH=src .venv/bin/python -m pytest -q tests/test_api_integration.py
 - 推理请求强制 `provider.require_parameters=true`；
 - 本机回环加入 `NO_PROXY`，桥到 OpenRouter 的远端请求仍经过该插件解析后的统一或独立代理；
 - 真实本地 HTTP 代理收到远端目录/推理请求，证明桥接没有屏蔽原有网络代理层；
+- 普通推理 Key 与可选 Management Key 分别查询 `/key` 用量和 `/credits` 账户余额，凭据不回显且查询沿用该插件代理；
 - `openrouter_*` 文件各自拥有独立配置，不把多 Key/模型逻辑放入通用框架。
 
 另使用生产容器中已保存的 OpenRouter Key 做过单次 schema 探针，模型 `z-ai/glm-5.3` 返回严格对象
@@ -64,8 +65,9 @@ PYTHONPATH=src .venv/bin/python -m pytest -q tests/test_api_integration.py
 ## 浏览器验收
 
 `tests/dashboard_ui.cjs` 使用本机 Chrome，在 390、768、1440px 检查六区导航、插件中心六类二级页、
-模型服务、OpenRouter 受限模型选择与独立配置生成、未保存草稿、启用顺序、决策五步、网络折叠和远程登录
-弹窗。模型列表和写请求由浏览器测试局部 fixture 拦截，不向运行部署提交测试 Key、配置、验证码或交易。
+模型服务、三种 Provider 常驻账号/额度信息、OpenRouter 受限模型选择与独立配置生成、未保存草稿、启用顺序、
+决策五步、网络折叠和远程登录弹窗。模型列表、账号读数和写请求由浏览器测试局部 fixture 拦截，不向运行
+部署提交测试 Key、配置、验证码或交易。
 
 ```bash
 npm install --no-save --package-lock=false playwright

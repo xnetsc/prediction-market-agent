@@ -21,6 +21,14 @@ const fs = require('node:fs');
             let remoteModel=null;
             await page.route('**/api/local',async route=>{
                 const message=route.request().postDataJSON();
+                if(message.url==='/api/plugins/controls'){
+                    const checked=Math.floor(Date.now()/1000);
+                    await route.fulfill({json:{items:[
+                        {kind:'decision_provider',name:'codex',status:{control_type:'client',state:'authenticated',message:'已登录',installed_version:'1.0.0',model:'fixture-codex',usage:{checked_at:checked,available:true,source:'fixture',windows:[{label:'当前窗口',used_percent:21}]},actions:[{id:'refresh_usage',label:'刷新账号状态',group:'账号状态'},{id:'login',label:'登录 / 重新登录'}]}},
+                        {kind:'decision_provider',name:'claude',status:{control_type:'client',state:'authenticated',message:'已登录',installed_version:'1.0.0',model:'fixture-claude',usage:{checked_at:checked,available:true,source:'fixture',windows:[{label:'本周',used_percent:8}]},actions:[{id:'refresh_usage',label:'刷新账号状态',group:'账号状态'},{id:'login',label:'登录 / 重新登录'}]}},
+                        {kind:'decision_provider',name:'openrouter',status:{control_type:'openrouter',state:'configured',message:'已配置',model:'fixture/structured-a',usage:{checked_at:checked,available:true,source:'fixture',account:{total_credits:100.5,total_usage:25.75,balance:74.75},key:{usage:25.5,usage_daily:1.5,usage_weekly:7.5,usage_monthly:20.5,limit:100,limit_remaining:74.5,limit_reset:'monthly'}},actions:[{id:'refresh_usage',label:'刷新余额与用量',group:'账号与额度'}]}}
+                    ]}});return;
+                }
                 if(message.url==='/api/plugins/config/choices'&&message.body.name==='openrouter'){
                     await route.fulfill({json:{items:publicCatalog}});return;
                 }
@@ -121,7 +129,15 @@ const fs = require('node:fs');
             assert.equal(await page.locator('#category_api .plugin-config').first().getAttribute('open'),'');
             await page.evaluate(()=>{location.hash='models'});
             await page.waitForSelector('#control_decision_provider_openrouter');
+            await page.waitForSelector('#control_decision_provider_openrouter .usage-readout');
             assert.equal(await page.locator('.client-options[open]').count(),0);
+            assert.equal(await page.locator('#control_decision_provider_openrouter .client-options').count(),0);
+            assert((await page.locator('#control_decision_provider_openrouter .usage-readout').innerText()).includes('$74.75'));
+            assert((await page.locator('#control_decision_provider_openrouter .usage-readout').innerText()).includes('刷新余额与用量'));
+            assert((await page.locator('#control_decision_provider_codex .usage-readout').innerText()).includes('21% 已用'));
+            assert((await page.locator('#control_decision_provider_claude .usage-readout').innerText()).includes('8% 已用'));
+            assert(await page.locator('#control_decision_provider_codex .usage-readout').isVisible());
+            assert(await page.locator('#control_decision_provider_claude .usage-readout').isVisible());
             const modelEnable=page.locator('#control_decision_provider_openrouter .model-enable');
             assert(await modelEnable.isVisible());
             await modelEnable.setChecked(!(await modelEnable.isChecked()));

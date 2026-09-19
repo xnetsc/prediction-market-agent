@@ -12,6 +12,7 @@ from prediction_market_agent.plugin_system.discovery import PluginInitialization
 from prediction_market_agent.plugins.providers.openrouter import (
     _BridgeServer,
     _opener,
+    OpenRouterAccountControl,
     initialize_openrouter_plugin,
     initialize_plugin,
     model_choices,
@@ -23,14 +24,13 @@ class ModelCatalogTests(unittest.TestCase):
         self.temporary = tempfile.TemporaryDirectory()
         self.addCleanup(self.temporary.cleanup)
         self.root = Path(self.temporary.name)
-        self.spec = initialize_plugin(
-            PluginInitializationContext(
-                "decision_provider",
-                self.root / "openrouter.py",
-                self.root,
-                shared_http_proxy="DIRECT",
-            )
+        self.context = PluginInitializationContext(
+            "decision_provider",
+            self.root / "openrouter.py",
+            self.root,
+            shared_http_proxy="DIRECT",
         )
+        self.spec = initialize_plugin(self.context)
         self.seen: list[tuple[str, str | None, dict | None]] = []
         seen = self.seen
 
@@ -63,8 +63,24 @@ class ModelCatalogTests(unittest.TestCase):
                     self.send_header("Location", "/stolen")
                     self.end_headers()
                     return
-                payload = json.dumps(
-                    {
+                if self.path == "/key":
+                    body = {
+                        "data": {
+                            "usage": 25.5,
+                            "usage_daily": 1.5,
+                            "usage_weekly": 7.5,
+                            "usage_monthly": 20.5,
+                            "limit": 100,
+                            "limit_remaining": 74.5,
+                            "limit_reset": "monthly",
+                            "is_free_tier": False,
+                            "expires_at": "2027-12-31T23:59:59Z",
+                        }
+                    }
+                elif self.path == "/credits":
+                    body = {"data": {"total_credits": 100.5, "total_usage": 25.75}}
+                else:
+                    body = {
                         "data": [
                             {
                                 "id": "vendor/model-a",
@@ -78,7 +94,7 @@ class ModelCatalogTests(unittest.TestCase):
                             },
                         ]
                     }
-                ).encode()
+                payload = json.dumps(body).encode()
                 self.send_response(200)
                 self.send_header("Content-Type", "application/json")
                 self.send_header("Content-Length", str(len(payload)))
@@ -97,6 +113,7 @@ class ModelCatalogTests(unittest.TestCase):
     def test_openrouter_default_has_no_key_or_model_and_is_not_ready(self):
         values = self.spec.configuration.load()
         self.assertFalse(values.get("OPENROUTER_API_KEY"))
+        self.assertFalse(values.get("OPENROUTER_MANAGEMENT_API_KEY"))
         self.assertFalse(values["OPENROUTER_MODEL"])
         self.assertEqual(values["OPENROUTER_HTTP_PROXY"], "INHERIT")
         self.assertEqual(values["OPENROUTER_MAX_OUTPUT_TOKENS"], 8192)
@@ -108,6 +125,52 @@ class ModelCatalogTests(unittest.TestCase):
         )
         self.assertTrue(field["dynamic_choices"])
         self.assertTrue(field["selection_only"])
+
+    def test_openrouter_controls_report_key_usage_and_optional_account_balance(self):
+        self.spec.configuration.save(
+            {
+                "OPENROUTER_API_KEY": "fixture-inference-key",
+                "OPENROUTER_MANAGEMENT_API_KEY": "fixture-management-key",
+                "OPENROUTER_MODEL": "vendor/model-a",
+            }
+        )
+        control = OpenRouterAccountControl(
+            self.spec.configuration,
+            self.context,
+            key_url=f"http://127.0.0.1:{self.server.server_port}/key",
+            credits_url=f"http://127.0.0.1:{self.server.server_port}/credits",
+        )
+        initial = control.snapshot()
+        self.assertEqual(initial["control_type"], "openrouter")
+        self.assertEqual(initial["state"], "configured")
+        self.assertNotIn("fixture-inference-key", json.dumps(initial))
+        result = control.action("refresh_usage", {})
+        self.assertEqual(result["usage"]["key"]["limit_remaining"], 74.5)
+        self.assertEqual(result["usage"]["account"]["balance"], 74.75)
+        self.assertEqual(
+            [(path, authorization) for path, authorization, _ in self.seen],
+            [
+                ("/key", "Bearer fixture-inference-key"),
+                ("/credits", "Bearer fixture-management-key"),
+            ],
+        )
+
+    def test_openrouter_account_balance_is_skipped_without_management_key(self):
+        self.spec.configuration.save(
+            {
+                "OPENROUTER_API_KEY": "fixture-inference-key",
+                "OPENROUTER_MODEL": "vendor/model-a",
+            }
+        )
+        control = OpenRouterAccountControl(
+            self.spec.configuration,
+            self.context,
+            key_url=f"http://127.0.0.1:{self.server.server_port}/key",
+            credits_url=f"http://127.0.0.1:{self.server.server_port}/credits",
+        )
+        result = control.action("refresh_usage", {})
+        self.assertIn("Management Key", result["usage"]["account_note"])
+        self.assertEqual([entry[0] for entry in self.seen], ["/key"])
 
     def test_models_require_explicit_structured_output_support(self):
         values = {

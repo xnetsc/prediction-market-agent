@@ -49,13 +49,16 @@ dialog{background:var(--surface)!important;color:var(--ink)!important;border:1px
 .action-item .field input[type=file]{font-size:12px;padding:6px 8px}
 .action-item>small{order:9;flex:1 1 100%;color:var(--muted);font-size:12px;line-height:1.6}
 @media(max-width:650px){.action-group .action-item>*{flex:1 1 100%}}
-.usage-readout{border:1px solid var(--line);border-radius:9px;padding:14px;margin-top:14px;background:#fbfdfc}
+.usage-readout{border:1px solid var(--line);border-radius:9px;padding:14px;margin:4px 0 14px;background:#fbfdfc}
 .usage-readout h5{font-size:13px;font-weight:600;margin:0 0 6px}
 .usage-readout .description{margin:0 0 8px}
 .usage-windows{list-style:none;margin:0 0 8px;padding:0;display:grid;gap:6px}
 .usage-windows li{display:flex;flex-wrap:wrap;gap:8px;align-items:baseline;font-size:12px}
 .usage-windows b{font-weight:600}
 .usage-windows small{color:var(--muted)}
+.money-usage li{justify-content:space-between;border-bottom:1px dashed var(--line);padding-bottom:4px}
+.usage-stamp{padding-top:4px;border-top:1px solid var(--line)}
+.account-actions{align-items:center;margin-top:10px}.account-actions button{font-size:12px;padding:7px 10px;min-height:36px}.account-actions small{flex:1 1 180px;color:var(--muted)}
 
 /* A value a plugin handed back for the operator to keep. It has to survive being looked at:
    selectable, wrapping rather than truncating, and not styled like a transient status line. */

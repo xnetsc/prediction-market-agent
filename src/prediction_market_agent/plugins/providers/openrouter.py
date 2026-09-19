@@ -5,6 +5,7 @@ import secrets
 import subprocess
 import tempfile
 import threading
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -22,6 +23,7 @@ from prediction_market_agent.plugin_system.config_io import (
 from prediction_market_agent.plugin_system.discovery import (
     PluginConfigField,
     PluginConfiguration,
+    PluginControls,
     PluginInitializationContext,
     PluginReadiness,
     PluginSpec,
@@ -37,6 +39,8 @@ OPENROUTER_API_BASE = "https://openrouter.ai/api/v1"
 OPENROUTER_MODELS_URL = (
     OPENROUTER_API_BASE + "/models?supported_parameters=structured_outputs"
 )
+OPENROUTER_KEY_URL = OPENROUTER_API_BASE + "/key"
+OPENROUTER_CREDITS_URL = OPENROUTER_API_BASE + "/credits"
 STRUCTURED_OUTPUT_PARAMETER = "structured_outputs"
 
 
@@ -100,6 +104,179 @@ def model_choices(
         ) from None
     except (OSError, ValueError, KeyError, TypeError):
         raise ValueError("获取 OpenRouter 结构化输出模型列表失败，请检查网络、Key 和代理") from None
+
+
+def _account_json(
+    url: str,
+    key: str,
+    proxy_settings: dict[str, str],
+) -> dict[str, Any]:
+    """Read one fixed OpenRouter account endpoint without exposing its credential."""
+    parsed = urllib.parse.urlsplit(url)
+    if parsed.scheme != "https" and not (
+        parsed.scheme == "http"
+        and parsed.hostname in {"localhost", "127.0.0.1", "::1"}
+    ):
+        raise ValueError("OpenRouter 账号接口须使用 HTTPS")
+    request = urllib.request.Request(
+        url,
+        headers={
+            "Authorization": "Bearer " + key,
+            "User-Agent": "prediction-market-agent/1",
+        },
+    )
+    try:
+        with _opener(proxy_settings.get("proxy", "")).open(request, timeout=15) as response:
+            payload = json.loads(response.read(1024 * 1024))
+        data = payload["data"]
+        if not isinstance(data, dict):
+            raise ValueError("Invalid account response")
+        return data
+    except urllib.error.HTTPError as error:
+        raise ValueError(f"OpenRouter 账号查询失败：HTTP {error.code}，请检查对应 Key 和代理") from None
+    except (OSError, ValueError, KeyError, TypeError):
+        raise ValueError("OpenRouter 账号查询失败，请检查对应 Key 和代理") from None
+
+
+class OpenRouterAccountControl:
+    """OpenRouter-owned balance reader; it is not a framework-wide API facility."""
+
+    def __init__(
+        self,
+        configuration: PluginConfiguration,
+        context: PluginInitializationContext,
+        *,
+        key_url: str = OPENROUTER_KEY_URL,
+        credits_url: str = OPENROUTER_CREDITS_URL,
+    ):
+        self.configuration = configuration
+        self.context = context
+        self.key_url = key_url
+        self.credits_url = credits_url
+        self.lock = threading.RLock()
+        self.usage: dict[str, Any] = {}
+        self.controls = PluginControls(self.snapshot, self.action)
+
+    def proxy_settings(self) -> dict[str, str]:
+        values = self.configuration.load()
+        return self.context.proxy_settings(
+            values["OPENROUTER_HTTP_PROXY"], field_name="OPENROUTER_HTTP_PROXY"
+        )
+
+    def snapshot(self) -> dict[str, Any]:
+        values = self.configuration.load()
+        api_key = str(values.get("OPENROUTER_API_KEY", "")).strip()
+        model = str(values.get("OPENROUTER_MODEL", "")).strip()
+        configured = bool(api_key and model)
+        try:
+            proxy = self.proxy_settings()
+            proxy_message = proxy["display"] + " — " + proxy["source"]
+        except ValueError as error:
+            proxy_message = str(error)
+        with self.lock:
+            usage = json.loads(json.dumps(self.usage))
+        return {
+            "control_type": "openrouter",
+            "state": "configured" if configured else "incomplete",
+            "message": (
+                "推理 Key 与结构化输出模型均已配置"
+                if configured
+                else "请填写推理 API Key 并选择结构化输出模型"
+            ),
+            "model": model,
+            "proxy_message": proxy_message,
+            "usage": usage,
+            "actions": [
+                {
+                    "id": "refresh_usage",
+                    "label": "刷新余额与用量",
+                    "group": "账号与额度",
+                    "group_note": (
+                        "普通推理 Key 查询本 Key 用量；可选 Management Key 只查询账户充值余额。"
+                        "查询不发起模型调用。"
+                    ),
+                    "disabled": not bool(api_key),
+                }
+            ],
+        }
+
+    def action(self, action: str, values: dict[str, Any]) -> dict[str, Any]:
+        del values
+        if action != "refresh_usage":
+            raise ValueError("Unknown OpenRouter control action")
+        checked_at = int(time.time())
+        configured = self.configuration.load()
+        api_key = str(configured.get("OPENROUTER_API_KEY", "")).strip()
+        management_key = str(
+            configured.get("OPENROUTER_MANAGEMENT_API_KEY", "")
+        ).strip()
+        if not api_key:
+            reading = {
+                "checked_at": checked_at,
+                "error": "尚未配置 OpenRouter 推理 API Key",
+                "source": "OpenRouter API",
+            }
+        else:
+            reading = self._read(api_key, management_key, checked_at)
+        with self.lock:
+            self.usage = reading
+        return self.snapshot()
+
+    def _read(
+        self, api_key: str, management_key: str, checked_at: int
+    ) -> dict[str, Any]:
+        try:
+            key = _account_json(self.key_url, api_key, self.proxy_settings())
+        except ValueError as error:
+            return {
+                "checked_at": checked_at,
+                "error": str(error),
+                "source": "OpenRouter · /api/v1/key",
+            }
+        reading: dict[str, Any] = {
+            "checked_at": checked_at,
+            "error": "",
+            "source": "OpenRouter · /api/v1/key",
+            "key": {
+                field: key.get(field)
+                for field in (
+                    "usage",
+                    "usage_daily",
+                    "usage_weekly",
+                    "usage_monthly",
+                    "limit",
+                    "limit_remaining",
+                    "limit_reset",
+                    "is_free_tier",
+                    "expires_at",
+                )
+            },
+        }
+        remaining = key.get("limit_remaining")
+        reading["available"] = not isinstance(remaining, (int, float)) or remaining > 0
+        if management_key:
+            try:
+                credits = _account_json(
+                    self.credits_url, management_key, self.proxy_settings()
+                )
+                total = credits.get("total_credits")
+                used = credits.get("total_usage")
+                reading["account"] = {
+                    "total_credits": total,
+                    "total_usage": used,
+                    "balance": total - used
+                    if isinstance(total, (int, float))
+                    and not isinstance(total, bool)
+                    and isinstance(used, (int, float))
+                    and not isinstance(used, bool)
+                    else None,
+                }
+                reading["source"] += " · /api/v1/credits"
+            except ValueError as error:
+                reading["account_error"] = str(error)
+        else:
+            reading["account_note"] = "未配置 Management Key，未查询账户充值余额"
+        return reading
 
 
 def _codex_messages(body: dict[str, Any]) -> list[dict[str, str]]:
@@ -452,7 +629,13 @@ def initialize_openrouter_plugin(context: PluginInitializationContext) -> Plugin
                 "OPENROUTER_API_KEY",
                 "OpenRouter API Key",
                 "secret",
-                "仅发送给 OpenRouter；保存值不会在界面回显。",
+                "用于模型目录、推理和查询当前 Key 用量；仅发送给 OpenRouter，保存值不会在界面回显。",
+            ),
+            PluginConfigField(
+                "OPENROUTER_MANAGEMENT_API_KEY",
+                "OpenRouter Management Key（可选）",
+                "secret",
+                "只用于官方 credits 接口查询账户充值总额、累计消费和余额；绝不用于模型推理。",
             ),
             PluginConfigField(
                 "OPENROUTER_MODEL",
@@ -530,6 +713,8 @@ def initialize_openrouter_plugin(context: PluginInitializationContext) -> Plugin
         except (ValueError, KeyError, DecisionProviderError) as error:
             return PluginReadiness(False, (str(error),))
 
+    account_control = OpenRouterAccountControl(configuration, context)
+
     return PluginSpec(
         "decision_provider",
         name,
@@ -539,6 +724,7 @@ def initialize_openrouter_plugin(context: PluginInitializationContext) -> Plugin
         configuration,
         lambda: None,
         readiness_callback=readiness,
+        controls=account_control.controls,
         network_routes_callback=lambda: configured_proxy_route(
             load,
             "OPENROUTER_HTTP_PROXY",

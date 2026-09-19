@@ -80,6 +80,8 @@ Codex、Claude 与 OpenRouter 的配置顶部统一显示“模型、凭据与�
    不能手填未声明支持的 ID。实际推理仍会强制具体供应端点接受 schema 参数。
 3. 修改 Key 或代理后保存，再刷新列表。目录声明不代表账号一定有权限或额度，因此实际调用错误仍会显示并
    进入 Provider 故障转移。
+   模型服务卡片可点击“刷新余额与用量”：推理 Key 会返回本 Key 的消费与剩余额度；若还配置了可选的
+   Management Key，会同时显示账户累计充值、累计消费和余额。查询沿用这一份插件的代理。
 4. 用“启用”和“顺序”控制是否参与决策及回退优先级，点击“保存模型启用与顺序”。需要第二份 Key、模型
    或代理时，在同页填写 `openrouter_*` 名称并生成另一个插件文件；每个文件是一份独立 Provider 配置。
 
@@ -90,9 +92,10 @@ Codex、Claude 与 OpenRouter 的配置顶部统一显示“模型、凭据与�
 
 ### API Key
 
-每份 OpenRouter 插件只配置一个 API Key，并通过 `Authorization: Bearer <API Key>` 用于模型目录和推理
-请求。它本身就是秘密凭据，已保存值不回显。插件私有桥固定连接 OpenRouter，不接受自定义端点或第二种
-认证字段；其他服务应由自己的 Provider 插件实现。
+每份 OpenRouter 插件必须配置一个推理 API Key，并通过 `Authorization: Bearer <API Key>` 用于模型目录、
+推理请求和官方 `/key` 用量查询。可另填一个 Management Key，仅用于官方 `/credits` 账户余额查询；
+OpenRouter 官方不允许用 Management Key 推理，程序也不会混用。两者都是秘密凭据，已保存值不回显。
+插件私有桥和账号查询固定连接 OpenRouter，不接受自定义端点；其他服务应由自己的 Provider 插件实现。
 
 “程序设置”顶部单列统一网络代理。Codex、Claude、OpenRouter、Binance、Polymarket 和研究插件默认
 `INHERIT`；每个插件自己的配置可覆盖为直连或独立代理。OpenRouter 桥接只对本机回环段使用 `NO_PROXY`，
@@ -152,7 +155,8 @@ Codex/Claude 各自默认自动选择验证方式：手机/平板或非回环地
 “程序设置”顶部新增运行环境详情与手动公网出口查询，能按服务器直连、环境代理或插件配置路径查看结果。
 服务、超时可在程序配置中编辑，公网查询不会自动轮询。详情、白名单限制及例子见 [环境诊断](ENVIRONMENT.md)。
 
-`tests/dashboard_ui.cjs` 使用 Playwright 驱动本机 Chrome，在 390、768、1440px 检查六区导航、表单展开、
+`tests/dashboard_ui.cjs` 使用 Playwright 驱动本机 Chrome，在 390、768、1440px 检查六区导航、三种 Provider
+常驻账号/额度信息、表单展开、
 分类二级页、表单展开、跨页未保存值、OpenRouter Key/受限模型字段、独立配置生成、启用顺序、决策五步
 说明、网络折叠、远程登录弹窗和 JavaScript 错误。保存/模型列表部分由浏览器本地拦截返回测试响应，
 验证真实表单处理函数的载荷，但不把测试凭据或修改发送到运行部署。其他操作只读取管理服务，不执行
