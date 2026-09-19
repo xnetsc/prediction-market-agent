@@ -1,17 +1,17 @@
 /* Presentation only: configuration and actions still use plugin-owned callbacks. */
 const CATEGORY_HELP = {
     api: {title:'交易平台', role:'连接市场与账户', description:'读取市场、持仓和订单，并接收机器人发出的操作。平台自己决定什么时候扫描，发现机会后通知机器人。', steps:['扫描市场','提交发现','接收查询或订单'], next:'启用你要使用的平台，填写它要求的账户、网络与扫描配置。不使用的平台保持关闭。'},
-    decision_provider: {title:'AI 模型服务', role:'让模型理解信息并做判断', description:'提供实际执行推理的模型。客户端账号和兼容 API 是并列方式，与“采用什么交易策略”不是一回事。', steps:['接收策略与证据','调用所选模型','返回判断或工具请求'], next:'至少配置一种可用服务。顺序数字越小越先尝试，不可用时再尝试下一个；不会同时向所有服务发请求。'},
+    decision_provider: {title:'AI 模型服务', role:'让模型理解信息并做判断', description:'提供实际执行推理的模型。客户端账号和 OpenRouter 配置是并列方式，与“采用什么交易策略”不是一回事。', steps:['接收策略与证据','调用所选模型','返回判断或工具请求'], next:'至少配置一种可用服务。顺序数字越小越先尝试，不可用时再尝试下一个；不会同时向所有服务发请求。'},
     decision_strategy: {title:'决策策略', role:'可选地告诉模型如何分析', description:'定义模型需要关注的证据、判断过程和输出要求。它是可选分析方法，不是模型账号，也不是机器人启动条件。', steps:['选择插件或使用内置策略','读取策略文本与实测叠加层','形成交易建议'], next:'可安装并选择一项策略插件；不选时由内置决策策略工作，它的当前全文可在下方导出。'},
     market_discovery: {title:'标的发现策略', role:'决定每轮先看哪些标的', description:'机器人每轮只能深入分析少数标的。发现策略决定把这几个名额给谁：宽扫平台、按实测结果排序、再由模型挑最终名单。未安装插件时使用内置策略。', steps:['宽扫平台全部标的','按实测优先级排序','模型挑出本轮名单'], next:'不装插件也在工作。要用自己的发现逻辑再安装插件；内置策略的当前全文可在下方导出查看。'},
     research_tool: {title:'信息与研究', role:'帮助模型补充证据', description:'在已有市场数据不够时，让模型主动查询外部资料。是否调用、查询什么，由当次决策过程决定。', steps:['模型提出问题','工具收集信息','结果回到决策'], next:'启用需要的信息工具，并补齐其访问配置。工具可用不代表每次都会被调用。'},
     agent_policy: {title:'Agent 行为风控', role:'管住模型发起的每一次工具调用', description:'模型每次调用工具都要经过这里。工具里既有市场 API（下单、买卖），也有网页搜索、执行命令等其它工具。它问的是“这个 Agent 被允许发起这类调用吗”，不问这笔动作的业务后果。', steps:['模型提出调用','逐个询问已启用的插件','任意一个拒绝即整体失败'], next:'出厂不启用。可以同时启用多个，它们按启用顺序串成一条链：全部通过才放行；任意一个拒绝、或者它自己抛异常，这次调用就失败。'},
     risk: {title:'业务风控', role:'管住一切市场 API 动作', description:'审核每一次市场 API 调用——下单、撤单、赎回、转账这些写动作，以及查行情、查订单簿这些只读调用，与是谁发起的无关：模型提的、结算扫单产生的、手动触发的都一样。同一笔下单会先后经过 Agent 行为风控和业务风控两道检查，这是有意的重复。', steps:['接收市场 API 动作','逐个询问已启用的插件','任意一个拒绝即整体失败'], next:'出厂不启用任何业务风控，而且框架里根本没有内置的仓位上限或止损——要限额，要么在这里启用你自己的规则插件，要么把标准写进决策策略文本让模型读账执行。可以同时启用多个，它们按启用顺序串成一条链：全部通过才放行；任意一个拒绝、或者它自己抛异常，这次动作就失败。不要把“已启用”理解成已经配置了止损或保证不会亏损。'},
 };
-const SERVICE_TITLES = {codex:'Codex',claude:'Claude',openai_compatible:'兼容 API · OpenRouter / 自定义'};
+const SERVICE_TITLES = {codex:'Codex',claude:'Claude',openrouter:'OpenRouter'};
 const PLUGIN_CENTER_KINDS = ['api','market_discovery','decision_strategy','research_tool','agent_policy','risk'];
 const STRATEGY_LANES = {market_discovery:'discovery', decision_strategy:'decision'};
-const serviceTitle = name => SERVICE_TITLES[name] || name || '没有服务名';
+const serviceTitle = name => SERVICE_TITLES[name] || (name?.startsWith('openrouter_')?'OpenRouter · '+name:name) || '没有服务名';
 function downloadCredentialBundle(name,status){
     const bundle=status?.credential_export;
     if(!bundle)throw Error('服务端没有返回凭据内容');
@@ -70,7 +70,7 @@ function processStrip(steps){return '<ol class="process-strip">'+steps.map(s=>'<
 function configLink(kind,name){return kind==='decision_provider'?'#model-config/'+encodeURIComponent(name):'#plugin_'+kind+'_'+name}
 function configurationFieldsHtml(kind,name,fields){
     if(kind!=='decision_provider')return '<div class="config-fields">'+fields.map(f=>fieldHtml(kind,name,f)).join('')+'</div>';
-    const primary=fields.filter(f=>/(?:_MODEL|_EFFORT|_HTTP_PROXY|_TIMEOUT_SECONDS|_API_BASE|_API_KEY|_EXTRA_HEADERS_JSON)$/.test(f.name));
+    const primary=fields.filter(f=>/(?:_MODEL|_EFFORT|_HTTP_PROXY|_TIMEOUT_SECONDS|_MAX_OUTPUT_TOKENS|_API_KEY)$/.test(f.name));
     const advanced=fields.filter(f=>!primary.includes(f));
     const primaryHtml='<div class="config-field-section"><div class="config-section-heading"><h5>模型、凭据与网络连接</h5><p>代理设置就在本区：INHERIT 跟随统一代理，DIRECT 直连，也可以填写该服务专用的完整 HTTP(S) 地址。</p></div><div class="config-fields">'+primary.map(f=>fieldHtml(kind,name,f)).join('')+'</div></div>';
     return primaryHtml+(advanced.length?'<details class="client-advanced-settings"><summary>客户端文件、登录与升级高级设置 · '+advanced.length+' 项</summary><div class="config-fields">'+advanced.map(f=>fieldHtml(kind,name,f)).join('')+'</div></details>':'');
@@ -122,7 +122,7 @@ function renderManager(m) {
     // The provider form has only one DOM instance, even when reached from two pages.
     document.getElementById('modelConfigurations').replaceChildren();
     const manager=document.getElementById('pluginManager');manager.replaceChildren();
-    document.getElementById('pluginCategoryHome').innerHTML='<h3>给机器人选择扩展能力</h3><p class="muted">交易平台、策略、研究，以及 Agent 行为风控和业务风控这两类过滤插件，都在这里管理。AI 账号、兼容 API、模型与调用顺序统一放在左侧“模型服务”，不在插件中心重复出现。</p>'+processStrip(['平台发现市场','策略 + 模型分析','工具补充证据','行为与风控检查','平台执行'])+'<div class="category-grid">'+PLUGIN_CENTER_KINDS.map(kind=>{const h=CATEGORY_HELP[kind],all=m.plugins[kind]||[],on=all.filter(p=>p.enabled).length;return '<a class="category-tile" href="#plugins/'+kind+'"><span class="eyebrow">'+esc(on+' / '+all.length+' 已启用')+'</span><h4>'+h.title+' <span aria-hidden="true">→</span></h4><p>'+h.role+'</p></a>'}).join('')+'</div>';
+    document.getElementById('pluginCategoryHome').innerHTML='<h3>给机器人选择扩展能力</h3><p class="muted">交易平台、策略、研究，以及 Agent 行为风控和业务风控这两类过滤插件，都在这里管理。AI 账号、OpenRouter、模型与调用顺序统一放在左侧“模型服务”，不在插件中心重复出现。</p>'+processStrip(['平台发现市场','策略 + 模型分析','工具补充证据','行为与风控检查','平台执行'])+'<div class="category-grid">'+PLUGIN_CENTER_KINDS.map(kind=>{const h=CATEGORY_HELP[kind],all=m.plugins[kind]||[],on=all.filter(p=>p.enabled).length;return '<a class="category-tile" href="#plugins/'+kind+'"><span class="eyebrow">'+esc(on+' / '+all.length+' 已启用')+'</span><h4>'+h.title+' <span aria-hidden="true">→</span></h4><p>'+h.role+'</p></a>'}).join('')+'</div>';
     document.getElementById('pluginCategoryNav').innerHTML='<a href="#plugins">全部分类</a>'+PLUGIN_CENTER_KINDS.map(k=>'<a href="#plugins/'+k+'">'+LABELS[k]+'</a>').join('');
     refreshAttention(m);
     for(const kind of KINDS){
@@ -157,6 +157,7 @@ function renderManager(m) {
     }
     document.getElementById('installKind').innerHTML=PLUGIN_CENTER_KINDS.map(k=>'<option value="'+k+'">'+LABELS[k]+'</option>').join('');
     document.getElementById('modelInstallTarget').innerHTML=(m.plugin_directories.categories.decision_provider||[]).map(d=>'<option value="'+esc(d)+'">'+esc(d)+'</option>').join('');
+    document.getElementById('openRouterPluginTarget').innerHTML=(m.plugin_directories.categories.decision_provider||[]).map(d=>'<option value="'+esc(d)+'">'+esc(d)+'</option>').join('');
     manager.onchange=event=>{const input=event.target;if(input.matches('.enable,.priority,input[name="strategy"]'))markPluginSelectionDirty(input)};
     renderInstallTargets();renderConfigurationPresets(m);
     window.showDashboardView?.();renderServiceConnections();
@@ -208,9 +209,9 @@ function renderServiceConnections(){
         const enabledLabel=controlNode('label','',selection),enabled=controlNode('input','',enabledLabel);enabled.type='checkbox';enabled.className='model-enable';enabled.dataset.name=name;enabled.checked=plugin?.enabled!==false;enabledLabel.append(' 启用此服务');
         const priorityLabel=controlNode('label','顺序 ',selection),priority=controlNode('input','',priorityLabel);priority.type='number';priority.min='1';priority.className='model-priority';priority.dataset.name=name;priority.value=plugin?.priority??99;priority.setAttribute('aria-label',name+' 模型服务顺序');
         const selectionStatus=controlNode('p','',card);selectionStatus.id='modelSelectionStatus_'+name;selectionStatus.className='status selection-status';selectionStatus.setAttribute('role','status');
-        controlNode('p',s?'使用客户端账号提供模型；登录和模型配置分别管理。':plugin?.enabled===false?'启用后才能加载配置。保存启用状态会重新检查运行条件。':'填写服务地址、API Key 和模型。支持 OpenRouter 预置，也可以连接自己的兼容服务。',card).className='muted';
+        controlNode('p',s?'使用客户端账号提供模型；登录和模型配置分别管理。':plugin?.enabled===false?'启用后才能加载配置。保存启用状态会重新检查运行条件。':'填写 OpenRouter API Key 并选择支持结构化输出的模型。',card).className='muted';
         const bar=controlNode('div','',card);bar.className='toolbar service-actions';
-        if(plugin?.enabled!==false){const config=controlNode('a',s?'配置模型':'配置 API 服务',bar);config.className='button-link '+(!s?'primary':'');config.href=configLink('decision_provider',name)}
+        if(plugin?.enabled!==false){const config=controlNode('a',s?'配置模型':'配置 OpenRouter',bar);config.className='button-link '+(!s?'primary':'');config.href=configLink('decision_provider',name)}
         let more;
         if(s){
             more=controlNode('details','',card);more.className='client-options';more.dataset.client=name;more.open=expanded.has(name);controlNode('summary','登录选项与客户端维护',more);
@@ -269,6 +270,8 @@ function renderServiceConnections(){
 async function refreshClientControls(){try{const response=await get('/api/plugins/controls');CLIENT_STATUS=response.items;document.getElementById('clientAlerts').textContent=response.items.filter(x=>x.status.state==='login_required').map(x=>serviceTitle(x.name)+' 需要重新登录').join('；');for(const item of response.items)if(ACTIVE_LOGIN?.kind===item.kind&&ACTIVE_LOGIN?.name===item.name)updateLoginWizard(item.status);renderServiceConnections()}catch(e){document.getElementById('clientControlError').textContent=e.message}}
 
 async function installModelPlugin(){let s=document.getElementById('modelInstallStatus');try{let result=await post('/api/plugins/install',{kind:'decision_provider',target_directory:document.getElementById('modelInstallTarget').value,name:document.getElementById('modelInstallName').value,source:document.getElementById('modelInstallSource').value});renderManager(result.management);s.className='status good';s.textContent='已安装：'+result.installed+'；请在上方启用并保存'}catch(e){s.className='status danger';s.textContent=e.message}}
+
+async function createOpenRouterPlugin(){let s=document.getElementById('openRouterPluginStatus');setOperationStatus(s,'正在创建插件文件…','pending');try{let result=await post('/api/plugins/openrouter/create',{target_directory:document.getElementById('openRouterPluginTarget').value,name:document.getElementById('openRouterPluginName').value});renderManager(result.management);setOperationStatus(document.getElementById('openRouterPluginStatus'),'已创建：'+result.installed+'；请在上方启用、排序并保存')}catch(e){setOperationStatus(s,e.message,'danger')}}
 
 /* An open tab keeps running the script it loaded. After an update it goes on drawing with it - a label
    since fixed, a card since redesigned - with nothing on screen to say the page itself is out of date.

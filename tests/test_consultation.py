@@ -727,12 +727,12 @@ class DecisionCapacityTests(unittest.TestCase):
 
     def test_why_each_one_cannot_answer_travels_with_the_fact(self) -> None:
         """A platform that stood down should be able to say what it is waiting for."""
-        watch, health = self._watch(unavailable={"openai_compatible": "请填写 API Key"})
+        watch, health = self._watch(unavailable={"openrouter": "请填写 API Key"})
         health.record_failure("codex", "usage limit")
         health.record_failure("claude", "not logged in")
         reading = watch.check()
         self.assertEqual(reading["waiting"]["codex"], "rate_limit")
-        self.assertIn("openai_compatible", reading["waiting"])
+        self.assertIn("openrouter", reading["waiting"])
 
     def test_a_platform_that_breaks_on_the_news_does_not_stop_the_others(self) -> None:
         from prediction_market_agent.agent.provider_health import ProviderHealthRegistry

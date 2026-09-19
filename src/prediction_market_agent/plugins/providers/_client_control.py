@@ -51,11 +51,11 @@ USAGE_TIMEOUT_SECONDS = 45
 
 def client_configuration_loader(load, prefix: str):
     """Read pre-script configurations without altering credentials or private files."""
-    def compatible_load():
+    def load_without_retired_helper_directory():
         values = dict(load())
         values.pop(f"{prefix}_HELPER_DIRECTORY", None)
         return values
-    return compatible_load
+    return load_without_retired_helper_directory
 
 
 def client_fields(prefix: str) -> tuple[PluginConfigField, ...]:

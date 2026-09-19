@@ -237,7 +237,7 @@ class PluginSystemTests(unittest.TestCase):
             payload = {
                 "enabled": {
                     "api": ["binance", "polymarket"],
-                    "decision_provider": ["codex", "claude", "openai_compatible"],
+                    "decision_provider": ["codex", "claude", "openrouter"],
                     "decision_strategy": ["general_agent"],
                     "research_tool": ["standard_research"],
                     "risk": ["custom_rules"],
@@ -351,6 +351,51 @@ class PluginSystemTests(unittest.TestCase):
                 if item["name"] == "new_policy"
             )
             self.assertFalse(installed["initialized"])
+            service.shutdown()
+
+    def test_ui_generates_one_file_per_openrouter_configuration(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            provider_dir = root / "plugins" / "decision_provider"
+            directory_path = root / "plugin-directories.json"
+            directory_path.write_text(
+                json.dumps({"categories": {
+                    "api": [], "decision_provider": [str(provider_dir)],
+                    "decision_strategy": [], "research_tool": [], "risk": [],
+                    "agent_policy": [],
+                }}),
+                encoding="utf-8",
+            )
+            config = Config(
+                working_directory=root,
+                plugin_directories_file=directory_path,
+                management_file=root / "management.json",
+                market_api_plugins=(), decision_providers=(),
+                research_tool_plugins=(), risk_plugins=(),
+                decision_strategy_name="",
+            )
+            service = PluginManagementService(config)
+            result = service.create_openrouter_plugin(
+                "openrouter_second", str(provider_dir)
+            )
+            installed = Path(result["installed"])
+            self.assertEqual(installed.name, "openrouter_second.py")
+            self.assertEqual(
+                installed.read_text(encoding="utf-8"),
+                "from prediction_market_agent.plugins.providers.openrouter "
+                "import initialize_openrouter_plugin\n\n"
+                "def initialize_plugin(context):\n"
+                "    return initialize_openrouter_plugin(context)\n",
+            )
+            entry = next(
+                item
+                for item in result["management"]["plugins"]["decision_provider"]
+                if item["name"] == "openrouter_second"
+            )
+            self.assertFalse(entry["enabled"])
+            self.assertFalse((root / "config" / "plugins" / "openrouter_second.json").exists())
+            with self.assertRaisesRegex(ValueError, "openrouter_"):
+                service.create_openrouter_plugin("second", str(provider_dir))
             service.shutdown()
 
     def test_polymarket_official_client_surface_all_write_workflows(self) -> None:

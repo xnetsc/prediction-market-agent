@@ -300,6 +300,28 @@ class PluginManagementService:
         self.refresh()
         return {"installed": str(destination), "management": self.manifest()}
 
+    def create_openrouter_plugin(
+        self, name: str, target_directory: str
+    ) -> dict[str, Any]:
+        """Create one independently configurable OpenRouter provider file.
+
+        The generated file deliberately contains no endpoint, credential, model, or framework
+        policy. It only opts into the packaged OpenRouter implementation; its private JSON file is
+        created later when the operator saves that provider's form.
+        """
+        normalized = name.strip().lower()
+        if not normalized.startswith("openrouter_"):
+            raise ValueError("OpenRouter 配置名必须以 openrouter_ 开头")
+        source = (
+            "from prediction_market_agent.plugins.providers.openrouter "
+            "import initialize_openrouter_plugin\n\n"
+            "def initialize_plugin(context):\n"
+            "    return initialize_openrouter_plugin(context)\n"
+        )
+        return self.install_plugin(
+            "decision_provider", normalized, source, target_directory
+        )
+
     def refresh(self) -> dict[str, Any]:
         self.catalog.shutdown()
         self.catalog = load_plugin_catalog(self.config)

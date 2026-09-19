@@ -156,7 +156,7 @@ APPLICATION_FIELDS = (
     ),
     ApplicationConfigField(
         "shared_http_proxy", "统一 HTTP 代理", "string",
-        "除兼容 API 外，支持联网的内置插件默认继承此设置。HOST 使用一键启动器检测到的宿主机代理；DIRECT 直连；ENVIRONMENT 读取服务器环境；也可填写完整 http(s) 地址。",
+        "支持联网的内置插件默认继承此设置。HOST 使用一键启动器检测到的宿主机代理；DIRECT 直连；ENVIRONMENT 读取服务器环境；也可填写完整 http(s) 地址。每个插件仍可独立覆盖。",
         "HOST",
     ),
     ApplicationConfigField(

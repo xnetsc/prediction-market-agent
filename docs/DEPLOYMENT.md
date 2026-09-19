@@ -39,8 +39,8 @@ Desktop 首次条款/WSL 配置或系统要求的重启由用户在系统界面�
 启动应用容器之前检测宿主机代理并从检查容器通过最终地址发起真实 HTTPS 请求；无法直达时先启动宿主机
 转发再做相同验证。检测到代理但验证失败时，交互式启动让用户明确选择直连继续或退出，非交互默认退出。
 正常直达不需要宿主机 Python，macOS/Linux 的备用代理转发才需要 Python 3.9+；Windows 使用 PowerShell/.NET。
-检测结果成为程序的统一代理，默认由 Codex、Claude、平台和研究插件继承；各插件保留 UI 独立覆盖，
-兼容 API 默认直连且不继承。见[宿主机代理](HOST_PROXY.md)。
+检测结果成为程序的统一代理，默认由 Codex、Claude、OpenRouter、平台和研究插件继承；各插件保留 UI
+独立覆盖。见[宿主机代理](HOST_PROXY.md)。
 已有 Docker 时，仅启动应用容器的命令：
 
 ```bash
@@ -70,8 +70,8 @@ Codex 使用设备码，Claude 使用官方验证码页面和客户端输入，�
 命令会校验脚本完整字节后执行，不需要下载 ZIP 或打开原生可执行文件；Bash/Python 和 PowerShell
 的依赖与故障提示直接出现在登录向导中。
 独立凭据默认保存在 `runtime-data/credentials/codex/` 和 `runtime-data/credentials/claude/`；
-升级安装在 `runtime-data/clients/`，不会继承宿主机或旧 `/root` 账号。兼容 API 的 URL、Key、模型、代理
-仍由其私有配置独立提供。回调映射与容器限制见 [CLIENT_ACCOUNTS.md](CLIENT_ACCOUNTS.md)。
+升级安装在 `runtime-data/clients/`，不会继承宿主机或旧 `/root` 账号。OpenRouter 的 Key、模型和代理仍由
+每个 `openrouter_*` 插件的私有配置独立提供。回调映射与容器限制见 [CLIENT_ACCOUNTS.md](CLIENT_ACCOUNTS.md)。
 
 远程云部署无需宿主机代理采集脚本：HOST 在没有快照时读取服务器自身环境，显式 ENVIRONMENT 始终忽略
 宿主机快照，不改写回环地址或启动转发。云平台注入 HTTP(S)_PROXY/NO_PROXY 即可；详情见 [代理说明](HOST_PROXY.md)。

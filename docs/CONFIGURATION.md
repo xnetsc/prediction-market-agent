@@ -44,7 +44,7 @@
 | `agent_tool_result_chars` | 单个工具结果进入上下文的字符预算 |
 | `context_window_chars` | Provider 输入窗口预算 |
 | `history_per_market` | 自动召回的同市场历史条数 |
-| `shared_http_proxy` | 统一代理；除兼容 API 外，支持联网的内置插件默认继承 |
+| `shared_http_proxy` | 统一代理；支持联网的内置插件默认继承 |
 | `shared_no_proxy` | 统一代理的绕过主机，回环地址始终自动加入 |
 | `host_proxy_file` | 一键启动器写入的宿主机代理检测/转发信息文件 |
 | `dashboard_host`、`dashboard_port` | 管理服务监听地址和端口 |
@@ -52,7 +52,7 @@
 
 应用配置示例见 `examples/application.json`。通用 Config 只提供各插件可选择继承的统一网络代理，不包含
 任何平台专属代理、平台 URL、API Key、私钥、资金、扫描间隔、分页/每轮规模、失败退避、
-Agent 动作策略或具体交易策略；这些只能由对应插件定义。兼容 API 不继承统一代理，默认 `DIRECT`。
+Agent 动作策略或具体交易策略；这些只能由对应插件定义。OpenRouter 的插件私有代理字段默认 `INHERIT`。
 
 `shared_http_proxy` 支持 `HOST`、`ENVIRONMENT`、`DIRECT`、`SYSTEM`（仅原生 macOS）或完整 HTTP(S) URL。
 平台、客户端和研究插件的私有代理字段默认 `INHERIT`；改成 `DIRECT` 或 URL 后只覆盖该插件。

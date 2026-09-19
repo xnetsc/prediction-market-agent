@@ -2,12 +2,13 @@
 
 ## Provider 优先级
 
-`codex`、`claude`、`openai_compatible` 都是自动扫描 Provider 插件。管理名单顺序就是运行优先级；启动
+`codex`、`claude`、`openrouter`（界面显示为 OpenRouter）都是自动扫描 Provider 插件。管理名单顺序就是运行优先级；启动
 不可用或调用失败会转到下一项，不会退回硬编码买卖规则。
 
 - Codex：调用本机 `codex exec`，每次使用结构化输出 schema 和只读工作目录。
 - Claude：调用本机 Claude 客户端及其 JSON schema 输出。
-- OpenAI-compatible：调用配置的 Chat Completions 兼容端点，可用于 OpenAI、OpenRouter 或其他服务。
+- OpenRouter：使用插件私有的本机桥，把内部 Responses schema 请求转换为 OpenRouter Chat Completions
+  `response_format.json_schema`，并强制 `provider.require_parameters=true`。它不是通用兼容 API。
 
 客户端可以保有自身登录状态；机器人仍保存每轮完整输入、原始输出和工具步骤，负责跨 Provider 的业务
 会话、滑动窗口和召回。
@@ -64,12 +65,13 @@
 ## 客户端账号与模型
 
 界面“模型服务”提供 Codex/Claude 独立登录、失效提示、检查版本及点击升级。自动检查只查询官方版本，
-不自动安装。模型在各插件的 `CODEX_MODEL`、`CLAUDE_MODEL`、`COMPATIBLE_MODEL` 字段分别指定；
-CLI 留空沿用客户端默认，兼容 API 留空则尚未配置完成。CLI 模型支持直接填写模型名，不猜测账号模型权限。
-兼容 API 默认预置 OpenRouter，也可套用 OpenAI 预置并修改 URL；密钥留空待用户填写。切换预置保存时清除
-旧服务密钥；打开配置自动读取已保存 URL 的 `/models`，可按模型名称/ID 搜索、选择或手动输入。
-修改连接配置后保存，再点击“刷新模型列表”。样例见
-`examples/plugin_configs/codex.json`、`claude.json`、`openai_compatible.json` 和 `openrouter.json`。
+不自动安装。模型在各插件的 `CODEX_MODEL`、`CLAUDE_MODEL`、`OPENROUTER_MODEL` 字段分别指定；
+CLI 留空沿用客户端默认，OpenRouter 留空则尚未配置完成。OpenRouter 模型列表请求
+`/models?supported_parameters=structured_outputs`，并再次检查每项的 `supported_parameters`；字段只能从
+这份列表选择，不能手填绕过。实际推理还会要求具体路由端点支持 schema 参数，避免目录能力与落到的供应
+端点不一致。模型服务页可生成 `openrouter_*` 插件文件；每个文件对应独立 Key、模型、代理和优先级，
+桥接逻辑仍完全属于该 Provider 插件。样例见 `examples/plugin_configs/codex.json`、`claude.json`、
+`openrouter.json`。
 网页登录和代理步骤直接显示在 UI 内，补充说明见 [CLIENT_ACCOUNTS.md](CLIENT_ACCOUNTS.md)。
 Codex 与 Claude 的独立代理字段和模型/强度在配置页首要分区直接显示；默认继承统一代理，也能分别改为
 直连或专用 HTTP(S) 代理。

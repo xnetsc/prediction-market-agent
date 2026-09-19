@@ -85,7 +85,7 @@ class ConfigurationTests(unittest.TestCase):
         common = Config()
         forbidden = {
             "http_proxy", "execution_mode", "risk_rules_file", "api_key", "api_secret",
-            "private_key", "codex_cli_path", "claude_cli_path", "compatible_api_key",
+            "private_key", "codex_cli_path", "claude_cli_path", "openrouter_api_key",
             "agent_allowed_tools", "agent_allowed_trade_actions", "risk_filter_modules",
             "min_liquidity",
         }

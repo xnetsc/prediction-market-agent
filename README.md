@@ -1,7 +1,7 @@
 # 多平台预测市场 Agent 交易机器人
 
 这是一个可连接真实市场、由 Agent 自主收集证据并给出结构化决策的通用机器人。内置 Binance
-Prediction 与 Polymarket API 插件，以及 Codex、Claude、OpenAI-compatible Provider 插件。多个
+Prediction 与 Polymarket API 插件，以及 Codex、Claude、OpenRouter Provider 插件。多个
 市场平台共享同一 Agent 决策与交叉验证流程，但各自保留能力清单、账户、凭证、URL、代理和
 执行配置。
 
@@ -26,7 +26,7 @@ Prediction 与 Polymarket API 插件，以及 Codex、Claude、OpenAI-compatible
 - 插件初始化函数可返回动态字段 schema、插件自有 JSON 读取/保存回调与卸载回调；每个字段必须有说明，
   可选必填、默认值、枚举或秘密类型。
 - Binance 和 Polymarket 通过同一个标准化 API 契约提供各自真实具备的行情、能力和写工作流。
-- Codex/Claude/兼容 API 自动故障转移，并且**按失败类型退避、恢复后自动回到轮换**：限流等一个配额窗口，
+- Codex/Claude/OpenRouter 自动故障转移，并且**按失败类型退避、恢复后自动回到轮换**：限流等一个配额窗口，
   掉线只等几十秒，不会每次决策都为同一个故障再撞一次墙。可用的服务按实测质量排序——送达率、已结算
   校准（Brier）、以及由**另一个**服务给出的评分；模型给自己打的分不计入。任何 Provider 都使用相同的
   多步工具 Agent。
@@ -38,7 +38,7 @@ Prediction 与 Polymarket API 插件，以及 Codex、Claude、OpenAI-compatible
 - Web 界面可筛选查看“上下文 → 证据 → 模型提案 → 风控调整 → 最终动作 → 执行 → 后续盘口”，并查看、
   修改、删除全部程序配置、插件目录、插件启用状态和动态私有配置；也可安装新插件、暂停全部机器人或
   单独暂停某个平台。
-- 模型服务页统一管理客户端、OpenRouter / 自定义兼容 API、启用顺序与模型服务扩展；插件中心展示其余六类能力，附用途与流程
+- 模型服务页统一管理客户端、一个或多个 OpenRouter 配置、启用顺序与模型服务扩展；插件中心展示其余六类能力，附用途与流程
   提示；决策先显示结论与原因，技术详情按需展开。操作步骤见 [Web 控制台](docs/WEB_UI.md)。
 - 全系统只有两类插件会拒绝动作：`agent_policy` 管 LLM 的一切工具调用，`risk` 管一切市场 API 动作
   （含只读）。每一类都可同时启用多个并串成一条链，任意一个拒绝或抛异常，这次动作就整体失败。
@@ -114,11 +114,11 @@ Set-Location prediction-market-agent
 公网访问必须使用 HTTPS 和 admin Passkey。客户端登录向导会验证本次实际回调映射，匹配后免助手；
 本地容器一键脚本会临时发布客户端本次回调端口，流程结束后释放，无需另下载助手。端口跟随官方客户端，
 不在机器人中写死；Codex 当前客户端的端口限制见下述说明。
-模型、代理、OpenRouter 预置和升级见[客户端账号说明](docs/CLIENT_ACCOUNTS.md)。
+模型、代理、OpenRouter 配置和升级见[客户端账号说明](docs/CLIENT_ACCOUNTS.md)。
 手机/远程登录支持 Codex 设备码、Claude 官方验证码，不需要手机助手或额外公网端口。
 远程容器无宿主机快照时，客户端插件自行检测当前环境代理；也可使用 ENVIRONMENT 显式忽略快照。
-启动器会检测宿主机系统代理，并作为统一代理默认供 Codex、Claude、平台和研究插件继承；每个插件仍可
-在 UI 单独选择直连或自己的代理。OpenAI 兼容 API 例外：默认直连，只在自身配置明确设置后使用代理。
+启动器会检测宿主机系统代理，并作为统一代理默认供 Codex、Claude、OpenRouter、平台和研究插件继承；
+每个插件仍可在 UI 单独选择直连或自己的代理。
 [检测范围与转发说明](docs/HOST_PROXY.md)。
 需要远程助手时，向导提供 Bash/Python 或 PowerShell 的一次性命令和复制按钮；完整脚本经 SHA-256
 校验后才执行，不提供 ZIP/原生可执行文件下载，不改变系统安全策略。

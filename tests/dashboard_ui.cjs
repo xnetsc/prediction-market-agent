@@ -7,10 +7,11 @@ const fs = require('node:fs');
 (async () => {
     const base = process.env.DASHBOARD_TEST_URL || 'http://127.0.0.1:18765';
     const output = process.env.DASHBOARD_SCREENSHOTS;
-    // Read a public catalog independently of the deployment's editable account/proxy settings.
-    const publicResponse=await fetch('https://openrouter.ai/api/v1/models',{signal:AbortSignal.timeout(20000)});
-    assert(publicResponse.ok);
-    const publicCatalog=(await publicResponse.json()).data.map(item=>({value:item.id,label:item.name||item.id}));
+    // UI-only fixture. Real OpenRouter capability filtering is exercised by Python integration tests.
+    const publicCatalog=[
+        {value:'fixture/structured-a',label:'Structured A'},
+        {value:'fixture/structured-b',label:'Structured B'},
+    ];
     if (output) fs.mkdirSync(output, {recursive:true});
     const browser = await chromium.launch({channel:'chrome', headless:true});
     try {
@@ -20,13 +21,19 @@ const fs = require('node:fs');
             let remoteModel=null;
             await page.route('**/api/local',async route=>{
                 const message=route.request().postDataJSON();
-                if(message.url==='/api/plugins/config/choices'&&message.body.name==='openai_compatible'){
+                if(message.url==='/api/plugins/config/choices'&&message.body.name==='openrouter'){
                     await route.fulfill({json:{items:publicCatalog}});return;
+                }
+                if(message.url==='/api/plugins/config/choices'&&['codex','claude'].includes(message.body.name)){
+                    const items=message.body.field.endsWith('_MODEL')
+                        ?[{value:'',label:'使用客户端默认'},{value:'fixture-model',label:'Fixture model'}]
+                        :[{value:'',label:'默认'},{value:'high',label:'高（high）'}];
+                    await route.fulfill({json:{items}});return;
                 }
                 if(message.url==='/api/plugins/manage'&&remoteModel!==null){
                     const response=await route.fetch(),manifest=await response.json();
-                    const plugin=manifest.plugins.decision_provider.find(p=>p.name==='openai_compatible');
-                    plugin.configuration.fields.find(f=>f.name==='COMPATIBLE_MODEL').value=remoteModel;
+                    const plugin=manifest.plugins.decision_provider.find(p=>p.name==='openrouter');
+                    plugin.configuration.fields.find(f=>f.name==='OPENROUTER_MODEL').value=remoteModel;
                     await route.fulfill({response,json:manifest});return;
                 }
                 await route.continue();
@@ -66,7 +73,7 @@ const fs = require('node:fs');
                     assert(await page.locator('#sharedProxySettings').isVisible());
                     assert.equal(await page.locator('[data-app-field="shared_http_proxy"]').count(),1);
                     assert.equal(await page.locator('[data-app-field="shared_http_proxy"]').inputValue(),'HOST');
-                    assert((await page.locator('[data-view="settings"]').allInnerTexts()).join('\n').includes('兼容 API'));
+                    assert((await page.locator('[data-view="settings"]').allInnerTexts()).join('\n').includes('OpenRouter'));
                     await page.locator('#environmentFacts summary').click();
                     assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth>innerWidth),false);
                     if(output)await page.screenshot({path:path.join(output,`environment-${width}.png`)});
@@ -80,21 +87,21 @@ const fs = require('node:fs');
             }
             await page.evaluate(()=>{location.hash='plugins'});
             await page.waitForSelector('.category-tile');
-            assert.equal(await page.locator('.category-tile').count(),5);
+            assert.equal(await page.locator('.category-tile').count(),6);
             assert.equal(await page.locator('.category-tile').filter({hasText:'AI 模型服务'}).count(),0);
             assert.equal(await page.locator('#pluginCategoryNav a[href="#plugins/decision_provider"]').count(),0);
             assert.equal(await page.locator('#pluginManager .plugin-category:visible').count(),0);
             if(output)await page.screenshot({path:path.join(output,`plugins-${width}.png`),fullPage:true});
-            for(const kind of ['api','decision_strategy','research_tool','risk','hook']){
+            for(const kind of ['api','market_discovery','decision_strategy','research_tool','agent_policy','risk']){
                 await page.evaluate(kind=>{location.hash='plugins/'+kind},kind);
                 await page.waitForSelector('#category_'+kind,{state:'visible'});
                 assert.equal(await page.locator('#pluginManager .plugin-category:visible').count(),1);
                 assert(await page.locator('#pluginCategoryGuide').innerText().then(s=>s.includes('你需要做什么')));
                 if(kind==='decision_strategy'){
                     const original=await page.locator('input[name="strategy"]:checked').getAttribute('value');
-                    assert(await page.getByLabel('使用中性候选透传').isVisible());
+                    assert(await page.getByLabel('使用内置默认策略').isVisible());
                     if(original==='')await page.locator('input[name="strategy"][value="general_agent"]').check();
-                    await page.getByLabel('使用中性候选透传').check();
+                    await page.getByLabel('使用内置默认策略').check();
                     assert((await page.locator('#selectionStatus_decision_strategy_none').innerText()).includes('尚未保存'));
                     if(original)await page.locator('input[name="strategy"][value="'+original+'"]').check();
                 }
@@ -113,12 +120,12 @@ const fs = require('node:fs');
             await page.locator('#category_api .plugin-config summary').first().click();
             assert.equal(await page.locator('#category_api .plugin-config').first().getAttribute('open'),'');
             await page.evaluate(()=>{location.hash='models'});
-            await page.waitForSelector('#control_decision_provider_openai_compatible');
+            await page.waitForSelector('#control_decision_provider_openrouter');
             assert.equal(await page.locator('.client-options[open]').count(),0);
-            const modelEnable=page.locator('#control_decision_provider_openai_compatible .model-enable');
+            const modelEnable=page.locator('#control_decision_provider_openrouter .model-enable');
             assert(await modelEnable.isVisible());
             await modelEnable.setChecked(!(await modelEnable.isChecked()));
-            assert((await page.locator('#modelSelectionStatus_openai_compatible').innerText()).includes('尚未保存'));
+            assert((await page.locator('#modelSelectionStatus_openrouter').innerText()).includes('尚未保存'));
             await modelEnable.setChecked(!(await modelEnable.isChecked()));
             if(output)await page.screenshot({path:path.join(output,`models-${width}.png`),fullPage:true});
             for(const name of ['codex','claude']){
@@ -128,7 +135,7 @@ const fs = require('node:fs');
                 assert.equal(await page.locator(prefix+'_MODEL').evaluate(e=>e.tagName),'SELECT');
                 assert((await page.locator(prefix+'_MODEL option').count())>1);
                 assert(await page.locator(prefix+'_HTTP_PROXY').isVisible());
-                assert.equal(await page.locator(prefix+'_HTTP_PROXY').inputValue(),'INHERIT');
+                assert(/^(INHERIT|DIRECT|HOST|ENVIRONMENT|SYSTEM|https?:\/\/)/.test(await page.locator(prefix+'_HTTP_PROXY').inputValue()));
                 assert((await page.locator('#plugin_decision_provider_'+name+' .config-section-heading').innerText()).includes('网络连接'));
                 const model=await page.locator(prefix+'_MODEL option').nth(1).getAttribute('value');
                 await page.locator(prefix+'_MODEL').selectOption(model);
@@ -138,139 +145,115 @@ const fs = require('node:fs');
                 if(output)await page.screenshot({path:path.join(output,`model-options-${name}-${width}.png`),fullPage:true});
             }
             await page.evaluate(()=>{location.hash='models'});
-            await page.locator('#control_decision_provider_openai_compatible a').click();
-            await page.waitForSelector('#cfg_decision_provider_openai_compatible_COMPATIBLE_API_BASE');
-            assert(await page.locator('#cfg_decision_provider_openai_compatible_COMPATIBLE_API_KEY').isVisible());
-            const credential=page.locator('#cfg_decision_provider_openai_compatible_COMPATIBLE_API_KEY');
+            await page.locator('#control_decision_provider_openrouter a').click();
+            await page.waitForSelector('#cfg_decision_provider_openrouter_OPENROUTER_API_KEY');
+            assert(await page.locator('#cfg_decision_provider_openrouter_OPENROUTER_API_KEY').isVisible());
+            const credential=page.locator('#cfg_decision_provider_openrouter_OPENROUTER_API_KEY');
             assert.equal(await credential.getAttribute('type'),'search');
             assert.equal(await credential.getAttribute('autocomplete'),'off');
             assert.equal(await credential.evaluate(e=>getComputedStyle(e).webkitTextSecurity),'disc');
-            assert.equal(await page.locator('#cfg_decision_provider_openai_compatible_COMPATIBLE_API_SECRET').count(),0);
-            assert(await page.locator('#cfg_decision_provider_openai_compatible_COMPATIBLE_MODEL').isVisible());
-            const apiModel='#cfg_decision_provider_openai_compatible_COMPATIBLE_MODEL';
+            assert.equal(await page.locator('#cfg_decision_provider_openrouter_OPENROUTER_API_BASE').count(),0);
+            assert.equal(await page.locator('#cfg_decision_provider_openrouter_OPENROUTER_EXTRA_HEADERS_JSON').count(),0);
+            assert.equal(await page.locator('#cfg_decision_provider_openrouter_OPENROUTER_API_SECRET').count(),0);
+            assert(await page.locator('#cfg_decision_provider_openrouter_OPENROUTER_MODEL').isVisible());
+            const apiModel='#cfg_decision_provider_openrouter_OPENROUTER_MODEL';
             await page.waitForSelector(apiModel+'[data-loaded="true"]',{timeout:30000});
-            assert.equal(await page.locator(apiModel).getAttribute('role'),'combobox');
-            assert.equal(await page.locator(apiModel).getAttribute('type'),'search');
-            assert.equal(await page.locator(apiModel).getAttribute('autocomplete'),'off');
-            assert.equal(await page.locator(apiModel+'_choices_search').count(),0);
-            const modelToggle=page.locator('#plugin_decision_provider_openai_compatible').getByRole('button',{name:'展开模型列表'});
-            await modelToggle.click();
-            assert(await page.locator(apiModel+'_choices').isVisible());
-            assert.equal(await page.locator(apiModel).evaluate(e=>document.activeElement===e),false);
-            await modelToggle.click();
-            assert.equal(await page.locator(apiModel+'_choices').isVisible(),false);
-            await page.locator(apiModel).click();
-            const realModels=await page.locator(apiModel+'_choices [role=option]').count();
-            assert(realModels>100,'OpenRouter should load its real public catalog without a button click');
-            await page.locator(apiModel).fill('aNtHrOpIc sonnet');
-            const matched=await page.locator(apiModel+'_choices [role=option]').evaluateAll(options=>options.map(o=>o.textContent.toLowerCase()));
-            assert(matched.length>0&&matched.length<realModels);
-            assert(matched.every(text=>text.includes('anthropic')&&text.includes('sonnet')));
-            await page.locator(apiModel).press('ArrowDown');
-            await page.locator(apiModel).press('Enter');
-            assert((await page.locator(apiModel).inputValue()).includes('anthropic/'));
-            assert.equal(await page.locator(apiModel).getAttribute('aria-expanded'),'false');
-            await page.locator(apiModel).fill('no-such-model-keyword-fixture');
-            assert((await page.locator(apiModel+'_note').innerText()).includes('没有匹配'));
-            await page.locator(apiModel).press('Enter');
-            assert.equal(await page.locator(apiModel).inputValue(),'no-such-model-keyword-fixture');
-            await page.locator(apiModel).fill('');
-            assert.equal(await page.locator(apiModel+'_choices [role=option]').count(),realModels);
-            if(output)await page.screenshot({path:path.join(output,`api-model-search-${width}.png`),fullPage:true});
-            await page.locator(apiModel).press('Escape');
+            assert.equal(await page.locator(apiModel).evaluate(e=>e.tagName),'SELECT');
+            assert.equal(await page.locator(apiModel).getAttribute('data-selection-only'),'true');
+            const realModels=await page.locator(apiModel+' option').count();
+            assert(realModels>=publicCatalog.length&&realModels<=publicCatalog.length+1);
+            const availableModels=await page.locator(apiModel+' option').evaluateAll(options=>options.map(option=>option.value));
+            assert(publicCatalog.every(item=>availableModels.includes(item.value)));
+            const firstModel=await page.locator(apiModel+' option').first().getAttribute('value');
+            await page.locator(apiModel).selectOption(firstModel);
+            assert.equal(await page.locator(apiModel).inputValue(),firstModel);
+            await page.evaluate(id=>{const input=document.getElementById(id);input.dataset.savedValue=JSON.stringify(input.value)},apiModel.slice(1));
+            if(output)await page.screenshot({path:path.join(output,`openrouter-models-${width}.png`),fullPage:true});
             remoteModel='fixture/saved-current';
             await page.evaluate(()=>{location.hash='models'});
             await page.waitForSelector('#modelConfigurationSection',{state:'hidden'});
-            await page.evaluate(()=>{location.hash='model-config/openai_compatible'});
+            await page.evaluate(()=>{location.hash='model-config/openrouter'});
             await page.waitForFunction(id=>document.getElementById(id).value==='fixture/saved-current',apiModel.slice(1));
-            assert((await page.locator('#plugin_decision_provider_openai_compatible .config-load-status').innerText()).includes('已加载当前'));
-            await page.locator(apiModel).fill('fixture/unsaved-draft');
+            assert((await page.locator('#plugin_decision_provider_openrouter .config-load-status').innerText()).includes('已加载当前'));
+            const draftModel=await page.locator(apiModel+' option').first().getAttribute('value');
+            await page.locator(apiModel).selectOption(draftModel);
             remoteModel='fixture/changed-elsewhere';
             await page.evaluate(()=>{location.hash='models'});
             await page.waitForSelector('#modelConfigurationSection',{state:'hidden'});
-            await page.evaluate(()=>{location.hash='model-config/openai_compatible'});
-            await page.waitForFunction(()=>document.querySelector('#plugin_decision_provider_openai_compatible .config-load-status').textContent.includes('保留了'));
-            assert.equal(await page.locator(apiModel).inputValue(),'fixture/unsaved-draft');
+            await page.evaluate(()=>{location.hash='model-config/openrouter'});
+            await page.waitForFunction(()=>document.querySelector('#plugin_decision_provider_openrouter .config-load-status').textContent.includes('保留了'));
+            assert.equal(await page.locator(apiModel).inputValue(),draftModel);
             remoteModel=null;
-            assert.equal(await page.locator('#cfg_decision_provider_openai_compatible_COMPATIBLE_API_KEY').inputValue(),'');
-            assert(await page.locator('#plugin_decision_provider_openai_compatible .preset-slot').innerText().then(s=>s.includes('OpenRouter')));
+            assert.equal(await page.locator('#cfg_decision_provider_openrouter_OPENROUTER_API_KEY').inputValue(),'');
             // The configuration form exists only in the dedicated model-service page.
-            await page.locator('#cfg_decision_provider_openai_compatible_COMPATIBLE_MODEL').fill('ui-unsaved-model');
+            await page.locator(apiModel).selectOption(draftModel);
             await page.evaluate(()=>{location.hash='models'});
             await page.waitForSelector('#modelConfigurationSection',{state:'hidden'});
-            await page.evaluate(()=>{location.hash='model-config/openai_compatible'});
+            await page.evaluate(()=>{location.hash='model-config/openrouter'});
             await page.waitForSelector('#modelConfigurations #category_decision_provider',{state:'visible'});
-            assert.equal(await page.locator('#cfg_decision_provider_openai_compatible_COMPATIBLE_MODEL').count(),1);
-            assert.equal(await page.locator('#cfg_decision_provider_openai_compatible_COMPATIBLE_MODEL').inputValue(),'ui-unsaved-model');
+            assert.equal(await page.locator('#cfg_decision_provider_openrouter_OPENROUTER_MODEL').count(),1);
+            assert.equal(await page.locator(apiModel).inputValue(),draftModel);
             // Exercise the real form handlers with browser-local write responses only.
             // Never submit fixture credentials or selections to the running deployment.
             const writes=[];
             let failCatalog=false;
             await page.route('**/api/local',async route=>{
                 const message=route.request().postDataJSON();
-                if(message.url==='/api/plugins/config'||message.url==='/api/plugins/selection'){
-                    if(message.url==='/api/plugins/config')remoteModel=message.body.values.COMPATIBLE_MODEL;
-                    writes.push(message);await route.fulfill({json:{}});return;
+                if(message.url==='/api/plugins/config'||message.url==='/api/plugins/selection'||message.url==='/api/plugins/openrouter/create'){
+                    if(message.url==='/api/plugins/config')remoteModel=message.body.values.OPENROUTER_MODEL;
+                    writes.push(message);
+                    if(message.url==='/api/plugins/openrouter/create'){
+                        const response=await fetch(base+'/api/local',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({url:'/api/plugins/manage',body:null})});
+                        assert(response.ok);
+                        await route.fulfill({json:{installed:'/fixture/openrouter_ui.py',management:await response.json()}});return;
+                    }
+                    await route.fulfill({json:{}});return;
                 }
                 if(message.url==='/api/plugins/config/choices'){
-                    if(failCatalog){await route.fulfill({status:503,json:{detail:'COMPATIBLE_HTTP_PROXY must be DIRECT, SYSTEM, or an http(s) URL'}});return}
+                    if(failCatalog){await route.fulfill({status:503,json:{detail:'OPENROUTER_HTTP_PROXY must be INHERIT, DIRECT, SYSTEM, or an http(s) URL'}});return}
                     writes.push(message);await route.fulfill({json:{items:[{value:'fixture/model',label:'Fixture model'}]}});return;
                 }
                 await route.continue();
             });
-            await page.evaluate(()=>{location.hash='model-config/openai_compatible'});
+            await page.evaluate(()=>{location.hash='model-config/openrouter'});
             await page.waitForSelector('#modelConfigurationSection',{state:'visible'});
-            page.once('dialog',dialog=>dialog.accept());
-            await page.getByRole('button',{name:'OpenRouter',exact:true}).click();
-            assert.equal(await page.locator('#cfg_decision_provider_openai_compatible_COMPATIBLE_API_BASE').inputValue(),'https://openrouter.ai/api/v1');
-            await page.locator('#cfg_decision_provider_openai_compatible_COMPATIBLE_API_BASE').fill('https://model-fixture.example/v1');
-            await page.locator('#cfg_decision_provider_openai_compatible_COMPATIBLE_API_KEY').fill('fixture-only-not-a-credential');
-            await page.locator('#cfg_decision_provider_openai_compatible_COMPATIBLE_MODEL').fill('fixture/model');
-            await page.locator('#plugin_decision_provider_openai_compatible').getByRole('button',{name:'保存配置',exact:true}).click();
-            await page.waitForFunction(()=>document.getElementById('pluginStatus_decision_provider_openai_compatible').textContent.includes('配置已保存'));
+            await page.locator('#cfg_decision_provider_openrouter_OPENROUTER_API_KEY').fill('fixture-only-not-a-credential');
+            await page.locator('#plugin_decision_provider_openrouter').getByRole('button',{name:'刷新可选列表'}).click();
+            await page.waitForFunction(id=>[...document.getElementById(id).options].some(option=>option.value==='fixture/model'),apiModel.slice(1));
+            await page.locator(apiModel).selectOption('fixture/model');
+            await page.locator('#plugin_decision_provider_openrouter').getByRole('button',{name:'保存配置',exact:true}).click();
+            await page.waitForFunction(()=>document.getElementById('pluginStatus_decision_provider_openrouter').textContent.includes('配置已保存'));
             const saved=writes.find(w=>w.url==='/api/plugins/config');
-            assert.equal(saved.body.name,'openai_compatible');
-            assert.equal(saved.body.values.COMPATIBLE_API_BASE,'https://model-fixture.example/v1');
-            assert.equal(saved.body.values.COMPATIBLE_API_KEY,'fixture-only-not-a-credential');
-            assert(saved.body.clear_secrets.includes('COMPATIBLE_API_KEY'));
-            await page.locator('#plugin_decision_provider_openai_compatible').getByRole('button',{name:'刷新模型列表'}).click();
-            await page.locator(apiModel).click();
-            await page.waitForSelector(apiModel+'_choices [role=option]');
-            await page.locator(apiModel+'_choices [role=option]').filter({hasText:'Fixture model'}).click();
-            assert.equal(await page.locator('#cfg_decision_provider_openai_compatible_COMPATIBLE_MODEL').inputValue(),'fixture/model');
-            await page.locator(apiModel).click();
-            await page.locator(apiModel).press('Escape');
-            assert.equal(await page.locator(apiModel).getAttribute('aria-expanded'),'false');
-            assert.equal(await page.locator(apiModel).inputValue(),'fixture/model');
+            assert.equal(saved.body.name,'openrouter');
+            assert.equal(saved.body.values.OPENROUTER_MODEL,'fixture/model');
+            assert.equal(saved.body.values.OPENROUTER_API_KEY,'fixture-only-not-a-credential');
+            assert(!saved.body.clear_secrets.includes('OPENROUTER_API_KEY'));
             failCatalog=true;
-            await page.evaluate(id=>CHOICE_ITEMS.delete(document.getElementById(id)),apiModel.slice(1));
-            await page.locator('#plugin_decision_provider_openai_compatible').getByRole('button',{name:'刷新模型列表'}).click();
+            await page.locator('#plugin_decision_provider_openrouter').getByRole('button',{name:'刷新可选列表'}).click();
             await page.waitForSelector(apiModel+'_note.danger');
-            assert((await page.locator(apiModel+'_note').innerText()).includes('模型列表暂不可用'));
-            assert(!(await page.locator(apiModel+'_note').innerText()).includes('DIRECT, SYSTEM'));
-            const proxy='#cfg_decision_provider_openai_compatible_COMPATIBLE_HTTP_PROXY';
-            assert.equal(await page.locator(proxy).getAttribute('aria-invalid'),'true');
-            assert((await page.locator(proxy).locator('xpath=ancestor::*[contains(concat(" ",normalize-space(@class)," ")," field ")]').innerText()).includes('当前代理设置无效'));
-            await modelToggle.click();
-            assert(await page.locator(apiModel+'_choices').isVisible());
-            assert(!(await page.locator(apiModel+'_choices').innerText()).includes('DIRECT, SYSTEM'));
-            await modelToggle.click();
-            await page.getByRole('button',{name:'在表单中改为直连（DIRECT）'}).click();
-            assert.equal(await page.locator(proxy).inputValue(),'DIRECT');
-            assert.equal(await page.locator(proxy).getAttribute('aria-invalid'),null);
-            assert((await page.locator('#modelManageStatus').innerText()).includes('保存配置'));
-            assert.equal(await page.locator(apiModel).inputValue(),'fixture/model');
+            assert((await page.locator(apiModel+'_note').innerText()).includes('OPENROUTER_HTTP_PROXY'));
+            const proxy='#cfg_decision_provider_openrouter_OPENROUTER_HTTP_PROXY';
+            assert.equal(await page.locator(proxy).inputValue(),'INHERIT');
             failCatalog=false;
-            await page.locator('#plugin_decision_provider_openai_compatible').getByRole('button',{name:'刷新模型列表'}).click();
-            await page.waitForFunction(id=>!document.getElementById(id).classList.contains('danger')&&document.getElementById(id).textContent.includes('显示'),apiModel.slice(1)+'_note');
+            await page.locator('#plugin_decision_provider_openrouter').getByRole('button',{name:'刷新可选列表'}).click();
+            await page.waitForFunction(id=>!document.getElementById(id).classList.contains('danger'),apiModel.slice(1)+'_note');
+            await page.evaluate(()=>{location.hash='models'});
+            assert(await page.locator('#openRouterPluginName').isVisible());
+            await page.locator('#openRouterPluginName').fill('openrouter_ui');
+            await page.getByRole('button',{name:'再添加一个 OpenRouter 配置'}).click();
+            await page.waitForFunction(()=>document.getElementById('openRouterPluginStatus').textContent.includes('openrouter_ui.py'));
+            assert.equal(writes.find(w=>w.url==='/api/plugins/openrouter/create').body.name,'openrouter_ui');
             await page.getByRole('button',{name:'保存模型启用与顺序'}).click();
             await page.waitForFunction(()=>document.getElementById('modelManageStatus').textContent.includes('启用状态和优先级已保存'));
-            assert.equal(Object.keys(writes.find(w=>w.url==='/api/plugins/selection').body.enabled).length,6);
+            assert.equal(Object.keys(writes.find(w=>w.url==='/api/plugins/selection').body.enabled).length,7);
             await page.unroute('**/api/local');
-            await page.evaluate(()=>{location.hash='decisions';renderDecisionLedger([{id:'ui-fixture',created_at:new Date().toISOString(),platform:'demo',market_topic_id:'Only a browser fixture',context:{market:{title:'Very long market '.repeat(20)}},final_decision:{action:'HOLD',rationale:'Evidence is incomplete; do not place an order.'},proposed_decision:{action:'HOLD',rationale:'Need research'},status:'failed',error:'Example request failed',agent_steps:2,research:[{source:'fixture'}]}])});
+            await page.evaluate(()=>{location.hash='decisions'});
+            await page.waitForFunction(()=>document.querySelector('.nav-link[aria-current="page"]').hash==='#decisions');
+            await page.evaluate(()=>{LEDGER_TAB='concluded';LEDGER_RESULTS=new Set();renderDecisionLedger([{id:'ui-fixture',created_at:new Date().toISOString(),platform:'demo',market_topic_id:'Only a browser fixture',context:{market:{title:'Very long market '.repeat(20)}},final_decision:{action:'HOLD',rationale:'Evidence is incomplete; do not place an order.'},proposed_decision:{action:'HOLD',rationale:'Need research'},status:'NO_ACTION',group:'concluded',result:'HOLD',agent_steps:2,research:[{source:'fixture'}]}])});
             await page.locator('.decision-entry>summary').click();
-            assert.equal(await page.locator('.decision-timeline>li').count(),5);
-            assert(await page.locator('.decision-entry').innerText().then(s=>s.includes('观望')&&s.includes('失败')&&s.includes('Evidence is incomplete')));
+            assert.equal(await page.locator('.ledger-four>dt').count(),4);
+            await page.locator('.ledger-more>summary').first().click();
+            assert(await page.locator('.decision-entry').innerText().then(s=>s.includes('观望')&&s.includes('Evidence is incomplete')));
             assert.equal(await page.evaluate(()=>decisionStatusTitle('RISK_REJECTED')),'规则拒绝，未执行');
             assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth>innerWidth),false);
             await page.evaluate(async()=>{document.activeElement?.blur();window.scrollTo(0,0);await new Promise(requestAnimationFrame)});

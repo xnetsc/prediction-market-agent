@@ -263,7 +263,7 @@ class ArchitectureContractTests(unittest.TestCase):
             expected = {
                 "codex": "CODEX_MODEL",
                 "claude": "CLAUDE_MODEL",
-                "openai_compatible": "COMPATIBLE_MODEL",
+                "openrouter": "OPENROUTER_MODEL",
             }
             for plugin_name, field_name in expected.items():
                 configuration = catalog.get("decision_provider", plugin_name).configuration

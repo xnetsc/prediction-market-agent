@@ -12,7 +12,7 @@ def setup_guide(runtime, manifest, *, automatic_start):
         return {"kind":kind,"name":p["name"],"label":"打开 "+p["name"]}
     providers=[p for p in plugins.get("decision_provider",[]) if p["enabled"]]
     provider_ready=any(p.get("readiness",{}).get("ready",False) for p in providers)
-    add("models","连接至少一种 AI 模型服务","Codex、Claude 或兼容 API 可任选一种；并非每种都要配置。",provider_ready,
+    add("models","连接至少一种 AI 模型服务","Codex、Claude 或 OpenRouter 可任选一种；并非每种都要配置。",provider_ready,
         [plugin_action("decision_provider",p) for p in providers if not p.get("readiness",{}).get("ready")],
         [p["name"]+": "+reason for p in providers for reason in p.get("readiness",{}).get("reasons",[])])
     platforms=[p for p in plugins.get("api",[]) if p["enabled"]]

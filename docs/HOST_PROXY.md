@@ -1,12 +1,12 @@
 # 宿主机代理检测与转发
 
 本地一键启动在启动机器人容器前读取宿主机代理设置、验证容器可达性，再启动应用。检测结果由程序设置中的
-`shared_http_proxy=HOST` 作为统一代理使用。Codex、Claude、Binance、Polymarket 和标准研究插件的私有
+`shared_http_proxy=HOST` 作为统一代理使用。Codex、Claude、OpenRouter、Binance、Polymarket 和标准研究插件的私有
 代理字段默认 `INHERIT`，因此共用这一条路径；每个插件可改为 `DIRECT`、`HOST`、`ENVIRONMENT`、
 `SYSTEM`（仅原生 macOS）或明确的 HTTP/HTTPS URL，覆盖只影响该插件。界面显示的实际地址会去掉凭据。
 
-OpenAI 兼容 API 是例外：其 `COMPATIBLE_HTTP_PROXY` 默认 `DIRECT`，不读取统一代理。只有用户在这个插件
-自己的配置中明确填写代理方式或 URL 后，它才使用代理。
+OpenRouter 的 `OPENROUTER_HTTP_PROXY` 同样默认 `INHERIT`。其插件私有桥只让内部运行时到本机回环服务
+绕过代理；桥到 OpenRouter 的模型目录和推理请求仍使用解析后的统一或独立代理。
 
 ## 检测范围和顺序
 

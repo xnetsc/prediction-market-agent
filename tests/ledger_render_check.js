@@ -102,7 +102,7 @@ const now = 1789650000;
 const paused = { state: 'ai_paused', decision_capacity: { available: false, providers: {
     claude: { ready: false, kind: 'rate_limit', recovers_at: now + 8100, confirming: false },
     codex: { ready: false, kind: 'auth' } } },
-  decision_providers: { openai_compatible: { ready: false, reasons: ['请填写 API Key 和模型 ID'] } } };
+  decision_providers: { openrouter: { ready: false, reasons: ['请填写 API Key 和模型 ID'] } } };
 const pausedHtml = vm.runInContext('aiPauseHtml(setup, now)', Object.assign(context, { setup: paused, now }));
 expect('ai pause', pausedHtml, ['Claude：额度用完，预计 2 小时 15 分钟后恢复', 'Codex：登录失效，需要重新登录', '请填写 API Key 和模型 ID',
   '去处理', '不采集市场数据，也不产生决策记录', '立即重新检测']);

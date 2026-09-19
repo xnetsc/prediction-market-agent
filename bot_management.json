@@ -8,7 +8,7 @@
     "decision_provider": [
       "codex",
       "claude",
-      "openai_compatible"
+      "openrouter"
     ],
     "decision_strategy": [
       "general_agent"

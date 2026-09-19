@@ -3,7 +3,7 @@
     const views = {
         overview: ['运行概览', '查看运行状态与关键指标，管理各平台的暂停状态。', 'WORKSPACE / OVERVIEW'],
         decisions: ['决策账本', '从研究证据到执行结果，追溯每一次决策的完整过程。', 'WORKSPACE / DECISIONS'],
-        models: ['模型服务', '连接 Codex、Claude 或兼容 API，为机器人选择可用的模型。', 'CONFIGURATION / MODELS'],
+        models: ['模型服务', '连接 Codex、Claude 或 OpenRouter，为机器人选择可用的模型。', 'CONFIGURATION / MODELS'],
         plugins: ['插件中心', '按用途选择能力，了解它们如何配合，再配置需要的部分。', 'CONFIGURATION / PLUGINS'],
         settings: ['程序设置', '管理部署参数、数据位置与插件目录。', 'CONFIGURATION / SETTINGS'],
         security: ['安全与会话', '管理管理员 Passkey，以及已登录的设备和会话。', 'ACCOUNT / SECURITY']
