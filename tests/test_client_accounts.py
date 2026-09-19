@@ -9,11 +9,15 @@ import threading
 import time
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from prediction_market_agent.plugin_system.discovery import PluginInitializationContext
 from prediction_market_agent.plugins.providers import codex, claude
-from prediction_market_agent.plugins.providers._client_control import ClientControl
+from prediction_market_agent.plugins.providers._client_control import (
+    ClientControl,
+    _claude_usage_reading,
+    _codex_usage_reading,
+)
 from prediction_market_agent.plugins.providers._login_relay import BrowserLoginRelay, seal
 
 
@@ -327,3 +331,91 @@ client.chmod(0o700)
             spec.configuration.save({**spec.configuration.load(), f"{name.upper()}_MODEL": model})
             self.assertEqual(spec.factory(None).model, model)
             self.assertTrue(all(field.description for field in spec.configuration.fields))
+
+    def test_claude_uses_structured_short_and_weekly_windows(self):
+        _, control = self.plugin("claude")
+        now = time.time()
+        home = Path(control.environment()["HOME"])
+        cache = home / ".claude" / ".claude.json"
+        cache.write_text(json.dumps({
+            "oauthAccount": {"accountUuid": "fixture-account"},
+            "cachedUsageUtilization": {
+                "accountUuid": "fixture-account",
+                "fetchedAtMs": int(now * 1000),
+                "utilization": {
+                    "five_hour": {"utilization": 100,
+                                  "resets_at": "2099-09-19T12:00:00+00:00"},
+                    "seven_day": {"utilization": 82,
+                                  "resets_at": "2099-09-21T13:00:00+00:00"},
+                    "limits": [{"kind": "session", "percent": 100, "is_active": True,
+                                "resets_at": "2099-09-19T12:00:00+00:00"}],
+                },
+            },
+        }))
+        response = subprocess.CompletedProcess(
+            [], 0,
+            stdout=json.dumps({
+                "result": "You are currently using your subscription to power your Claude Code usage"
+            }),
+            stderr="",
+        )
+        with (patch("prediction_market_agent.plugins.providers._client_control.subprocess.run",
+                    return_value=response),
+              patch.object(control, "_claude_remote_usage", side_effect=ValueError("throttled"))):
+            usage = control._claude_usage()
+            quota = control.quota()
+        self.assertFalse(usage["available"])
+        self.assertEqual([item["label"] for item in usage["windows"]],
+                         ["5 小时窗口", "周额度"])
+        self.assertEqual([item["used_percent"] for item in usage["windows"]], [100, 82])
+        self.assertIn("最近一次成功读数", usage["note"])
+        self.assertIn("按不可用处理", usage["status_text"])
+        self.assertTrue(usage["degraded"])
+        self.assertAlmostEqual(usage["observed_at"], now, delta=1)
+        self.assertFalse(quota["available"])
+        self.assertEqual(quota["kind"], "rate_limit")
+
+    def test_missing_short_window_is_not_invented_for_codex_or_claude(self):
+        reset = int(time.time()) + 3600
+        codex_usage = _codex_usage_reading({
+            "ordinaryUsageAllowed": True,
+            "rateLimits": {
+                "primary": None,
+                "secondary": {"usedPercent": 45, "resetsAt": reset,
+                              "windowDurationMins": 7 * 24 * 60},
+            },
+        })
+        self.assertTrue(codex_usage["available"])
+        self.assertEqual([item["label"] for item in codex_usage["windows"]], ["周额度"])
+        claude_usage = _claude_usage_reading(
+            {"seven_day": {"utilization": 45,
+                           "resets_at": "2099-09-21T13:00:00+00:00"}},
+            source="fixture",
+        )
+        self.assertTrue(claude_usage["available"])
+        self.assertEqual([item["label"] for item in claude_usage["windows"]], ["周额度"])
+
+    def test_claude_usage_service_is_fixed_and_returns_structured_windows(self):
+        _, control = self.plugin("claude")
+        home = Path(control.environment()["HOME"])
+        (home / ".claude" / ".credentials.json").write_text(json.dumps({
+            "claudeAiOauth": {"accessToken": "fixture-private-token"}
+        }))
+        response = MagicMock()
+        response.__enter__.return_value.read.return_value = json.dumps({
+            "five_hour": {"utilization": 12,
+                          "resets_at": "2099-09-19T12:00:00+00:00"},
+            "seven_day": {"utilization": 34,
+                          "resets_at": "2099-09-21T13:00:00+00:00"},
+        }).encode()
+        opener = MagicMock()
+        opener.open.return_value = response
+        with patch("prediction_market_agent.plugins.providers._client_control.urllib.request.build_opener",
+                   return_value=opener):
+            usage = control._claude_remote_usage()
+        request = opener.open.call_args.args[0]
+        self.assertEqual(request.full_url, "https://api.anthropic.com/api/oauth/usage")
+        self.assertTrue(usage["available"])
+        self.assertEqual([item["label"] for item in usage["windows"]],
+                         ["5 小时窗口", "周额度"])
+        self.assertNotIn("fixture-private-token", json.dumps(usage))

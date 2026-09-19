@@ -15,8 +15,10 @@ import sys
 import tempfile
 import threading
 import time
+import urllib.error
 import urllib.request
 import uuid
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
@@ -48,6 +50,9 @@ CREDENTIAL_FILE_MAX_BYTES = 1_048_576
 
 USAGE_TIMEOUT_SECONDS = 45
 """Quota reads talk to the vendor, so they need more room than a local status check."""
+
+CLAUDE_USAGE_URL = "https://api.anthropic.com/api/oauth/usage"
+"""Claude Code's account-usage service; credentials still remain owned by the client plugin."""
 
 def client_configuration_loader(load, prefix: str):
     """Read pre-script configurations without altering credentials or private files."""
@@ -337,7 +342,13 @@ class ClientControl:
         try:
             reading = self._codex_usage() if self.name == "codex" else self._claude_usage()
         except (OSError, ValueError, subprocess.SubprocessError) as error:
-            return {"checked_at": started, "windows": [], "available": None, "error": str(error)[:300]}
+            if self.name == "claude":
+                return {"checked_at": started, "windows": [], "available": False,
+                        "degraded": True,
+                        "status_text": "额度状态暂时无法刷新；为避免超额请求，已按不可用处理",
+                        "error": str(error)[:300]}
+            return {"checked_at": started, "windows": [], "available": None,
+                    "error": str(error)[:300]}
         reading["checked_at"] = started
         reading.setdefault("error", "")
         return reading
@@ -382,25 +393,12 @@ class ClientControl:
             process.wait(timeout=5)
         if not isinstance(payload, dict):
             raise ValueError("客户端没有返回额度信息")
-        limits = payload.get("rateLimits") or {}
-        windows = []
-        for label, key in (("当前窗口", "primary"), ("次级窗口", "secondary")):
-            window = limits.get(key)
-            if not isinstance(window, dict):
-                continue
-            windows.append({
-                "label": label,
-                "used_percent": window.get("usedPercent"),
-                "resets_at": window.get("resetsAt"),
-                "window_minutes": window.get("windowDurationMins"),
-            })
-        return {
-            "available": payload.get("ordinaryUsageAllowed"),
-            "windows": windows,
-            "source": "codex app-server · account/rateLimits/read",
-        }
+        return _codex_usage_reading(payload)
 
     def _claude_usage(self) -> dict[str, Any]:
+        # Let the official client refresh/renew its own account state first. Print mode does not
+        # expose the structured windows on every release, so the sentence it returns is never
+        # treated as quota evidence by itself.
         completed = subprocess.run(
             [self.executable(), "-p", "/usage", "--output-format", "json"],
             env=self.environment(), stdin=subprocess.DEVNULL, capture_output=True, text=True,
@@ -411,24 +409,66 @@ class ClientControl:
         except json.JSONDecodeError as error:
             raise ValueError("客户端没有返回可解析的额度信息") from error
         report = str(payload.get("result", ""))
+        try:
+            return self._claude_remote_usage()
+        except (OSError, ValueError, KeyError, TypeError, urllib.error.HTTPError):
+            cached = self._claude_cached_usage()
+            if cached:
+                cached["note"] = "额度服务本次未返回新数据；显示 Claude Code 最近一次成功读数"
+                cached["available"] = False
+                cached["degraded"] = True
+                cached["status_text"] = "额度服务暂时未返回新数据；为避免超额请求，已按不可用处理"
+                return cached
+
+        # Compatibility with client versions that print the windows as text but do not maintain
+        # the structured cache.
         windows = []
         for line in report.splitlines():
             match = re.match(r"\s*(.+?)\s*[:：]\s*(\d+(?:\.\d+)?)%\s*used(?:\s*[·.]\s*resets\s*(.+))?", line)
             if match:
-                windows.append({
-                    "label": match.group(1).strip(),
-                    "used_percent": float(match.group(2)),
-                    "resets_text": (match.group(3) or "").strip(),
-                })
-        available = None
-        if windows:
-            available = max(float(w["used_percent"]) for w in windows) < 100
-        return {
-            "available": available,
-            "windows": windows,
-            "note": report.splitlines()[0].strip() if report else "",
-            "source": "claude · /usage",
-        }
+                windows.append({"label": match.group(1).strip(),
+                                "used_percent": float(match.group(2)),
+                                "resets_text": (match.group(3) or "").strip()})
+        if not windows:
+            raise ValueError("Claude Code 未返回 5 小时或周额度窗口，请稍后刷新")
+        return {"available": max(float(w["used_percent"]) for w in windows) < 100,
+                "windows": windows, "source": "claude · /usage"}
+
+    def _claude_remote_usage(self) -> dict[str, Any]:
+        credential_path = self.directory("AUTH") / ".claude" / ".credentials.json"
+        credentials = json.loads(credential_path.read_text(encoding="utf-8"))
+        token = str((credentials.get("claudeAiOauth") or {}).get("accessToken") or "")
+        if not token:
+            raise ValueError("Claude Code 登录凭据中没有可用访问令牌")
+        request = urllib.request.Request(
+            CLAUDE_USAGE_URL,
+            headers={"Authorization": "Bearer " + token,
+                     "anthropic-beta": "oauth-2025-04-20",
+                     "User-Agent": "prediction-market-agent/1"},
+        )
+        proxy = self.proxy_settings().get("proxy", "")
+        opener = urllib.request.build_opener(
+            urllib.request.ProxyHandler({"http": proxy, "https": proxy} if proxy else {})
+        )
+        with opener.open(request, timeout=USAGE_TIMEOUT_SECONDS) as response:
+            usage = json.loads(response.read(1024 * 1024))
+        return _claude_usage_reading(usage, source="Claude Code 额度服务")
+
+    def _claude_cached_usage(self) -> dict[str, Any] | None:
+        cache_path = self.directory("AUTH") / ".claude" / ".claude.json"
+        if not cache_path.exists():
+            return None
+        document = json.loads(cache_path.read_text(encoding="utf-8"))
+        cached = document.get("cachedUsageUtilization")
+        if not isinstance(cached, dict) or not isinstance(cached.get("utilization"), dict):
+            return None
+        account = str((document.get("oauthAccount") or {}).get("accountUuid") or "")
+        if account and str(cached.get("accountUuid") or "") != account:
+            return None
+        observed = _milliseconds_to_seconds(cached.get("fetchedAtMs"))
+        return _claude_usage_reading(
+            cached["utilization"], source="Claude Code 本地额度缓存", observed_at=observed
+        )
 
     def quota(self) -> dict[str, Any]:
         """Whether this account can serve a request now and, when it cannot, when it can again.
@@ -440,6 +480,10 @@ class ClientControl:
         reading = self.usage()
         windows = [w for w in reading.get("windows") or [] if isinstance(w, dict)]
         available = reading.get("available")
+        if reading.get("degraded"):
+            return {"available": False, "kind": "rate_limit", "recovers_at": time.time() + 300,
+                    "detail": str(reading.get("status_text") or reading.get("error") or
+                                  "额度状态暂时无法刷新，已按不可用处理"), "signed_in": True}
         if available is None:
             signed_in = self.authenticated()
             if signed_in is False:
@@ -809,6 +853,84 @@ def _percent(value: Any) -> float:
         return float(value)
     except (TypeError, ValueError):
         return 0.0
+
+
+def _milliseconds_to_seconds(value: Any) -> float:
+    try:
+        stamp = float(value)
+    except (TypeError, ValueError):
+        return 0.0
+    return stamp / 1000 if stamp > 1e12 else stamp if stamp > 0 else 0.0
+
+
+def _iso_timestamp(value: Any) -> float:
+    if not isinstance(value, str) or not value.strip():
+        return _milliseconds_to_seconds(value)
+    try:
+        return datetime.fromisoformat(value.strip().replace("Z", "+00:00")).timestamp()
+    except ValueError:
+        return 0.0
+
+
+def _duration_label(value: Any, fallback: str) -> str:
+    try:
+        minutes = int(value)
+    except (TypeError, ValueError):
+        return fallback
+    if minutes == 300:
+        return "5 小时窗口"
+    if minutes == 7 * 24 * 60:
+        return "周额度"
+    if minutes > 0 and minutes % (24 * 60) == 0:
+        return f"{minutes // (24 * 60)} 天窗口"
+    if minutes > 0 and minutes % 60 == 0:
+        return f"{minutes // 60} 小时窗口"
+    return fallback
+
+
+def _codex_usage_reading(payload: dict[str, Any]) -> dict[str, Any]:
+    limits = payload.get("rateLimits") or {}
+    windows = []
+    for fallback_label, key in (("当前窗口", "primary"), ("次级窗口", "secondary")):
+        window = limits.get(key)
+        if not isinstance(window, dict) or not isinstance(window.get("usedPercent"), (int, float)):
+            continue
+        duration = window.get("windowDurationMins")
+        windows.append({"label": _duration_label(duration, fallback_label),
+                        "used_percent": window.get("usedPercent"),
+                        "resets_at": window.get("resetsAt"),
+                        "window_minutes": duration})
+    available = payload.get("ordinaryUsageAllowed")
+    if available is None and windows:
+        available = all(_percent(window["used_percent"]) < 100 for window in windows)
+    return {"available": available, "windows": windows,
+            "source": "codex app-server · account/rateLimits/read"}
+
+
+def _claude_usage_reading(
+    payload: dict[str, Any], *, source: str, observed_at: float = 0.0
+) -> dict[str, Any]:
+    windows = []
+    for key, label in (("five_hour", "5 小时窗口"), ("seven_day", "周额度")):
+        window = payload.get(key)
+        if not isinstance(window, dict) or not isinstance(window.get("utilization"), (int, float)):
+            continue
+        windows.append({"label": label, "used_percent": float(window["utilization"]),
+                        "resets_at": _iso_timestamp(window.get("resets_at"))})
+    if not windows:
+        raise ValueError("Claude Code 没有返回 5 小时或周额度窗口")
+    now = time.time()
+    active_limits = [item for item in payload.get("limits") or []
+                     if isinstance(item, dict) and item.get("is_active") is True
+                     and (_iso_timestamp(item.get("resets_at")) <= 0
+                          or _iso_timestamp(item.get("resets_at")) > now)]
+    exhausted = [window for window in windows if _percent(window["used_percent"]) >= 100
+                 and (not window["resets_at"] or window["resets_at"] > now)]
+    reading = {"available": not bool(active_limits or exhausted),
+               "windows": windows, "source": source}
+    if observed_at > 0:
+        reading["observed_at"] = observed_at
+    return reading
 
 
 def _window_reset(window: dict[str, Any]) -> float:

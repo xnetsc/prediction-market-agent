@@ -227,7 +227,8 @@ function renderAccountUsage(card,s,item,name){
             if(usage.key.expires_at)controlNode('p','Key 到期时间：'+new Date(usage.key.expires_at).toLocaleString(),box).className='description';
         }
     }else{
-        controlNode('p',(usage.available===false?'额度已用尽':usage.available===true?'额度可用':'额度未知')+(usage.note?' · '+usage.note:''),box).className='description';
+        const usageStatus=usage.status_text||((usage.available===false?'额度已用尽':usage.available===true?'额度可用':'额度未知')+(usage.note?' · '+usage.note:''));
+        controlNode('p',usageStatus,box).className='description';
         if((usage.windows||[]).length){
             const rows=controlNode('ul','',box);rows.className='usage-windows';
             for(const window of usage.windows){
@@ -236,8 +237,8 @@ function renderAccountUsage(card,s,item,name){
             }
         }
     }
-    const model=s.model||(openrouter?'未选择':'客户端默认');
-    controlNode('p','模型：'+model+(usage.checked_at?' · 查询于 '+new Date(usage.checked_at*1000).toLocaleString()+(usage.source?' · '+usage.source:''):''),box).className='description usage-stamp';
+    const model=s.model||(openrouter?'未选择':'客户端默认'),usageTime=usage.observed_at||usage.checked_at;
+    controlNode('p','模型：'+model+(usageTime?' · 数据于 '+new Date(usageTime*1000).toLocaleString()+(usage.source?' · '+usage.source:''):''),box).className='description usage-stamp';
     const action=(s.actions||[]).find(candidate=>candidate.id==='refresh_usage');
     if(action){
         const toolbar=controlNode('div','',box);toolbar.className='toolbar account-actions';

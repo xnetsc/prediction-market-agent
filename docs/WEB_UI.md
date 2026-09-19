@@ -70,6 +70,9 @@ Codex 和 Claude 的卡片上各有“导出登录凭据 / 导入登录凭据”
 Codex、Claude 与 OpenRouter 的配置顶部统一显示“模型、凭据与网络连接”。Codex/Claude 各自的
 `CODEX_HTTP_PROXY` / `CLAUDE_HTTP_PROXY` 在这个首要分区直接显示：默认 `INHERIT`，可改为
 `DIRECT` 或该客户端专用代理。客户端目录、登录回调和升级周期放在折叠的高级设置中。
+账号区分别列出服务端实际返回的短时与周额度窗口、使用百分比、重置时间和数据时间；计划没有某个窗口时
+不会显示占位窗口。Claude 额度服务暂时限流时显示 Claude Code 最近一次成功缓存，并明确标注，不用订阅
+计费提示代替额度结果。
 
 ### 连接 OpenRouter
 
