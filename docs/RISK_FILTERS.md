@@ -6,14 +6,16 @@
 
 | 类别 | 管什么 | 问的问题 |
 | --- | --- | --- |
-| **Agent 行为风控** `agent_policy` | LLM 发起的一切工具调用。工具里既有市场 API（下单、买卖），也有网页搜索、执行命令等其它工具 | 这个 Agent 被允许发起这类调用吗 |
+| **Agent 行为风控** `agent_policy` | LLM 通过框架注入协议发起的预测市场业务工具调用 | 这个 Agent 被允许发起这类业务调用吗 |
 | **业务风控** `risk` | 一切市场 API 动作，**包含只读**：下单、撤单、赎回、转账，以及查行情、查订单簿、列标的 | 这次调用可以对市场发生吗 |
 
 分界线是**谁在问**和**发生了什么**，不是读写：
 
 - 业务风控挂在市场 API 插件上，与调用者无关——模型提的、结算扫单产生的、手动触发一轮产生的，都要过。
   只读调用也要过：它照样消耗平台的限速额度，也决定了这一轮后面能看到什么。
-- Agent 行为风控挂在工具调用上，覆盖模型能碰的全部工具，其中只有一部分是市场 API。
+- Agent 行为风控挂在框架执行的业务工具调用上，其中只有一部分是市场 API。Codex/Claude 自己的搜索、
+  文件、命令、skills 和插件由官方 CLI 的 sandbox、permission mode、rules/hooks 与用户配置管理，不经过
+  本框架冒充或二次实现，因此也不会被 `agent_policy` 虚假宣称已拦截。
 
 一笔由模型提出的下单会**先后经过两类检查**，这是有意的重复而不是冗余：前者管权限，后者管后果。
 
@@ -72,7 +74,6 @@
 | --- | --- |
 | 平台与市场 | `LIST_PLATFORMS`、`LIST_TOPICS`、`GET_TOPIC`、`GET_ORDER_BOOK`、`SYNC_TIME` |
 | 行情与比较 | `GET_KLINES`、`REFRESH_MARKET`、`SEARCH_MARKETS`、`COMPARE_OUTCOMES` |
-| 外部信息 | `SEARCH_WEB`、`FETCH_URL` |
 | 账务与历史 | `READ_ACCOUNT`（本机账本）、`RECALL_HISTORY` |
 | 平台资金 | `ACCOUNT_FUNDS`（平台此刻能花多少）、`ENSURE_FUNDS`（我要有这么多）、`FUNDING_STATUS`（那次请求后来怎样） |
 | 结算判定 | `OUTCOME_WON` |
@@ -86,13 +87,15 @@ Polymarket 不再接受配置本金，插件直接查询钱包抵押品余额，
 
 这些都是**账户状态，不是风控上限**——框架不拿它们当用户定义的仓位规则。模型 `READ_ACCOUNT` 看到的
 `starting_capital` 和 `net_result` 以账户初始化时的可用金额为基准。Binance 在钱包和预测账户之间双向划转，
-Polymarket 直接用钱包里的抵押品交易、只支持转出。
+Polymarket 直接用钱包里的抵押品交易；入金由插件生成并核验官方 Bridge 路线，转出由插件按 Bridge
+实时支持的目标链与代币构造 quote/withdraw 路线。
 
 开启纸面交易时，所有平台统一改用 `paper_trading_funds` 作为明确标记的 simulated 金额，并写入独立纸面
 状态文件；关闭后恢复各平台自己的实盘资金来源。纸面金额仍不是硬性风控规则。
 
-`TRANSFER` 是运行中的资金通路：`INBOUND` 给交易账户入金；`OUTBOUND` 把卖出和赎回赚到的收回钱包。
-各平台支持哪个方向见 `LIST_PLATFORMS`——Polymarket 只有 `OUTBOUND`。
+`TRANSFER` 是运行中的资金通路：`INBOUND` 给交易账户入金；`OUTBOUND` 把卖出和赎回赚到的转到指定
+钱包。各平台支持哪个自动方向见 `LIST_PLATFORMS`。Polymarket 的外部充值需要先向 Bridge 取得专属地址
+并核验源链交易，因此由资金管理页和 `ENSURE_FUNDS` 请求链承载；通用 `TRANSFER` 不猜充值合约。
 
 `READ_ACCOUNT` 读的是**本机账本**；要问平台此刻真正能花多少，用 `ACCOUNT_FUNDS`，它的 `source` 会
 说这个数字是平台确认的还是配置里填的。资金请求的完整协议（状态、`request_id`、超时、双向理由）见
@@ -100,6 +103,10 @@ Polymarket 直接用钱包里的抵押品交易、只支持转出。
 
 这些工具**不绕过任何过滤**：读经受保护的插件、写经网关，每一次都过业务风控；工具调用本身进来时先过
 Agent 行为风控。`agent_actions` 的交易动作白名单管的正是这些调用。
+
+通用网页搜索、网页读取、文件、命令和 skills 不在这张业务工具表中；它们属于官方 CLI。要限制这些能力，
+配置 Codex/Claude 自身的 sandbox、权限、rules/hooks 或企业策略，而不是在本框架填一个实际看不到这些
+调用的白名单。
 
 ## 通用协调器
 

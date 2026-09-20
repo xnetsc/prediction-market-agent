@@ -228,13 +228,12 @@ SEED_DISCOVERY_PRIORS: tuple[DiscoveryPrior, ...] = (
 
 @dataclass(frozen=True)
 class DiscoveryBudget:
-    """How much of the platform's read allowance one discovery pass may spend."""
+    """Transport and resource guards; none of these is a target candidate count."""
 
-    survey_topics: int = 200
-    shortlist_topics: int = 24
-    detail_lookups: int = 12
-    book_lookups: int = 12
-    agent_tool_steps: int = 14
+    search_result_limit: int = 100
+    detail_read_safety_limit: int = 100
+    book_read_safety_limit: int = 100
+    agent_tool_steps: int = 40
     """How much the agent may look up for itself, on top of what the framework prefetched.
 
     Six covered the shortlist's basics only if nothing was prefetched, which meant most candidates
@@ -246,25 +245,23 @@ class DiscoveryBudget:
 
     def __post_init__(self) -> None:
         for name in (
-            "survey_topics",
-            "shortlist_topics",
-            "detail_lookups",
-            "book_lookups",
+            "search_result_limit",
+            "detail_read_safety_limit",
+            "book_read_safety_limit",
             "agent_tool_steps",
             "exploration_slots",
             "cooldown_seconds",
         ):
             if int(getattr(self, name)) < 0:
                 raise ValueError(f"Discovery budget {name} cannot be negative")
-        if self.survey_topics < 1 or self.shortlist_topics < 1:
-            raise ValueError("Discovery budget must survey and shortlist at least one topic")
+        if self.search_result_limit < 1:
+            raise ValueError("Discovery budget must expose at least one search result")
 
     def to_dict(self) -> dict[str, int]:
         return {
-            "survey_topics": self.survey_topics,
-            "shortlist_topics": self.shortlist_topics,
-            "detail_lookups": self.detail_lookups,
-            "book_lookups": self.book_lookups,
+            "search_result_limit": self.search_result_limit,
+            "detail_read_safety_limit": self.detail_read_safety_limit,
+            "book_read_safety_limit": self.book_read_safety_limit,
             "agent_tool_steps": self.agent_tool_steps,
             "exploration_slots": self.exploration_slots,
             "cooldown_seconds": self.cooldown_seconds,

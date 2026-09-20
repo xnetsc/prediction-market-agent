@@ -9,6 +9,10 @@
       "../plugins/decision_provider",
       "../src/prediction_market_agent/plugins/providers"
     ],
+    "decision_evaluator": [
+      "../plugins/decision_evaluator",
+      "../src/prediction_market_agent/plugins/evaluators"
+    ],
     "decision_strategy": [
       "../plugins/decision_strategy",
       "../src/prediction_market_agent/plugins/strategies"

@@ -41,6 +41,7 @@ class TradingEngine(MarketEvaluationMixin, ExecutionActionsMixin):
         self.api_registry = components.api_registry
         self.platforms = components.platforms
         self.provider = components.provider
+        self.evaluator = components.evaluator
         self.research_contributions = components.research_contributions
         self.discovery_strategy = components.discovery_strategy
         # What the operator attached to their money. Collected by the platform plugins, understood
@@ -52,6 +53,9 @@ class TradingEngine(MarketEvaluationMixin, ExecutionActionsMixin):
             memory=self.memory,
             strategy=components.discovery_strategy,
             provider=components.provider,
+            evaluator=components.evaluator,
+            max_scan_seconds=config.discovery_max_scan_seconds,
+            max_scan_pages=config.discovery_max_pages,
             evolution_enabled=components.strategy_evolution,
             cross_platform_search=self.search_market_candidates,
             research_contributions=components.research_contributions,
@@ -69,52 +73,41 @@ class TradingEngine(MarketEvaluationMixin, ExecutionActionsMixin):
     def run_once(self) -> dict[str, float | int | bool | str]:
         with self._cycle_lock:
             for runtime in self.platforms.values():
-                maximum_topics, maximum_decisions = runtime.plugin.cycle_limits()
-                topics = self._collect_platform_topics(runtime, maximum_topics)
-                self._process_platform_topics(runtime, topics, maximum_decisions)
+                topics = self._collect_platform_topics(runtime)
+                self._process_platform_topics(runtime, topics)
             return self.status()
 
-    def run_platform_once(
-        self, platform: str, maximum_topics: int, maximum_decisions: int
-    ) -> dict[str, float | int | bool | str]:
+    def run_platform_once(self, platform: str) -> dict[str, float | int | bool | str]:
         """Execute one platform cycle when invoked by that platform plugin runtime."""
-        if maximum_topics <= 0 or maximum_decisions <= 0:
-            raise ValueError("Platform cycle limits must be positive")
         with self._cycle_lock:
             try:
                 runtime = self.platforms[platform]
             except KeyError as error:
                 raise ValueError(f"Unknown active platform: {platform}") from error
-            topics = self._collect_platform_topics(runtime, maximum_topics)
-            self._process_platform_topics(runtime, topics, maximum_decisions)
+            topics = self._collect_platform_topics(runtime)
+            self._process_platform_topics(runtime, topics)
             return self.status()
 
     def process_platform_scan(
-        self, platform: str, topics: tuple[Topic, ...], maximum_decisions: int
+        self, platform: str, topics: tuple[Topic, ...]
     ) -> dict[str, float | int | bool | str]:
         """Consume a normalized scan event emitted by one platform plugin."""
-        if maximum_decisions <= 0:
-            raise ValueError("Platform decision limit must be positive")
         with self._cycle_lock:
             try:
                 runtime = self.platforms[platform]
             except KeyError as error:
                 raise ValueError(f"Unknown active platform: {platform}") from error
-            self._process_platform_topics(runtime, list(topics), maximum_decisions)
+            self._process_platform_topics(runtime, list(topics))
             return self.status()
 
-    def discover_platform_topics(
-        self, platform: str, maximum_topics: int
-    ) -> tuple[Topic, ...]:
+    def discover_platform_topics(self, platform: str) -> tuple[Topic, ...]:
         """Framework-side market discovery, invoked by a platform runtime on its own schedule."""
-        if maximum_topics <= 0:
-            raise ValueError("Platform topic limit must be positive")
         with self._cycle_lock:
             try:
                 runtime = self.platforms[platform]
             except KeyError as error:
                 raise ValueError(f"Unknown active platform: {platform}") from error
-            return tuple(self._collect_platform_topics(runtime, maximum_topics))
+            return tuple(self._collect_platform_topics(runtime))
 
     def can_decide(self, platform: str) -> bool:
         """Whether work that exists to reach a decision should start now.
@@ -133,9 +126,7 @@ class TradingEngine(MarketEvaluationMixin, ExecutionActionsMixin):
             )
         return bool(reading["available"])
 
-    def _collect_platform_topics(
-        self, runtime: PlatformRuntime, maximum_topics: int
-    ) -> list[Topic]:
+    def _collect_platform_topics(self, runtime: PlatformRuntime) -> list[Topic]:
         if not self.can_decide(runtime.plugin.name):
             return []
         # Before anything is collected: take what the operator has said since last time, and ask
@@ -157,7 +148,6 @@ class TradingEngine(MarketEvaluationMixin, ExecutionActionsMixin):
             self.discovery.discover(
                 platform=runtime.plugin.name,
                 plugin=runtime.plugin,
-                maximum_topics=maximum_topics,
             )
         )
 
@@ -279,7 +269,11 @@ class TradingEngine(MarketEvaluationMixin, ExecutionActionsMixin):
         """
         waited_ms = max(0, int(time.time() * 1000) - int(entry.get("asked_at", 0) or 0))
         remaining = max(0, int(detail.topic.end_time_ms / 1000 - time.time()))
+        partial = str(getattr(answer, "state", "")) == "partial"
+        requested = float(getattr(answer, "requested", 0) or 0)
+        available = float(getattr(answer, "available", 0) or 0)
         return {
+            "continuation_of_decision_id": entry.get("decision_id"),
             "notice": (
                 "A reminder, not a new opportunity. Earlier you stopped short on this market and "
                 "asked for funds. You have looked at other things since and do not remember this; "
@@ -299,20 +293,34 @@ class TradingEngine(MarketEvaluationMixin, ExecutionActionsMixin):
             "how_long_this_market_still_has": self._elapsed_phrase(remaining * 1000),
             "the_answer": answer.to_dict(),
             "what_to_decide": (
-                "Given how long that took and what the answer turned out to be, is the thing you "
-                "wanted to do still worth doing? Compare your reason against the prices in front "
-                "of you now, which have been re-read since you asked. A long wait is itself "
-                "evidence: an edge that depended on acting quickly is probably gone. If it no "
-                "longer holds, say so and HOLD rather than completing a trade you would not open "
-                "today."
+                (
+                    f"Only {available:.6f} of the requested {requested:.6f} is available; "
+                    f"{max(0.0, requested - available):.6f} remains unfunded. Decide exactly once "
+                    "from the current market. Choose one: (1) continue with the available amount "
+                    "and ask for nothing more; (2) do not execute now, call ENSURE_FUNDS with the "
+                    "exact target balance still required, and wait; or (3) execute a deliberately "
+                    "staged amount now and also call ENSURE_FUNDS for that target. For option 3, "
+                    "describe the current order as a staged position, not completion; when the "
+                    "rest arrives another fresh decision will see the existing position and must "
+                    "not mechanically fill the remainder. If the opportunity is gone, HOLD. "
+                    "Partial funding is not permission to claim the target is ready."
+                ) if partial else (
+                    "Given how long that took and what the answer turned out to be, is the thing "
+                    "you wanted to do still worth doing? Compare your reason against the prices "
+                    "in front of you now, which have been re-read since you asked. A long wait is "
+                    "itself evidence: an edge that depended on acting quickly is probably gone. "
+                    "If it no longer holds, say so and HOLD rather than completing a trade you "
+                    "would not open today."
+                )
             ),
         }
 
-    def _process_platform_topics(
-        self, runtime: PlatformRuntime, topics: list[Topic], maximum_decisions: int
-    ) -> None:
+    def _process_platform_topics(self, runtime: PlatformRuntime, topics: list[Topic]) -> None:
         self._decisions_this_cycle = 0
-        self._max_decisions_this_cycle = maximum_decisions
+        # The core's explicit resource guard is the only hard attempt ceiling; the queue normally ends first
+        # because no selected work remains or the bounded cycle time expires.
+        self._max_decisions_this_cycle = self.config.decision_max_attempts
+        cycle_started = time.monotonic()
         # Settling what is already held needs no model, and money already committed is owed its
         # outcome whether or not anything can decide today.
         if not self.can_decide(runtime.plugin.name):
@@ -324,15 +332,21 @@ class TradingEngine(MarketEvaluationMixin, ExecutionActionsMixin):
         self._resume_funded_decisions(runtime)
         self._settle_open_positions(runtime)
         eligible = self.decision_strategy.select_topics(topics)
+        queue = self._plan_outcomes(runtime, eligible)
         LOGGER.info(
-            "platform=%s scanned=%d candidates=%d provider=%s",
+            "platform=%s scanned=%d candidates=%d outcomes=%d provider=%s safety_limit=%d",
             runtime.plugin.name,
             len(topics),
             len(eligible),
+            len(queue),
             self.provider.name,
+            self._max_decisions_this_cycle,
         )
-        for topic in eligible:
-            if self._decisions_this_cycle >= maximum_decisions:
+        for topic, detail, market, outcome, seconds_remaining in queue:
+            if self._decisions_this_cycle >= self._max_decisions_this_cycle:
+                break
+            if time.monotonic() - cycle_started >= self.config.decision_max_cycle_seconds:
+                LOGGER.info("platform=%s yielding queued decisions at the cycle time guard", runtime.plugin.name)
                 break
             # A limit reached on one topic is reached for all of them: the rest of the scan
             # would only collect data and write a failed record apiece.
@@ -344,11 +358,14 @@ class TradingEngine(MarketEvaluationMixin, ExecutionActionsMixin):
             # nobody has written anything, which is almost always.
             self._catch_up_on_notes(runtime)
             try:
-                self._evaluate_topic(runtime, topic)
+                self._evaluate_outcome(
+                    runtime, topic, detail, market, outcome, seconds_remaining
+                )
             except (KeyError, ValueError, RuntimeError, ExecutionError) as error:
                 LOGGER.warning(
-                    "skip %s topic %s: %s",
+                    "skip %s outcome %s in topic %s: %s",
                     runtime.plugin.name,
+                    outcome.outcome_id,
                     topic.topic_id,
                     error,
                 )
@@ -437,6 +454,8 @@ class TradingEngine(MarketEvaluationMixin, ExecutionActionsMixin):
                 sum(runtime.state.equity for runtime in self.platforms.values()), 6
             ),
             "decision_provider": self.provider.name,
+            "decision_evaluators": list(self.evaluator.names),
+            "unavailable_decision_evaluators": self.evaluator.unavailable,
             "decision_strategy": {
                 "path": str(self.decision_strategy.path),
                 "sha256": self.decision_strategy.sha256,

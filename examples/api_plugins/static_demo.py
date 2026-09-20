@@ -81,12 +81,11 @@ class StaticDemoPlugin:
         supported_transfer_directions=("INBOUND", "OUTBOUND"),
     )
 
-    def __init__(self, base_url, api_token, maximum_topics=10, maximum_decisions=6, page_size=100):
+    def __init__(self, base_url, api_token, page_size=100):
         parsed = urllib.parse.urlparse(base_url)
         if parsed.scheme not in {"http", "https"} or not parsed.hostname:
             raise ValueError("BASE_URL must be an HTTP(S) URL")
         self._write_transport = ExampleHttpWriteTransport(base_url, api_token)
-        self._cycle_limits = (maximum_topics, maximum_decisions)
         self._page_size = page_size
 
     def sync_time(self):
@@ -142,9 +141,6 @@ class StaticDemoPlugin:
     def configuration_manifest(self):
         return {"external_network": True, "api_token_present": bool(self._write_transport.token)}
 
-    def cycle_limits(self):
-        return self._cycle_limits
-
     def topic_page_size(self):
         return self._page_size
 
@@ -165,8 +161,6 @@ def initialize_plugin(context: PluginInitializationContext) -> PluginSpec:
             PluginConfigField("BASE_URL", "服务 URL", "string", "实现示例 quote/order/cancel/redeem/transfer JSON 端点的 HTTP(S) 服务根地址。", required=True),
             PluginConfigField("API_TOKEN", "API Token", "secret", "示例服务 Authorization Bearer 凭证；原样交给远端验证。"),
             PluginConfigField("SCAN_INTERVAL_SECONDS", "扫描间隔", "integer", "示例平台定时扫描间隔秒数。", default=60),
-            PluginConfigField("MAX_TOPICS_PER_CYCLE", "主题上限", "integer", "示例平台每轮最多提交的主题数。", default=10),
-            PluginConfigField("MAX_DECISIONS_PER_CYCLE", "决策上限", "integer", "示例平台事件进入通用循环后的最大决策数。", default=6),
             PluginConfigField("TOPIC_PAGE_SIZE", "分页大小", "integer", "示例平台每次列表请求的记录数。", default=100),
         ),
         load_callback=load,
@@ -183,8 +177,6 @@ def initialize_plugin(context: PluginInitializationContext) -> PluginSpec:
         values = configuration.load()
         instance = StaticDemoPlugin(
             values["BASE_URL"], values.get("API_TOKEN", ""),
-            int(values["MAX_TOPICS_PER_CYCLE"]),
-            int(values["MAX_DECISIONS_PER_CYCLE"]),
             int(values["TOPIC_PAGE_SIZE"]),
         )
         instances.append(instance)
@@ -200,8 +192,6 @@ def initialize_plugin(context: PluginInitializationContext) -> PluginSpec:
             values = configuration.load()
             if min(
                 int(values["SCAN_INTERVAL_SECONDS"]),
-                int(values["MAX_TOPICS_PER_CYCLE"]),
-                int(values["MAX_DECISIONS_PER_CYCLE"]),
                 int(values["TOPIC_PAGE_SIZE"]),
             ) <= 0:
                 raise ValueError("Example runtime numbers must be positive")
@@ -227,8 +217,8 @@ def initialize_plugin(context: PluginInitializationContext) -> PluginSpec:
         def run():
             while not stop_event.is_set():
                 # This plugin owns the schedule only; the framework decides what to look at.
-                topics = discover(int(values["MAX_TOPICS_PER_CYCLE"]))
-                submit(topics, int(values["MAX_DECISIONS_PER_CYCLE"]))
+                topics = discover()
+                submit(topics)
                 if stop_event.wait(interval):
                     break
 

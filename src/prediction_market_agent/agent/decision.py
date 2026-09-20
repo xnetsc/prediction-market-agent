@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import math
 import time
+from contextlib import nullcontext
 from dataclasses import asdict, dataclass
 from typing import Any, Callable, Protocol
 
@@ -542,7 +543,9 @@ class FallbackDecisionProvider:
                 continue
             started = time.monotonic()
             try:
-                result = call(provider)
+                session = getattr(getattr(provider, "backend", None), "session", None)
+                with session() if callable(session) else nullcontext():
+                    result = call(provider)
             except DecisionProviderError as error:
                 kind = self.health.record_failure(provider.name, str(error))
                 errors[provider.name] = f"[{kind}] {error}"

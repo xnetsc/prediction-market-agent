@@ -245,11 +245,9 @@ class RobotRuntimeManager:
             if start_runtimes:
                 def handle_business_event(event: Any) -> Any:
                     if isinstance(event, PlatformDiscoveryEvent):
-                        return engine.discover_platform_topics(
-                            event.platform, event.maximum_topics
-                        )
+                        return engine.discover_platform_topics(event.platform)
                     return engine.process_platform_scan(
-                        event.platform, event.topics, event.maximum_decisions
+                        event.platform, event.topics
                     )
 
                 events = RobotEventLoop(handle_business_event)
@@ -266,7 +264,6 @@ class RobotRuntimeManager:
 
                     def submit_scan(
                         topics: tuple[Any, ...],
-                        maximum_decisions: int,
                         *,
                         platform: str = name,
                     ) -> dict[str, Any]:
@@ -274,17 +271,16 @@ class RobotRuntimeManager:
                             PlatformScanEvent(
                                 platform=platform,
                                 topics=tuple(topics),
-                                maximum_decisions=maximum_decisions,
                             )
                         )
 
                     def discover_markets(
-                        maximum_topics: int, *, platform: str = name
+                        *, platform: str = name
                     ) -> tuple[Any, ...]:
                         """Framework-owned discovery; the plugin only decides when to ask."""
                         return events.submit(
                             PlatformDiscoveryEvent(
-                                platform=platform, maximum_topics=maximum_topics
+                                platform=platform
                             )
                         )
 

@@ -8,8 +8,10 @@ to read, or a request with the buttons it wants offered and the words on them.
 from __future__ import annotations
 
 import tempfile
+import time
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 
 from prediction_market_agent.core.config import Config
 from prediction_market_agent.plugin_system.discovery import PluginSpec, validated_notices
@@ -37,6 +39,13 @@ class NoticeShapeTests(unittest.TestCase):
         }])
         self.assertEqual(notice["action_label"], "批准并转账")
         self.assertEqual(notice["dismiss_label"], "拒绝")
+
+    def test_a_permanent_operation_can_opt_out_of_the_attention_banner(self) -> None:
+        [notice] = validated_notices([{
+            "key": "deposit", "title": "Deposit", "kind": "display",
+            "content": {}, "attention": False,
+        }])
+        self.assertIs(notice["attention"], False)
 
     def test_a_request_with_no_label_is_refused_rather_than_drawn(self) -> None:
         """A button with no words is one the operator cannot answer, so this fails loudly."""
@@ -182,6 +191,7 @@ class CredentialHonestyTests(unittest.TestCase):
         self.assertEqual(fields["POLYMARKET_GAMMA_URL"], PRODUCTION.gamma_url)
         self.assertEqual(fields["POLYMARKET_CLOB_URL"], PRODUCTION.clob_url)
         self.assertEqual(fields["POLYMARKET_RELAYER_URL"], PRODUCTION.relayer_url)
+        self.assertEqual(fields["POLYMARKET_BRIDGE_URL"], "https://bridge.polymarket.com")
         self.assertEqual(fields["POLYMARKET_CHAIN_ID"], PRODUCTION.chain_id)
 
 
@@ -204,6 +214,22 @@ class AButtonCanSayItIsNotUsableYetTests(unittest.TestCase):
         self.assertFalse(notice["action_disabled"])
         self.assertEqual(notice["action_note"], "")
 
+    def test_a_notice_select_keeps_bound_labels_and_values(self) -> None:
+        [notice] = validated_notices([{
+            "key": "withdraw", "title": "转出", "kind": "confirm", "content": {},
+            "action_label": "确认并转出", "action_fields": [{
+                "name": "destination", "label": "目标网络与币种", "type": "select",
+                "value": "137:0xabc", "options": [{
+                    "value": "137:0xabc",
+                    "label": "USD Coin / USDC · Polygon（chain id 137） · 合约 0xabc",
+                }],
+            }],
+        }])
+        [field] = notice["action_fields"]
+        self.assertEqual(field["type"], "select")
+        self.assertEqual(field["value"], "137:0xabc")
+        self.assertIn("Polygon", field["options"][0]["label"])
+
     def test_the_page_draws_both_and_asks_again_after_every_answer(self) -> None:
         views = Path("src/prediction_market_agent/runtime/static/dashboard-views.js").read_text()
         self.assertIn("notice.action_disabled", views)
@@ -211,10 +237,19 @@ class AButtonCanSayItIsNotUsableYetTests(unittest.TestCase):
         self.assertIn("function noticeContentHtml", views)
         after = views[views.index("const answer=await post('/api/plugins/notices/action'"):]
         handler = after[:after.index("}catch(e)")]
-        self.assertIn("renderPluginNotices(card,kind,plugin);", handler,
+        self.assertIn("renderPluginNotices(card,kind,plugin,null,{...filter,fresh:true});", handler,
                       "a panel that only redraws on success cannot show 'still confirming'")
         self.assertIn("answer.pending?'pending':'danger'", handler,
                       "a wait drawn in red reads as a mistake the operator made")
+
+    def test_fund_notices_have_a_dedicated_page_and_leave_platform_config(self) -> None:
+        views = Path("src/prediction_market_agent/runtime/static/dashboard-views.js").read_text()
+        shell = Path("src/prediction_market_agent/runtime/static/dashboard-shell.js").read_text()
+        self.assertIn("PLUGIN_FUNDS_NOTICE_KEYS", views)
+        self.assertIn("exclude:PLUGIN_FUNDS_NOTICE_KEYS", views)
+        self.assertIn("only:PLUGIN_FUNDS_NOTICE_KEYS", views)
+        self.assertIn("async function refreshFunds", views)
+        self.assertIn("funds: ['资金管理'", shell)
 
 
 class DepositingIsOfferedWheneverThePluginIsLoadedTests(unittest.TestCase):
@@ -225,12 +260,28 @@ class DepositingIsOfferedWheneverThePluginIsLoadedTests(unittest.TestCase):
 
     def test_the_deposit_notice_does_not_wait_for_the_robot_to_ask(self) -> None:
         source = self._plugin_source()
-        self.assertIn("def deposit_notices()", source)
-        self.assertIn("*deposit_notices()", source)
-        block = source[source.index("def deposit_notices()"):source.index("def funding_notices()")]
+        self.assertIn("def deposit_notices(funds=None)", source)
+        self.assertIn("pool.submit(deposit_notices", source)
+        block = source[
+            source.index("def deposit_notices(funds=None)"):
+            source.index("def funding_notices()")
+        ]
         self.assertIn('"key": "deposit"', block)
         self.assertIn("我要充值", block)
         self.assertNotIn("pending_request", block, "this one is offered whether or not one is open")
+
+    def test_a_paused_runtime_reuses_one_panel_adapter(self) -> None:
+        source = self._plugin_source()
+        block = source[source.index("def _live_instance()") : source.index("def funding_status()")]
+        self.assertIn("instances.append(PolymarketApiPlugin(resolved_values()))", block)
+        self.assertNotIn("return PolymarketApiPlugin(resolved_values())", block)
+
+    def test_permanent_fund_controls_are_not_reported_as_pending_events(self) -> None:
+        source = self._plugin_source()
+        notices = source[source.index("def notices()") : source.index("return PluginSpec(")]
+        for key in ("wallet", "wallet_backup", "deposit", "withdraw"):
+            self.assertIn(f'"{key}"', notices)
+        self.assertIn('item["attention"] = False', notices)
 
     def test_the_robots_request_confirms_through_the_same_deposit_check(self) -> None:
         source = self._plugin_source()
@@ -242,27 +293,155 @@ class DepositingIsOfferedWheneverThePluginIsLoadedTests(unittest.TestCase):
     def test_what_a_deposit_needs_is_stated_rather_than_guessed(self) -> None:
         write = Path("src/prediction_market_agent/plugins/api/_polymarket/write.py").read_text()
         block = write[write.index("def deposit_instructions("):write.index("def _token_identity(")]
-        for field in ("chain", "chain_id", "address", "deposit_currency",
-                      "account_token_symbol", "account_token_contract", "warnings"):
+        for field in ("chain", "chain_id", "address", "destination_address",
+                      "deposit_currency", "supported_tokens", "account_token_symbol",
+                      "account_token_contract", "warnings"):
             with self.subTest(field=field):
                 self.assertIn(f'"{field}"', block)
 
-    def test_the_instructions_do_not_invent_the_one_thing_they_cannot_know(self) -> None:
-        """Which USDC contract this platform credits is not ours to guess; the rest is certain."""
+    def test_the_plugin_asks_polymarket_which_exact_contracts_are_accepted(self) -> None:
+        """The platform exposes this fact; it must never be delegated back to the operator."""
         write = Path("src/prediction_market_agent/plugins/api/_polymarket/write.py").read_text()
         block = write[write.index("def deposit_instructions("):write.index("def _token_identity(")]
-        self.assertIn("以 Polymarket 官网充值页当时显示的为准", block)
-        self.assertIn("先转一小笔", block)
-        self.assertIn("deposit_currency", block)
+        self.assertIn("self._supported_assets", block)
+        self.assertIn('"/supported-assets"', write)
+        self.assertIn('"/deposit"', block)
+        self.assertIn("supported_token_labels", block)
+        self.assertNotIn("这里不替你猜", block)
+        self.assertNotIn("先转一小笔", block)
 
     def test_a_deposit_is_followed_on_the_chain_not_taken_on_trust(self) -> None:
         write = Path("src/prediction_market_agent/plugins/api/_polymarket/write.py").read_text()
         block = write[write.index("def deposit_status("):write.index("def deposit_target(")]
-        for state in ("not_found", "failed", "confirming", "arrived", "wrong_target"):
+        for state in ("not_found", "failed", "confirming", "arrived", "wrong_target", "wrong_token"):
             with self.subTest(state=state):
                 self.assertIn(f'"{state}"', block)
         self.assertIn("eth_getTransactionReceipt", block)
         self.assertIn("eth_blockNumber", block)
+        self.assertIn("self.bridge_status(", block)
+
+
+class WhatThePolymarketDepositPanelActuallySaysTests(unittest.TestCase):
+    """The displayed address and contracts come from the live bridge response shape."""
+
+    def _transport(self):
+        from prediction_market_agent.plugins.api._polymarket.config import PolymarketPluginConfig
+        from prediction_market_agent.plugins.api._polymarket.write import PolymarketWriteTransport
+        from tests._support import POLYMARKET_ENV
+
+        settings = PolymarketPluginConfig.from_mapping(POLYMARKET_ENV)
+        transport = PolymarketWriteTransport(settings)
+        transport._setup_client = SimpleNamespace(
+            environment=SimpleNamespace(collateral_token="0xc011a7e12a19f7b1f670d46f03b03f3342e82dfb"),
+            wallet="0x1111111111111111111111111111111111111111",
+        )
+        transport._setup_client_at = time.time()
+        transport._token_identity = lambda token: ("pUSD", 6)
+        return transport
+
+    def test_exact_polygon_usdc_contracts_and_bridge_address_are_returned(self) -> None:
+        transport = self._transport()
+        supported_reads = 0
+
+        def bridge(method, path, *, payload=None):
+            nonlocal supported_reads
+            if path == "/deposit":
+                self.assertEqual(payload["address"], "0x1111111111111111111111111111111111111111")
+                return {"address": {"evm": "0x2222222222222222222222222222222222222222"}}
+            supported_reads += 1
+            return {"supportedAssets": [
+                {"chainId": "137", "chainName": "Polygon", "token": {
+                    "name": "USD Coin", "symbol": "USDC",
+                    "address": "0x3333333333333333333333333333333333333333", "decimals": 6,
+                }, "minCheckoutUsd": 2},
+                {"chainId": "1", "chainName": "Ethereum", "token": {
+                    "name": "USD Coin", "symbol": "USDC",
+                    "address": "0x4444444444444444444444444444444444444444", "decimals": 6,
+                }, "minCheckoutUsd": 3},
+            ]}
+
+        transport._bridge_json = bridge
+        answer = transport.deposit_instructions()
+        self.assertEqual(answer["address"], "0x2222222222222222222222222222222222222222")
+        self.assertEqual(answer["supported_tokens"][0]["contract"],
+                         "0x3333333333333333333333333333333333333333")
+        labels = " ".join(answer["supported_token_labels"])
+        self.assertIn("USD Coin / USDC", labels)
+        self.assertIn("Polygon（chain id 137）", labels)
+        self.assertNotIn("0x4444444444444444444444444444444444444444", labels)
+        self.assertNotIn("猜", " ".join(answer["warnings"]))
+        transport.withdrawal_options(all_chains=True)
+        self.assertEqual(supported_reads, 1, "deposit and withdrawal must share one Bridge catalog")
+
+    def test_balance_read_uses_the_non_trading_client(self) -> None:
+        transport = self._transport()
+        requested = []
+        client = SimpleNamespace(
+            get_balance_allowance=lambda **kwargs: SimpleNamespace(balance=2_880_000)
+        )
+        transport._require_client = lambda *, for_trading=True: (
+            requested.append(for_trading) or client
+        )
+        self.assertEqual(transport.collateral_balance(), 2.88)
+        self.assertEqual(requested, [False])
+
+    def test_a_same_name_but_unsupported_contract_is_rejected(self) -> None:
+        transport = self._transport()
+        bridge_address = "0x2222222222222222222222222222222222222222"
+        accepted = "0x3333333333333333333333333333333333333333"
+        wrong = "0x5555555555555555555555555555555555555555"
+        transport.deposit_instructions = lambda: {
+            "address": bridge_address,
+            "chain_id": 137,
+            "supported_tokens": [{"symbol": "USDC", "contract": accepted,
+                                  "decimals": 6, "minimum_usd": 2}],
+            "supported_token_labels": [f"USDC · {accepted} · 最低 $2"],
+        }
+        recipient_topic = "0x" + "0" * 24 + bridge_address[2:]
+        transport._rpc = lambda method, params: {
+            "eth_getTransactionReceipt": {
+                "status": "0x1", "blockNumber": "0x10", "logs": [{
+                    "address": wrong,
+                    "topics": [transport.TRANSFER_TOPIC, "0x" + "0" * 64, recipient_topic],
+                    "data": hex(5_000_000),
+                }],
+            },
+            "eth_blockNumber": "0x20",
+        }.get(method)
+        answer = transport.deposit_status("0x" + "a" * 64)
+        self.assertEqual(answer["state"], "wrong_token")
+        self.assertIn(wrong, answer["detail"])
+        self.assertIn(accepted, answer["detail"])
+
+    def test_arrived_means_the_bridge_route_completed_not_just_source_transfer(self) -> None:
+        transport = self._transport()
+        bridge_address = "0x2222222222222222222222222222222222222222"
+        accepted = "0x3333333333333333333333333333333333333333"
+        transport.deposit_instructions = lambda: {
+            "address": bridge_address,
+            "chain_id": 137,
+            "supported_tokens": [{"symbol": "USDC", "contract": accepted,
+                                  "decimals": 6, "minimum_usd": 2}],
+            "supported_token_labels": [f"USDC · {accepted} · 最低 $2"],
+        }
+        recipient_topic = "0x" + "0" * 24 + bridge_address[2:]
+        transport._rpc = lambda method, params: {
+            "eth_getTransactionReceipt": {
+                "status": "0x1", "blockNumber": "0x10", "logs": [{
+                    "address": accepted,
+                    "topics": [transport.TRANSFER_TOPIC, "0x" + "0" * 64, recipient_topic],
+                    "data": hex(5_000_000),
+                }],
+            },
+            "eth_blockNumber": "0x20",
+        }.get(method)
+        transport._bridge_json = lambda method, path, payload=None: {"transactions": [{
+            "fromChainId": "137", "fromTokenAddress": accepted,
+            "fromAmountBaseUnit": "5000000", "status": "COMPLETED",
+        }]}
+        answer = transport.deposit_status("0x" + "a" * 64)
+        self.assertEqual(answer["state"], "arrived")
+        self.assertEqual(answer["bridge_status"], "COMPLETED")
 
 
 class BothVenuesOfferTheSameDepositFlowTests(unittest.TestCase):

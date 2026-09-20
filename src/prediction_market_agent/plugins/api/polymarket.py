@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 from prediction_market_agent.plugin_system.network_diagnostics import configured_proxy_route
 
@@ -28,6 +29,7 @@ def initialize_plugin(context: PluginInitializationContext) -> PluginSpec:
         PluginConfigField("POLYMARKET_CLOB_URL", "CLOB URL", "string", "Polymarket 订单簿行情和订单交易 API 的 HTTPS 根地址。", required=True, default=PRODUCTION.clob_url),
         PluginConfigField("POLYMARKET_DATA_URL", "Data API URL", "string", "Polymarket 持仓和账户数据 API 的 HTTPS 根地址。", required=True, default=PRODUCTION.data_url),
         PluginConfigField("POLYMARKET_RELAYER_URL", "Relayer URL", "string", "Polymarket gasless 交易、赎回和转账 relayer 的 HTTPS 根地址。", required=True, default=PRODUCTION.relayer_url),
+        PluginConfigField("POLYMARKET_BRIDGE_URL", "Bridge URL", "string", "Polymarket 官方充值桥 API 的 HTTPS 根地址；插件用它实时读取支持的源链代币合约并生成本账户的充值地址。", required=True, default="https://bridge.polymarket.com"),
         PluginConfigField("POLYMARKET_RPC_URL", "Polygon RPC URL", "string", "执行或确认 EVM 链上操作使用的 HTTPS JSON-RPC 地址。", required=True, default=PRODUCTION.rpc_url),
         PluginConfigField("POLYMARKET_CHAIN_ID", "Chain ID", "integer", "Polymarket 插件执行链上请求时使用的 EVM chain ID。", required=True, default=PRODUCTION.chain_id),
         PluginConfigField("POLYMARKET_PRIVATE_KEY", "钱包私钥", "secret", "签署 Polymarket CLOB 与链上交易的钱包私钥；只在本机插件内使用，不外传。你可以粘贴自己已有的钱包私钥；如果还没有，下方「钱包」面板里有一个「生成一个新钱包」按钮，点了才会生成——插件不会自作主张替你决定用哪种方式。生成的钱包一开始是空的，要你自己往里转钱。", needed_to_run=True),
@@ -41,18 +43,19 @@ def initialize_plugin(context: PluginInitializationContext) -> PluginSpec:
         PluginConfigField("POLYMARKET_BUILDER_API_KEY", "Builder API Key", "secret", "使用 Builder relayer 身份时的 API Key。"),
         PluginConfigField("POLYMARKET_BUILDER_API_SECRET", "Builder API Secret", "secret", "使用 Builder relayer 身份时的 API Secret。"),
         PluginConfigField("POLYMARKET_BUILDER_API_PASSPHRASE", "Builder Passphrase", "secret", "使用 Builder relayer 身份时的 API Passphrase。"),
-        PluginConfigField("POLYMARKET_TRANSFER_RECIPIENT", "转出地址", "string", "TRANSFER_OUT 操作默认接收 pUSD 的 EVM 地址。"),
+        PluginConfigField("POLYMARKET_TRANSFER_RECIPIENT", "默认转出地址", "string", "资金管理页或 TRANSFER_OUT 未另填时使用的 EVM 接收地址；实际到账币种与网络由本次绑定的 Bridge 路线决定。"),
         PluginConfigField("POLYMARKET_HTTP_PROXY", "代理使用方式", "string", "默认 INHERIT，使用程序设置里的统一代理。也可单独填 DIRECT、HOST、ENVIRONMENT、SYSTEM（仅原生 macOS）或完整 http(s) URL。", required=True, default="INHERIT"),
         PluginConfigField("POLYMARKET_SCAN_INTERVAL_SECONDS", "扫描间隔（秒）", "integer", "Polymarket 完成一个市场扫描与决策周期后等待到下一周期的秒数。", default=60),
         PluginConfigField("POLYMARKET_ERROR_BACKOFF_SECONDS", "失败退避初值（秒）", "integer", "Polymarket 周期失败后的首次重试等待秒数；连续失败时指数增长。", default=30),
         PluginConfigField("POLYMARKET_ERROR_BACKOFF_MAX_SECONDS", "失败退避上限（秒）", "integer", "Polymarket 连续失败重试等待的最大秒数。", default=900),
-        PluginConfigField("POLYMARKET_MAX_TOPICS_PER_CYCLE", "每轮主题上限", "integer", "Polymarket 每轮允许框架发现后提交给业务队列的主题上限；发现范围和调用哪些读接口由发现策略决定。", default=10),
-        PluginConfigField("POLYMARKET_MAX_DECISIONS_PER_CYCLE", "每轮决策上限", "integer", "Polymarket 每次事件循环最多交给 Agent 的 outcome 决策数。", default=6),
         PluginConfigField("POLYMARKET_TOPIC_PAGE_SIZE", "主题分页大小", "integer", "框架发现标的时，Polymarket 每次事件列表网络请求加载的记录数。", default=100),
     )
     configuration = PluginConfiguration(
         fields, load, save, delete, storage,
-        retired_fields=("POLYMARKET_NETWORK_RULES_JSON", "POLYMARKET_TRADING_CAPITAL"),
+        retired_fields=(
+            "POLYMARKET_NETWORK_RULES_JSON", "POLYMARKET_TRADING_CAPITAL",
+            "POLYMARKET_MAX_TOPICS_PER_CYCLE", "POLYMARKET_MAX_DECISIONS_PER_CYCLE",
+        ),
     )
 
     instances = []
@@ -97,10 +100,17 @@ def initialize_plugin(context: PluginInitializationContext) -> PluginSpec:
 
 
     def _live_instance():
-        """Act on the running plugin, or make a throwaway one so the panel still answers."""
-        if instances:
-            return instances[-1]
-        return PolymarketApiPlugin(resolved_values())
+        """Act on the running plugin, or retain one panel instance while runtime is paused.
+
+        A funds-page read asks several related questions.  Returning a new adapter for every one
+        rebuilt the SDK client and re-derived account credentials each time, so one page load paid
+        several full connection handshakes and took about forty seconds.  The retained adapter is
+        still closed by the spec teardown and replaced on configuration refresh, exactly like an
+        instance created by the runtime factory.
+        """
+        if not instances:
+            instances.append(PolymarketApiPlugin(resolved_values()))
+        return instances[-1]
 
     def funding_status() -> dict:
         try:
@@ -111,6 +121,7 @@ def initialize_plugin(context: PluginInitializationContext) -> PluginSpec:
     # What the operator last told this plugin they sent, so the panel can follow it to the chain
     # and back without asking them to hold the transaction number in their head.
     watched: dict[str, Any] = {"txid": "", "state": "", "detail": ""}
+    withdrawn: dict[str, Any] = {"bridge_address": "", "message": ""}
 
     DEPOSIT_FIELDS = [
         {"name": "txid", "label": "充值交易号（txid）", "required": True,
@@ -155,10 +166,10 @@ def initialize_plugin(context: PluginInitializationContext) -> PluginSpec:
         watched.update(state=str(status.get("state", "")), detail=str(status.get("detail", "")))
         return dict(watched)
 
-    def deposit_notices() -> list:
+    def deposit_notices(funds=None) -> list:
         """Always offered: an operator may decide to top up without being asked to."""
         try:
-            panel = _live_instance().deposit_panel()
+            panel = _live_instance().deposit_panel(funds)
         except Exception as error:
             return [{
                 "key": "deposit", "title": '我要充值', "kind": "display",
@@ -187,7 +198,7 @@ def initialize_plugin(context: PluginInitializationContext) -> PluginSpec:
             "key": "deposit",
             "title": '我要充值',
             "kind": "confirm",
-            "description": '往下面这个地址、这条链、这个币种转账；转完把交易号填进来，插件去链上查，到账了会在这里说，余额也会更新。转错链或错币种的钱拿不回来。',
+            "description": '插件已从 Polymarket Bridge 实时读取这条链可入账的精确 USDC 合约与本账户充值地址。按下面任一合约转账；转完填交易号，插件会同时核对源链收款、Bridge 状态和账户余额。',
             "content": content,
             "action_label": '我已充值，去查',
             "action_disabled": confirming,
@@ -196,10 +207,70 @@ def initialize_plugin(context: PluginInitializationContext) -> PluginSpec:
             "dismiss_label": '清除这笔跟踪' if tracking["txid"] else "",
         }]
 
+    def withdrawal_notices(funds=None) -> list:
+        """Always expose a verified route for taking balance and profit back out."""
+        try:
+            panel = _live_instance().withdrawal_panel(funds)
+        except Exception as error:
+            panel = {"读取提现信息失败": str(error)[:300]}
+        routes = panel.pop("_routes", [])
+        if withdrawn["bridge_address"]:
+            try:
+                panel["最近一笔转出"] = _live_instance().withdrawal_status(
+                    str(withdrawn["bridge_address"])
+                )
+            except Exception as error:
+                panel["最近一笔转出"] = {
+                    "Bridge 地址": withdrawn["bridge_address"],
+                    "状态读取失败": str(error)[:300],
+                }
+        unavailable = "读取提现币种失败" in panel or "读取提现信息失败" in panel
+        if unavailable or not routes:
+            return [{
+                "key": "withdraw",
+                "title": "转出余额 / 利润",
+                "kind": "display",
+                "description": "当前无法从 Polymarket Bridge 核实可提网络与币种，因此没有提供转出按钮。",
+                "content": panel,
+            }]
+        return [{
+            "key": "withdraw",
+            "title": "转出余额 / 利润",
+            "kind": "confirm",
+            "description": (
+                "把 Polymarket 当前可用余额通过官方 Bridge 转成交易所或钱包能接收的 USDC。"
+                "币种名称、缩写、网络、合约和最低金额均实时读取；提交前还会先取报价并核对余额。"
+            ),
+            "content": panel,
+            "action_label": "确认并转出",
+            "action_fields": [
+                {"name": "amount", "label": "转出金额", "required": True,
+                 "placeholder": "不能超过上面显示的当前可转出余额"},
+                {"name": "recipient", "label": "交易所或钱包接收地址", "required": True,
+                 "placeholder": "0x 开头的 EVM 地址；请先在交易所选择同一网络与币种"},
+                {"name": "destination", "label": "目标网络与币种", "required": True,
+                 "type": "select", "options": routes,
+                 "value": routes[0]["value"] if routes else ""},
+            ],
+        }]
+
+    def withdrawal_action(key: str, name: str, payload: dict) -> dict:
+        del key
+        if name != "confirm":
+            return {"ok": False, "message": f"Unknown withdrawal action: {name}"}
+        answer = _live_instance().withdraw(payload)
+        if answer.get("ok"):
+            withdrawn["bridge_address"] = str(answer.get("bridgeAddress", ""))
+            withdrawn["message"] = str(answer.get("message", ""))
+        return answer
+
     def funding_notices() -> list:
         """Answer only when there is something outstanding, so a quiet plugin shows nothing."""
         try:
-            panel = _live_instance().funding_panel()
+            instance = _live_instance()
+            if not instance.funding_requests.pending():
+                return []
+            panel = instance.funding_panel()
         except Exception as error:
             return [{
                 "key": "funding",
@@ -208,8 +279,6 @@ def initialize_plugin(context: PluginInitializationContext) -> PluginSpec:
                 "description": '机器人请求达到某个可用金额时，这里会显示需要转入的金额和收款地址。你转账后点确认，插件会重新读取余额核对，不满足会说明还差多少。',
                 "content": {"error": str(error)[:300]},
             }]
-        if not panel.get("pending_request"):
-            return []
         return [{
             "key": "funding",
             "title": '资金到账确认',
@@ -336,7 +405,7 @@ def initialize_plugin(context: PluginInitializationContext) -> PluginSpec:
             return {
                 "ok": True,
                 "message": f'已生成钱包 {account.address}。私钥保存在这台机器的插件配置里。'
-                           '它现在是空的——往这个地址转 USDC 之后才能交易。',
+                           '它现在是空的——请按本页「我要充值」里实时读取的地址和币种充值。',
             }
         try:
             instance = _live_instance()
@@ -400,10 +469,34 @@ def initialize_plugin(context: PluginInitializationContext) -> PluginSpec:
         except Exception as error:
             return {"ok": False, "message": str(error)[:300]}
 
+    def notices() -> list[dict[str, Any]]:
+        # Build the authenticated read client once. Then one balance read feeds both money panels
+        # while the wallet and independent Bridge routes load concurrently. A Future is passed to
+        # the two panels so they can begin their own network request before waiting for the balance.
+        instance = _live_instance()
+        try:
+            instance._write_transport.prepare_account_read()
+        except Exception:
+            pass
+        with ThreadPoolExecutor(max_workers=4, thread_name_prefix="polymarket-notices") as pool:
+            funds = pool.submit(instance.account_funds)
+            wallet = pool.submit(wallet_notices)
+            deposit = pool.submit(deposit_notices, funds)
+            withdrawal = pool.submit(withdrawal_notices, funds)
+            items = [*wallet.result(), *deposit.result(), *withdrawal.result()]
+        items.extend(funding_notices())
+        # Wallet, deposit and withdrawal cards are permanent controls, not events that require
+        # attention.  A pending funding request remains an event and therefore keeps the default
+        # attention behaviour.
+        for item in items:
+            if item.get("key") in {"wallet", "wallet_backup", "deposit", "withdraw"}:
+                item["attention"] = False
+        return items
+
     return PluginSpec(
         kind="api",
         name="polymarket",
-        description="Polymarket Gamma、CLOB、Data 与 Relayer 的统一预测市场适配器。",
+        description="Polymarket Gamma、CLOB、Data、Relayer 与 Bridge 的统一预测市场适配器。",
         origin=str(context.module_path),
         factory=factory,
         configuration=configuration,
@@ -416,12 +509,14 @@ def initialize_plugin(context: PluginInitializationContext) -> PluginSpec:
             ),
         ),
         teardown=lambda: close_plugin_instances(instances),
-        notices_callback=lambda: [*wallet_notices(), *deposit_notices(), *funding_notices()],
+        notices_callback=notices,
         notice_action_callback=lambda key, name, payload: (
             wallet_action(key, name, payload)
             if key.startswith("wallet")
             else deposit_action(key, name, payload)
             if key == "deposit"
+            else withdrawal_action(key, name, payload)
+            if key == "withdraw"
             else funding_action(key, name, payload)
         ),
         readiness_callback=readiness,

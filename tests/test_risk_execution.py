@@ -217,9 +217,6 @@ class RiskAndExecutionTests(unittest.TestCase):
             def configuration_manifest(self):
                 return {}
 
-            def cycle_limits(self):
-                return (1, 1)
-
             def topic_page_size(self):
                 return 1
 

@@ -5,13 +5,30 @@
 `codex`、`claude`、`openrouter`（界面显示为 OpenRouter）都是自动扫描 Provider 插件。管理名单顺序就是运行优先级；启动
 不可用或调用失败会转到下一项，不会退回硬编码买卖规则。
 
-- Codex：调用本机 `codex exec`，每次使用结构化输出 schema 和只读工作目录。
-- Claude：调用本机 Claude 客户端及其 JSON schema 输出。
-- OpenRouter：使用插件私有的本机桥，把内部 Responses schema 请求转换为 OpenRouter Chat Completions
-  `response_format.json_schema`，并强制 `provider.require_parameters=true`。它不是通用兼容 API。
+- Codex：调用本机 `codex exec`，保留实时搜索、文件、命令、skills、插件和用户规则，以结构化输出 schema
+  接收最终业务结果；模型和账号使用 Codex 客户端自己的配置。
+- Claude：调用本机 Claude 客户端，保留其 Web、文件、命令、skills/插件等 Agent 能力，以 JSON schema
+  接收最终业务结果；模型和账号使用 Claude 客户端自己的配置。
+- OpenRouter：OpenRouter 只替换 CLI 背后的 LLM、模型 ID、Key 和计费。`OPENROUTER_AGENT_CLI` 可选
+  `AUTO`、`CODEX`、`CLAUDE`；AUTO 优先 Codex。两种 CLI 都不可用时该 Provider 不可用。
+  插件私有回环守卫保持 Responses/Messages 的输入输出协议，固定模型并注入
+  `provider.require_parameters=true`。模型原生支持 CLI 参数时直接使用；不支持时，只在这个 Provider 内把
+  版本化 Web Search/Fetch 声明转成 OpenRouter server tools、把 Codex namespace tools 展平并在返回时复原，
+  并移除非 Anthropic 路由不接受的 Claude 默认 `output_config.effort` 提示；JSON format、thinking、context
+  management、普通工具和消息内容保持不变。不把 Agent 协议降级成 Chat Completions，也不自己重做 CLI
+  的 Agent 循环。
 
-客户端可以保有自身登录状态；机器人仍保存每轮完整输入、原始输出和工具步骤，负责跨 Provider 的业务
-会话、滑动窗口和召回。
+三种 Provider 都严格遵守各自保存的模型选择。Codex/Claude 留空表示明确使用当前客户端默认；
+填写后每次命令都传入该型号。OpenRouter 必须选择一个型号，守卫会同时固定 CLI 命令、本地模型目录与
+上游请求中的 `model`；不支持的组合直接不可用，不自动改用其他模型。Provider 故障转移只会切换到用户已启用的
+另一个 Provider，不改写任何 Provider 自己的模型设置。
+
+每个发现、分析或决策顶层任务创建一个新的官方 CLI 会话；同一轮里的业务工具往返和插件反问续接该会话，
+下一轮不沿用。机器人保存完整审计记录，但不替 CLI 做滑动窗口、摘要或自动历史拼接。新会话首条输入明确
+给出统一 SQLite 账本、Codex 私有 session/archived-session、Claude 私有 projects/history 的绝对路径，
+以及当前轮次、最相关上一轮和显式续接轮次 ID；Codex 与 Claude 可用各自的文件/命令工具互读双方记录，
+由当前 CLI 自己决定读取、裁切和保留哪些前置信息。绝对路径来自双方插件配置的 AUTH_DIRECTORY；旧默认
+HOME 中仍存在的记录也会列出。OpenRouter 启动 CLI 时套用同一个私有 HOME，不另建一套隐藏历史。
 
 ## 登录凭据的导出与导入
 
@@ -71,21 +88,52 @@ Codex/Claude 提供“刷新账号状态”，OpenRouter 提供“刷新余额�
 界面“模型服务”提供 Codex/Claude 独立登录、失效提示、检查版本及点击升级。自动检查只查询官方版本，
 不自动安装。模型在各插件的 `CODEX_MODEL`、`CLAUDE_MODEL`、`OPENROUTER_MODEL` 字段分别指定；
 CLI 留空沿用客户端默认，OpenRouter 留空则尚未配置完成。OpenRouter 模型列表请求
-`/models?supported_parameters=structured_outputs`，并再次检查每项的 `supported_parameters`；字段只能从
-这份列表选择，不能手填绕过。实际推理还会要求具体路由端点支持 schema 参数，避免目录能力与落到的供应
-端点不一致。模型服务页可生成 `openrouter_*` 插件文件；每个文件对应独立 Key、模型、代理和优先级，
-桥接逻辑仍完全属于该 Provider 插件。样例见 `examples/plugin_configs/codex.json`、`claude.json`、
+`/models?supported_parameters=structured_outputs`，并只保留同时声明 `structured_outputs` 与 `tools` 的型号。
+Codex 与 Claude 均可使用这些型号，不因缺少某个厂商专有 Web Search 参数而隐藏；插件在模型不原生支持时
+使用上述 server-tool 兼容层。这样既保证最终答案遵从 schema，也保证工具参数有结构化入口。字段只能从
+列表选择，不能手填绕过。
+实际推理还会要求具体路由端点支持 schema 参数，避免目录能力与落到的供应端点不一致。模型服务页可生成
+`openrouter_*` 插件文件；模型、代理和优先级独立，Key 留空时默认复用主 `openrouter` 配置，也可单独覆盖。
+透明守卫仍完全属于该 Provider 插件。样例见 `examples/plugin_configs/codex.json`、`claude.json`、
 `openrouter.json`。
 网页登录和代理步骤直接显示在 UI 内，补充说明见 [CLIENT_ACCOUNTS.md](CLIENT_ACCOUNTS.md)。
 Codex 与 Claude 的独立代理字段和模型/强度在配置页首要分区直接显示；默认继承统一代理，也能分别改为
 直连或专用 HTTP(S) 代理。
 
+## Jev typed evaluator
+
+当前随仓库提供并默认选择的 `decision_evaluator` 插件实例名为 `jev`；这只是插件实现，不代表核心内置
+支持某个模型。它不是第四个 Agent Provider，也不加入普通 OpenRouter 聊天模型下拉框。该实例只用于候选
+粗筛和发现继续状态，不进入逐标的交易决策、不重评 Agent 提案、不输出交易动作。核心只依赖
+通用 evaluator 契约，不按 `jev` 名称分支；用户可安装其它实现，仓库的
+`examples/decision_evaluator_plugins/static_evaluator.py` 只演示契约且不会默认启用。
+
+粗筛的置信阈值从 0.90 起步，并用“曾被评估器建议 DEFER/REJECT、但被质量保护留给 LLM 的候选”后续真实
+结果动态校准；漏掉有效标的会抬高阈值，长期无漏判才会降低，硬下界为 0.80。最终候选至少保留原始规模的
+平方根作为质量抽样，因此评估器不能筛空候选池；任一 evaluator 报错时该轮不剔除候选。这个机制只减少
+发现 LLM 的输入 token 和部分逐页继续判断调用，最终发现选择仍由 Agent 完成。
+
+`JEV_CONNECTION=OPENROUTER` 时默认从 `JEV_SHARED_PROVIDER` 指定的 OpenRouter Provider 复用
+`OPENROUTER_API_KEY`，也可用 `JEV_API_KEY` 单独覆盖。选择官方 Jev 型号时自动请求
+`https://openrouter.ai/api/alpha/decisions`；Jev 模型本身只接受 Decisions 协议。选择其它 OpenRouter 聊天
+模型时，列表只显示明确声明 `structured_outputs` 的型号，插件改用官方 Chat Completions、strict
+`response_format.json_schema` 和 `provider.require_parameters=true`，不能因路由变化丢掉 schema。
+
+`JEV_CONNECTION=CUSTOM` 时填写兼容 OpenAI Chat Completions 的 Base URL 和模型名，Key 可留空；插件同样
+把 `state/questions` 写入 JSON 输入并要求完整 `answers`。它先发送原生 strict `json_schema`；只有端点拒绝
+该参数，或虽接受却没有返回合规 JSON 时，才在同一插件内回退到强制 `submit_typed_answers` 函数参数。
+Choice 必须属于题目枚举，Score/Noul 必须为数值；两种方式都不接受散文、缺项和非法类型。
+
+无论连接方式，`JEV_HTTP_PROXY`、超时和批大小均独立；OpenRouter Key 是 Jev 与 Provider 的唯一配置关联，
+不会读取或覆盖 Provider、平台、统一代理之外的任何代理层。OpenRouter Decisions 接口处于 alpha。
+
 ## 多步 Agent 与工具
 
-Agent 先收到市场、能力、持仓、风险清单、策略和历史，再在配置步数内选择研究工具或 `DECIDE`。工具
+Agent 先收到市场、能力、持仓、风险清单、策略、历史位置和续接 ID，再在配置步数内选择业务工具或 `DECIDE`。工具
 名称不是内核枚举：启用的 `research_tool` 插件动态贡献名称、参数说明和执行器，控制 schema 也据此动态
-生成。内置 `standard_research` 提供网页搜索、URL 读取、跨平台市场搜索、当前市场刷新、K 线和历史召回；
-它的端点、代理与大小/数量限制都在自己的 JSON。框架另外始终提供市场契约、交易与账务工具，见 [两类过滤插件](RISK_FILTERS.md)。
+生成。内置 `standard_research` 只提供预测市场专用的跨平台市场搜索、当前市场刷新、K 线和业务历史查询；
+通用网页搜索、网页读取、文件、命令和 skills 由 Codex/Claude CLI 自己编排，框架不重实现。框架另外始终
+提供市场契约、交易与账务工具，见 [两类过滤插件](RISK_FILTERS.md)。
 
 ## 内置策略与自动进化
 

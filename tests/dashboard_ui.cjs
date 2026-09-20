@@ -26,7 +26,7 @@ const fs = require('node:fs');
                     await route.fulfill({json:{items:[
                         {kind:'decision_provider',name:'codex',status:{control_type:'client',state:'authenticated',message:'已登录',installed_version:'1.0.0',model:'fixture-codex',usage:{checked_at:checked,available:true,source:'fixture',windows:[{label:'当前窗口',used_percent:21}]},actions:[{id:'refresh_usage',label:'刷新账号状态',group:'账号状态'},{id:'login',label:'登录 / 重新登录'}]}},
                         {kind:'decision_provider',name:'claude',status:{control_type:'client',state:'authenticated',message:'已登录',installed_version:'1.0.0',model:'fixture-claude',usage:{checked_at:checked,available:false,source:'fixture',windows:[{label:'5 小时窗口',used_percent:100,resets_at:checked+3600},{label:'周额度',used_percent:82,resets_at:checked+172800}]},actions:[{id:'refresh_usage',label:'刷新账号状态',group:'账号状态'},{id:'login',label:'登录 / 重新登录'}]}},
-                        {kind:'decision_provider',name:'openrouter',status:{control_type:'openrouter',state:'configured',message:'已配置',model:'fixture/structured-a',usage:{checked_at:checked,available:true,source:'fixture',account:{total_credits:100.5,total_usage:25.75,balance:74.75},key:{usage:25.5,usage_daily:1.5,usage_weekly:7.5,usage_monthly:20.5,limit:100,limit_remaining:74.5,limit_reset:'monthly'}},actions:[{id:'refresh_usage',label:'刷新余额与用量',group:'账号与额度'}]}}
+                        {kind:'decision_provider',name:'openrouter',status:{control_type:'openrouter',state:'configured',message:'已配置',model:'fixture/structured-a',agent_cli:{requested:'AUTO',selected:'CODEX',available:['CODEX','CLAUDE'],unavailable:{}},usage:{checked_at:checked,available:true,source:'fixture',account:{total_credits:100.5,total_usage:25.75,balance:74.75},key:{usage:25.5,usage_daily:1.5,usage_weekly:7.5,usage_monthly:20.5,limit:100,limit_remaining:74.5,limit_reset:'monthly'}},actions:[{id:'refresh_usage',label:'刷新余额与用量',group:'账号与额度'}]}}
                     ]}});return;
                 }
                 if(message.url==='/api/plugins/config/choices'&&message.body.name==='openrouter'){
@@ -67,7 +67,7 @@ const fs = require('node:fs');
             assert((await page.locator('[data-setup-panel="optional"]').innerText()).includes('未就绪不会阻止机器人启动'));
             await page.locator('[data-setup-tab="required"]').click();
             if(output)await page.screenshot({path:path.join(output,`setup-${width}.png`),fullPage:true});
-            for (const view of ['overview','models','plugins','decisions','settings','security']) {
+            for (const view of ['overview','funds','models','plugins','decisions','settings','security']) {
                 await page.evaluate(view => {location.hash=view}, view);
                 await page.waitForFunction(view => document.querySelector('.nav-link[aria-current="page"]').hash==='#'+view, view);
                 assert(await page.locator(`[data-view="${view}"]`).first().isVisible());
@@ -75,6 +75,7 @@ const fs = require('node:fs');
                 assert.equal(overflow,false,`${width}px ${view} must not overflow the viewport`);
                 if(view==='settings'){
                     await page.waitForSelector('#egressRoute option',{state:'attached'});
+                    await page.waitForSelector('[data-app-field="shared_http_proxy"]',{state:'attached'});
                     assert(await page.locator('#environmentPanel').isVisible());
                     assert.equal(await page.locator('#egressRoute option[value="inherited"]').count(),1);
                     assert.equal(await page.locator('#egressComparison .egress-compare-card').count(),2);
@@ -95,12 +96,12 @@ const fs = require('node:fs');
             }
             await page.evaluate(()=>{location.hash='plugins'});
             await page.waitForSelector('.category-tile');
-            assert.equal(await page.locator('.category-tile').count(),6);
+            assert.equal(await page.locator('.category-tile').count(),7);
             assert.equal(await page.locator('.category-tile').filter({hasText:'AI 模型服务'}).count(),0);
             assert.equal(await page.locator('#pluginCategoryNav a[href="#plugins/decision_provider"]').count(),0);
             assert.equal(await page.locator('#pluginManager .plugin-category:visible').count(),0);
             if(output)await page.screenshot({path:path.join(output,`plugins-${width}.png`),fullPage:true});
-            for(const kind of ['api','market_discovery','decision_strategy','research_tool','agent_policy','risk']){
+            for(const kind of ['api','market_discovery','decision_evaluator','decision_strategy','research_tool','agent_policy','risk']){
                 await page.evaluate(kind=>{location.hash='plugins/'+kind},kind);
                 await page.waitForSelector('#category_'+kind,{state:'visible'});
                 assert.equal(await page.locator('#pluginManager .plugin-category:visible').count(),1);
@@ -133,7 +134,13 @@ const fs = require('node:fs');
             assert.equal(await page.locator('.client-options[open]').count(),0);
             assert.equal(await page.locator('#control_decision_provider_openrouter .client-options').count(),0);
             assert((await page.locator('#control_decision_provider_openrouter .usage-readout').innerText()).includes('$74.75'));
+            assert((await page.locator('#control_decision_provider_openrouter .usage-readout').innerText()).includes('Agent：CODEX CLI'));
             assert((await page.locator('#control_decision_provider_openrouter .usage-readout').innerText()).includes('刷新余额与用量'));
+            const cliPicker=page.locator('#control_decision_provider_openrouter .cli-picker select');
+            assert(await cliPicker.isVisible());
+            assert.equal(await cliPicker.inputValue(),'AUTO');
+            assert.equal(await cliPicker.locator('option').count(),3);
+            assert(await page.locator('#control_decision_provider_openrouter .cli-picker').getByRole('button',{name:'保存 Agent CLI'}).isVisible());
             assert((await page.locator('#control_decision_provider_codex .usage-readout').innerText()).includes('21% 已用'));
             assert((await page.locator('#control_decision_provider_claude .usage-readout').innerText()).includes('额度已用尽'));
             assert((await page.locator('#control_decision_provider_claude .usage-readout').innerText()).includes('5 小时窗口'));
@@ -166,6 +173,7 @@ const fs = require('node:fs');
             await page.locator('#control_decision_provider_openrouter a').click();
             await page.waitForSelector('#cfg_decision_provider_openrouter_OPENROUTER_API_KEY');
             assert(await page.locator('#cfg_decision_provider_openrouter_OPENROUTER_API_KEY').isVisible());
+            assert.equal(await page.locator('#cfg_decision_provider_openrouter_OPENROUTER_AGENT_CLI').inputValue(),'AUTO');
             const credential=page.locator('#cfg_decision_provider_openrouter_OPENROUTER_API_KEY');
             assert.equal(await credential.getAttribute('type'),'search');
             assert.equal(await credential.getAttribute('autocomplete'),'off');
@@ -256,6 +264,18 @@ const fs = require('node:fs');
             await page.locator('#plugin_decision_provider_openrouter').getByRole('button',{name:'刷新可选列表'}).click();
             await page.waitForFunction(id=>!document.getElementById(id).classList.contains('danger'),apiModel.slice(1)+'_note');
             await page.evaluate(()=>{location.hash='models'});
+            const configWritesBefore=writes.filter(w=>w.url==='/api/plugins/config').length;
+            const inlineCli=page.locator('#control_decision_provider_openrouter .cli-picker select');
+            await inlineCli.selectOption('CLAUDE');
+            const cliSaveResponse=page.waitForResponse(response=>{
+                if(!response.url().endsWith('/api/local'))return false;
+                try{return response.request().postDataJSON().url==='/api/plugins/config'}catch{return false}
+            });
+            await page.locator('#control_decision_provider_openrouter .cli-picker').getByRole('button',{name:'保存 Agent CLI'}).click();
+            await cliSaveResponse;
+            const configWrites=writes.filter(w=>w.url==='/api/plugins/config');
+            assert(configWrites.length>configWritesBefore);
+            assert.equal(configWrites.at(-1).body.values.OPENROUTER_AGENT_CLI,'CLAUDE');
             assert(await page.locator('#openRouterPluginName').isVisible());
             await page.locator('#openRouterPluginName').fill('openrouter_ui');
             await page.getByRole('button',{name:'再添加一个 OpenRouter 配置'}).click();
@@ -263,7 +283,7 @@ const fs = require('node:fs');
             assert.equal(writes.find(w=>w.url==='/api/plugins/openrouter/create').body.name,'openrouter_ui');
             await page.getByRole('button',{name:'保存模型启用与顺序'}).click();
             await page.waitForFunction(()=>document.getElementById('modelManageStatus').textContent.includes('启用状态和优先级已保存'));
-            assert.equal(Object.keys(writes.find(w=>w.url==='/api/plugins/selection').body.enabled).length,7);
+            assert.equal(Object.keys(writes.find(w=>w.url==='/api/plugins/selection').body.enabled).length,8);
             await page.unroute('**/api/local');
             await page.evaluate(()=>{location.hash='decisions'});
             await page.waitForFunction(()=>document.querySelector('.nav-link[aria-current="page"]').hash==='#decisions');
@@ -285,7 +305,13 @@ const fs = require('node:fs');
             await page.evaluate(()=>{location.hash='overview'});
             if(output)await page.screenshot({path:path.join(output,`dashboard-${width}.png`),fullPage:true});
             for(const name of ['codex','claude']){
-                await page.evaluate(name=>showLoginWizard({kind:'decision_provider',name,status:{state:'authorizing',login_mode:'remote',flow_id:'ui-fixture',authorization_url:'https://'+(name==='codex'?'auth.openai.com/codex/device':'claude.com/cai/oauth/authorize'),device_code:'ABCD-EFGH',message:'等待授权'}}),name);
+                await page.evaluate(name=>{
+                    showLoginWizard({kind:'decision_provider',name,status:{state:'authorizing',login_mode:'remote',flow_id:'ui-fixture',authorization_url:'https://'+(name==='codex'?'auth.openai.com/codex/device':'claude.com/cai/oauth/authorize'),device_code:'ABCD-EFGH',message:'等待授权'}});
+                    /* The fixture's regular account poll always says "authenticated". Detach this
+                       synthetic dialog after drawing it so that unrelated polling cannot replace
+                       the remote-login state halfway through these visibility assertions. */
+                    ACTIVE_LOGIN=null;
+                },name);
                 assert(await page.locator('#remoteLoginSteps').isVisible());
                 assert.equal(await page.locator('#localLoginSteps').isVisible(),false);
                 assert.equal(await page.locator('#helperCommand').isVisible(),false);

@@ -1,5 +1,6 @@
 import io
 import json
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -11,6 +12,7 @@ from prediction_market_agent.core.config import Config
 from prediction_market_agent.runtime.dashboard import create_app
 from prediction_market_agent.runtime.setup_guide import setup_guide
 from prediction_market_agent.plugins.providers._model_catalog import ClientModelCatalog, normalize_models
+from prediction_market_agent.plugins.providers._shared import configured_client_homes
 from prediction_market_agent.plugins.providers.codex import CodexCliBackend
 from prediction_market_agent.plugins.providers.claude import ClaudeCliBackend
 
@@ -20,6 +22,18 @@ def plugin(name,ready,fields=()):
 
 
 class SetupGuideTests(unittest.TestCase):
+    def test_shared_history_homes_follow_both_private_client_configs(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root=Path(directory);configs=root/'config'/'plugins';configs.mkdir(parents=True)
+            (configs/'codex.json').write_text(json.dumps({'CODEX_AUTH_DIRECTORY':'accounts/codex'}))
+            absolute=root/'outside-claude'
+            (configs/'claude.json').write_text(json.dumps({'CLAUDE_AUTH_DIRECTORY':str(absolute)}))
+
+            homes=configured_client_homes(root)
+
+        self.assertEqual(homes['CODEX'],(root/'accounts'/'codex'/'.codex').resolve())
+        self.assertEqual(homes['CLAUDE'],(absolute/'.claude').resolve())
+
     def test_missing_requirements_and_one_ready_provider(self):
         fields=[{'name':'PRIVATE_TOKEN','label':'平台密钥','description':'由平台提供','required':True,'configured':False,'value':''}]
         manifest={'plugins':{'api':[plugin('one',False,fields)],'decision_provider':[plugin('working',True),plugin('optional',False)],'decision_strategy':[]},'robot_paused':False}
@@ -84,6 +98,56 @@ class ClientModelsTests(unittest.TestCase):
             backend=CodexCliBackend('codex','chosen','',20,effort='xhigh')
             with self.assertRaises(Exception):backend.complete('fixture',{},'fixture')
             self.assertIn('model_reasoning_effort="xhigh"',run.call_args.args[0])
+            command=run.call_args.args[0];self.assertEqual(command[command.index('--model')+1],'chosen')
         with patch('prediction_market_agent.plugins.providers.claude.resolve_executable',return_value='claude'),patch('prediction_market_agent.plugins.providers.claude.subprocess.run',return_value=SimpleNamespace(returncode=0,stdout='{"structured_output":{}}',stderr='')) as run:
             backend=ClaudeCliBackend('claude','chosen','',20,effort='high');backend.complete('fixture',{},'fixture')
             command=run.call_args.args[0];self.assertEqual(command[command.index('--effort')+1],'high')
+            self.assertEqual(command[command.index('--model')+1],'chosen')
+
+    def test_timeout_bytes_are_preserved_as_json_diagnostics(self):
+        timeout=subprocess.TimeoutExpired(['fixture'],1,output=b'partial-out',stderr=b'partial-err')
+        with patch('prediction_market_agent.plugins.providers.claude.resolve_executable',return_value='claude'),patch('prediction_market_agent.plugins.providers.claude.subprocess.run',side_effect=timeout):
+            backend=ClaudeCliBackend('claude','chosen','',20)
+            with self.assertRaises(Exception) as caught:backend.complete('fixture',{},'fixture')
+        raw=json.loads(caught.exception.raw_output)
+        self.assertEqual(raw['stdout'],'partial-out')
+        self.assertEqual(raw['stderr'],'partial-err')
+
+    def test_codex_one_round_resumes_one_cli_session_and_exposes_both_histories(self):
+        calls=[]
+        def complete(command,**options):
+            calls.append((command,options))
+            output=Path(command[command.index('--output-last-message')+1])
+            output.write_text('{"ok":true}',encoding='utf-8')
+            stdout=(json.dumps({'type':'thread.started','thread_id':'round-thread'})+'\n') if len(calls)==1 else ''
+            return SimpleNamespace(returncode=0,stdout=stdout,stderr='')
+        with tempfile.TemporaryDirectory() as directory,patch('prediction_market_agent.plugins.providers.codex.resolve_executable',return_value='codex'),patch('prediction_market_agent.plugins.providers.codex.subprocess.run',side_effect=complete):
+            history=Path(directory)/'shared.sqlite3';history.touch()
+            homes={'CODEX':Path(directory)/'private-codex'/'.codex','CLAUDE':Path(directory)/'private-claude'/'.claude'}
+            backend=CodexCliBackend('codex','chosen','',20,history_database=history,client_homes=homes)
+            with backend.session():
+                backend.complete('first',{'type':'object'},'one')
+                backend.complete('second',{'type':'object'},'two')
+        self.assertNotIn('--ephemeral',calls[0][0])
+        self.assertEqual(calls[1][0][calls[1][0].index('resume')+1],'round-thread')
+        self.assertIn(str(history.resolve()),calls[0][1]['input'])
+        self.assertIn(str(homes['CODEX'].resolve()),calls[0][1]['input'])
+        self.assertIn(str(homes['CLAUDE'].resolve()),calls[0][1]['input'])
+
+    def test_claude_one_round_resumes_one_cli_session(self):
+        calls=[]
+        def complete(command,**options):
+            calls.append((command,options))
+            return SimpleNamespace(returncode=0,stdout='{"structured_output":{"ok":true}}',stderr='')
+        with tempfile.TemporaryDirectory() as directory,patch('prediction_market_agent.plugins.providers.claude.resolve_executable',return_value='claude'),patch('prediction_market_agent.plugins.providers.claude.subprocess.run',side_effect=complete):
+            history=Path(directory)/'shared.sqlite3';history.touch()
+            homes={'CODEX':Path(directory)/'private-codex'/'.codex','CLAUDE':Path(directory)/'private-claude'/'.claude'}
+            backend=ClaudeCliBackend('claude','chosen','',20,history_database=history,client_homes=homes)
+            with backend.session():
+                backend.complete('first',{'type':'object'},'one')
+                backend.complete('second',{'type':'object'},'two')
+        first_id=calls[0][0][calls[0][0].index('--session-id')+1]
+        self.assertEqual(calls[1][0][calls[1][0].index('--resume')+1],first_id)
+        self.assertNotIn('--no-session-persistence',calls[0][0])
+        self.assertIn(str(homes['CODEX'].resolve()),calls[0][1]['input'])
+        self.assertIn(str(homes['CLAUDE'].resolve()),calls[0][1]['input'])

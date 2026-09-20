@@ -10,6 +10,9 @@
       "claude",
       "openrouter"
     ],
+    "decision_evaluator": [
+      "jev"
+    ],
     "market_discovery": [],
     "research_tool": [
       "standard_research"

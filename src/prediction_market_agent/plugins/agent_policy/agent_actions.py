@@ -45,7 +45,7 @@ def initialize_plugin(context: PluginInitializationContext) -> PluginSpec:
     )
     configuration = PluginConfiguration(
         fields=(
-            PluginConfigField("ALLOWED_TOOLS", "Agent 工具白名单", "string", "允许 Agent 调用的工具名，使用英文逗号分隔；未列出的工具会被拒绝。", required=True),
+            PluginConfigField("ALLOWED_TOOLS", "Agent 业务工具白名单", "string", "允许 Agent 通过框架协议调用的预测市场业务工具名，使用英文逗号分隔；未列出的业务工具会被拒绝。CLI 自带工具不经过此插件。", required=True),
             PluginConfigField("ALLOWED_TRADE_ACTIONS", "交易动作白名单", "string", "允许 Agent 给出的交易动作，使用英文逗号分隔；未列出的动作会被拒绝。", required=True),
         ),
         load_callback=load,
@@ -65,7 +65,7 @@ def initialize_plugin(context: PluginInitializationContext) -> PluginSpec:
     return PluginSpec(
         "agent_policy",
         "agent_actions",
-        "对 Agent 可调用工具及可输出交易动作实施白名单控制。",
+        "对 Agent 通过框架协议调用的业务工具及可输出交易动作实施白名单控制；不冒充 CLI 自带工具权限。",
         str(context.module_path),
         factory,
         configuration,

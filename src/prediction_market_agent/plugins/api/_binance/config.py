@@ -22,8 +22,6 @@ class BinancePluginConfig:
     scan_interval_seconds: int
     error_backoff_seconds: int
     error_backoff_max_seconds: int
-    max_topics_per_cycle: int
-    max_decisions_per_cycle: int
     topic_page_size: int
 
     @classmethod
@@ -50,10 +48,6 @@ class BinancePluginConfig:
             error_backoff_max_seconds=int(
                 get("BINANCE_ERROR_BACKOFF_MAX_SECONDS", "900")
             ),
-            max_topics_per_cycle=int(get("BINANCE_MAX_TOPICS_PER_CYCLE", "10")),
-            max_decisions_per_cycle=int(
-                get("BINANCE_MAX_DECISIONS_PER_CYCLE", "6")
-            ),
             topic_page_size=int(get("BINANCE_TOPIC_PAGE_SIZE", "100")),
         )
         if not value.base_url.startswith("https://"):
@@ -66,11 +60,9 @@ class BinancePluginConfig:
             value.scan_interval_seconds,
             value.error_backoff_seconds,
             value.error_backoff_max_seconds,
-            value.max_topics_per_cycle,
-            value.max_decisions_per_cycle,
             value.topic_page_size,
         ) <= 0:
-            raise ValueError("Binance runtime interval, backoff, and cycle limits must be positive")
+            raise ValueError("Binance runtime interval, backoff, and page size must be positive")
         if value.error_backoff_max_seconds < value.error_backoff_seconds:
             raise ValueError(
                 "BINANCE_ERROR_BACKOFF_MAX_SECONDS cannot be less than "
@@ -91,8 +83,6 @@ class BinancePluginConfig:
                 "scan_interval_seconds": self.scan_interval_seconds,
                 "error_backoff_seconds": self.error_backoff_seconds,
                 "error_backoff_max_seconds": self.error_backoff_max_seconds,
-                "max_topics_per_cycle": self.max_topics_per_cycle,
-                "max_decisions_per_cycle": self.max_decisions_per_cycle,
                 "topic_page_size": self.topic_page_size,
             },
         }

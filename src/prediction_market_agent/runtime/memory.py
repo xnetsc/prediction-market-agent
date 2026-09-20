@@ -124,6 +124,10 @@ class SessionMemory:
             # A plain-language restatement of a record, written once and kept. Recomputing it on
             # every view would spend a model call each time somebody opened the same row.
             self.connection.execute("ALTER TABLE decision_ledger ADD COLUMN readable_json TEXT")
+        if "discovery_selection_id" not in ledger_columns:
+            self.connection.execute(
+                "ALTER TABLE decision_ledger ADD COLUMN discovery_selection_id INTEGER"
+            )
         instruction_columns = {
             row[1] for row in self.connection.execute("PRAGMA table_info(operator_instructions)")
         }
@@ -213,6 +217,7 @@ class SessionMemory:
                 queries_json TEXT NOT NULL DEFAULT '[]',
                 next_scan_seconds INTEGER NOT NULL DEFAULT 0,
                 reason TEXT NOT NULL DEFAULT '',
+                resume_json TEXT NOT NULL DEFAULT '{}',
                 updated_at INTEGER NOT NULL
             );
             CREATE TABLE IF NOT EXISTS operator_instructions (
@@ -271,6 +276,24 @@ class SessionMemory:
                 ON provider_reviews(decision_id);
             """
         )
+        selection_columns = {
+            row[1] for row in self.connection.execute("PRAGMA table_info(discovery_selections)")
+        }
+        if "last_reviewed_at" not in selection_columns:
+            self.connection.execute(
+                "ALTER TABLE discovery_selections ADD COLUMN last_reviewed_at INTEGER NOT NULL DEFAULT 0"
+            )
+        if "finalized_at" not in selection_columns:
+            self.connection.execute(
+                "ALTER TABLE discovery_selections ADD COLUMN finalized_at INTEGER NOT NULL DEFAULT 0"
+            )
+        survey_columns = {
+            row[1] for row in self.connection.execute("PRAGMA table_info(survey_plans)")
+        }
+        if "resume_json" not in survey_columns:
+            self.connection.execute(
+                "ALTER TABLE survey_plans ADD COLUMN resume_json TEXT NOT NULL DEFAULT '{}'"
+            )
         self.connection.commit()
 
     @staticmethod
@@ -492,14 +515,15 @@ class SessionMemory:
         strategy_name: str,
         strategy_sha256: str,
         context: dict[str, Any],
+        discovery_selection_id: int | None = None,
     ) -> int:
         now = int(time.time() * 1000)
         cursor = self.connection.execute(
             """
             INSERT INTO decision_ledger(
                 created_at, updated_at, platform, strategy_name, strategy_sha256,
-                market_topic_id, market_id, token_id, context_json, status
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'STARTED')
+                market_topic_id, market_id, token_id, context_json, discovery_selection_id, status
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'STARTED')
             """,
             (
                 now,
@@ -511,16 +535,52 @@ class SessionMemory:
                 str(market_id),
                 token_id,
                 self._json(context),
+                discovery_selection_id,
             ),
         )
         self.connection.commit()
         decision_id = int(cursor.lastrowid)
+        handoff = context.setdefault("history_handoff", {})
+        if isinstance(handoff, dict):
+            handoff["current_round_id"] = decision_id
+            self.connection.execute(
+                "UPDATE decision_ledger SET context_json = ? WHERE id = ?",
+                (self._json(context), decision_id),
+            )
+            self.connection.commit()
         # Anything registered under this id belonged to an older row: a database recreated since,
         # or a deleted row whose id was reused. It must not stop the decision just opened, and
         # clearing it here is also what keeps the register from growing without end.
         with _CANCELLED_LOCK:
             _CANCELLED.discard(self._cancel_key(decision_id))
         return decision_id
+
+    def latest_decision_reference(
+        self, *, platform: str, market_topic_id: str | int, token_id: str
+    ) -> dict[str, Any] | None:
+        """Identify the round a new CLI session should consider continuing.
+
+        The CLI owns retrieval and context selection.  The framework only supplies the exact
+        hand-off pointer that cannot be inferred reliably from a database path alone.
+        """
+        row = self.connection.execute(
+            """
+            SELECT id, created_at, provider, status
+            FROM decision_ledger
+            WHERE platform = ? AND (market_topic_id = ? OR token_id = ?)
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            (platform, str(market_topic_id), str(token_id)),
+        ).fetchone()
+        if row is None:
+            return None
+        return {
+            "round_id": int(row[0]),
+            "created_at": int(row[1]),
+            "provider": str(row[2] or ""),
+            "status": str(row[3] or ""),
+        }
 
     def complete_decision(
         self,
@@ -748,11 +808,11 @@ class SessionMemory:
             """
             SELECT id, selected_at, platform, strategy, market_topic_id, priors_json, features_json
             FROM discovery_selections
-            WHERE reviewed_at = 0 AND selected_at <= ?
+            WHERE finalized_at = 0 AND selected_at <= ? AND last_reviewed_at <= ?
             ORDER BY selected_at ASC
             LIMIT ?
             """,
-            (int(settled_before_ms), int(limit)),
+            (int(settled_before_ms), int(settled_before_ms), int(limit)),
         ).fetchall()
         return [
             {
@@ -768,18 +828,28 @@ class SessionMemory:
         ]
 
     def selection_downstream(
-        self, *, platform: str, market_topic_id: str, since_ms: int, until_ms: int
+        self, *, platform: str, market_topic_id: str, since_ms: int, until_ms: int,
+        selection_id: int | None = None,
     ) -> dict[str, Any]:
         """What the decision Agent did with a topic after discovery handed it over."""
-        rows = self.connection.execute(
-            """
+        if selection_id is not None:
+            rows = self.connection.execute(
+                """
+                SELECT status, final_decision_json, proposed_decision_json, execution_json
+                FROM decision_ledger WHERE discovery_selection_id = ?
+                """,
+                (int(selection_id),),
+            ).fetchall()
+        else:
+            rows = self.connection.execute(
+                """
             SELECT status, final_decision_json, proposed_decision_json, execution_json
             FROM decision_ledger
             WHERE platform = ? AND market_topic_id = ?
               AND created_at >= ? AND created_at < ?
-            """,
-            (platform, str(market_topic_id), int(since_ms), int(until_ms)),
-        ).fetchall()
+                """,
+                (platform, str(market_topic_id), int(since_ms), int(until_ms)),
+            ).fetchall()
         counts = {
             "decisions": len(rows),
             "acted": 0,
@@ -787,6 +857,12 @@ class SessionMemory:
             "risk_rejected": 0,
             "execution_error": 0,
             "provider_error": 0,
+            "submitted_orders": 0,
+            "accepted_orders": 0,
+            "filled_orders": 0,
+            "buy_fills": 0,
+            "sell_fills": 0,
+            "resolved_trades": 0,
             "notional": 0.0,
         }
         for status, final_json, proposed_json, execution_json in rows:
@@ -807,8 +883,7 @@ class SessionMemory:
                 decision = {}
             action = str(decision.get("action", "")).upper()
             if action in {"BUY", "SELL"}:
-                counts["acted"] += 1
-                counts["notional"] += float(decision.get("notional_usdt") or 0.0)
+                counts["submitted_orders"] += 1
             elif action:
                 counts["held"] += 1
             if execution_json:
@@ -820,13 +895,49 @@ class SessionMemory:
                     counts["realized_pnl"] = float(
                         counts.get("realized_pnl", 0.0)
                     ) + float(execution["realized_pnl"])
-        counts["useful"] = counts["acted"] > 0
+                if isinstance(execution, dict):
+                    status = str(execution.get("status", "")).upper()
+                    if status in {"OPEN", "ACCEPTED", "FILLED", "MATCHED", "PARTIALLY_FILLED"}:
+                        counts["accepted_orders"] += 1
+                    if status in {"FILLED", "MATCHED", "PARTIALLY_FILLED"}:
+                        counts["filled_orders"] += 1
+                        counts["acted"] += 1
+                        counts["notional"] += float(decision.get("notional_usdt") or 0.0)
+                        if action == "BUY":
+                            counts["buy_fills"] += 1
+                        elif action == "SELL":
+                            counts["sell_fills"] += 1
+        action_rows = self.connection.execute(
+            """
+            SELECT action, result_json FROM execution_actions
+            WHERE platform = ? AND market_topic_id = ? AND created_at >= ? AND created_at < ?
+            """,
+            (platform, str(market_topic_id), int(since_ms), int(until_ms)),
+        ).fetchall()
+        for action, result_json in action_rows:
+            if str(action).upper() != "REDEEM":
+                continue
+            try:
+                result = json.loads(result_json or "{}")
+            except json.JSONDecodeError:
+                result = {}
+            counts["resolved_trades"] += 1
+            if isinstance(result, dict) and result.get("realized_pnl") is not None:
+                counts["realized_pnl"] = float(counts.get("realized_pnl", 0.0)) + float(result["realized_pnl"])
+        counts["useful"] = counts["filled_orders"] > 0
+        counts["outcome_complete"] = counts["resolved_trades"] > 0
+        counts["net_pnl_known"] = counts["outcome_complete"] and "realized_pnl" in counts
         return counts
 
-    def mark_selection_reviewed(self, selection_id: int, outcome: dict[str, Any]) -> None:
+    def mark_selection_reviewed(
+        self, selection_id: int, outcome: dict[str, Any], *, final: bool = False
+    ) -> None:
+        now = int(time.time() * 1000)
         self.connection.execute(
-            "UPDATE discovery_selections SET reviewed_at = ?, outcome_json = ? WHERE id = ?",
-            (int(time.time() * 1000), self._json(outcome), int(selection_id)),
+            """UPDATE discovery_selections
+               SET reviewed_at = ?, last_reviewed_at = ?, finalized_at = ?, outcome_json = ?
+               WHERE id = ?""",
+            (now, now, now if final else 0, self._json(outcome), int(selection_id)),
         )
         self.connection.commit()
 
@@ -1475,22 +1586,53 @@ class SessionMemory:
 
     def survey_plan(self, platform: str) -> dict[str, Any]:
         row = self.connection.execute(
-            "SELECT queries_json, next_scan_seconds, reason, updated_at"
+            "SELECT queries_json, next_scan_seconds, reason, updated_at, resume_json"
             " FROM survey_plans WHERE platform = ?",
             (str(platform),),
         ).fetchone()
         if row is None:
-            return {"queries": [], "next_scan_seconds": 0, "reason": "", "updated_at": 0}
+            return {
+                "queries": [], "next_scan_seconds": 0, "reason": "", "updated_at": 0,
+                "resume": {},
+            }
         try:
             queries = json.loads(row[0])
         except json.JSONDecodeError:
             queries = []
+        try:
+            resume = json.loads(row[4] or "{}")
+        except json.JSONDecodeError:
+            resume = {}
         return {
             "queries": [str(item) for item in queries] if isinstance(queries, list) else [],
             "next_scan_seconds": int(row[1]),
             "reason": str(row[2]),
             "updated_at": int(row[3]),
+            "resume": resume if isinstance(resume, dict) else {},
         }
+
+    def save_survey_resume(self, platform: str, resume: dict[str, Any]) -> None:
+        """Persist only the bounded scan cursor; pacing and query plans remain independent."""
+        now = int(time.time() * 1000)
+        self.connection.execute(
+            """
+            INSERT INTO survey_plans(
+                platform, queries_json, next_scan_seconds, reason, resume_json, updated_at
+            ) VALUES (?, '[]', 0, '', ?, ?)
+            ON CONFLICT(platform) DO UPDATE SET
+                resume_json = excluded.resume_json,
+                updated_at = excluded.updated_at
+            """,
+            (str(platform), self._json(resume), now),
+        )
+        self.connection.commit()
+
+    def clear_survey_resume(self, platform: str) -> None:
+        self.connection.execute(
+            "UPDATE survey_plans SET resume_json = '{}' WHERE platform = ?",
+            (str(platform),),
+        )
+        self.connection.commit()
 
     def load_discovery_priors(self, strategy: str) -> list[dict[str, Any]]:
         rows = self.connection.execute(

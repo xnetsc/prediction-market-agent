@@ -98,12 +98,6 @@ class BinancePredictionApiPlugin:
     def sync_time(self) -> None:
         self.client.sync_time()
 
-    def cycle_limits(self) -> tuple[int, int]:
-        return (
-            self.settings.max_topics_per_cycle,
-            self.settings.max_decisions_per_cycle,
-        )
-
     def account_funds(self) -> AccountFunds:
         """What the prediction wallet can spend - which is not the spot balance.
 

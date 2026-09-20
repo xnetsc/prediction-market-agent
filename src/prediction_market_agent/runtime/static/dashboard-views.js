@@ -4,12 +4,13 @@ const CATEGORY_HELP = {
     decision_provider: {title:'AI 模型服务', role:'让模型理解信息并做判断', description:'提供实际执行推理的模型。客户端账号和 OpenRouter 配置是并列方式，与“采用什么交易策略”不是一回事。', steps:['接收策略与证据','调用所选模型','返回判断或工具请求'], next:'至少配置一种可用服务。顺序数字越小越先尝试，不可用时再尝试下一个；不会同时向所有服务发请求。'},
     decision_strategy: {title:'决策策略', role:'可选地告诉模型如何分析', description:'定义模型需要关注的证据、判断过程和输出要求。它是可选分析方法，不是模型账号，也不是机器人启动条件。', steps:['选择插件或使用内置策略','读取策略文本与实测叠加层','形成交易建议'], next:'可安装并选择一项策略插件；不选时由内置决策策略工作，它的当前全文可在下方导出。'},
     market_discovery: {title:'标的发现策略', role:'决定每轮先看哪些标的', description:'机器人每轮只能深入分析少数标的。发现策略决定把这几个名额给谁：宽扫平台、按实测结果排序、再由模型挑最终名单。未安装插件时使用内置策略。', steps:['宽扫平台全部标的','按实测优先级排序','模型挑出本轮名单'], next:'不装插件也在工作。要用自己的发现逻辑再安装插件；内置策略的当前全文可在下方导出查看。'},
-    research_tool: {title:'信息与研究', role:'帮助模型补充证据', description:'在已有市场数据不够时，让模型主动查询外部资料。是否调用、查询什么，由当次决策过程决定。', steps:['模型提出问题','工具收集信息','结果回到决策'], next:'启用需要的信息工具，并补齐其访问配置。工具可用不代表每次都会被调用。'},
-    agent_policy: {title:'Agent 行为风控', role:'管住模型发起的每一次工具调用', description:'模型每次调用工具都要经过这里。工具里既有市场 API（下单、买卖），也有网页搜索、执行命令等其它工具。它问的是“这个 Agent 被允许发起这类调用吗”，不问这笔动作的业务后果。', steps:['模型提出调用','逐个询问已启用的插件','任意一个拒绝即整体失败'], next:'出厂不启用。可以同时启用多个，它们按启用顺序串成一条链：全部通过才放行；任意一个拒绝、或者它自己抛异常，这次调用就失败。'},
+    decision_evaluator: {title:'决策评估器', role:'在发现阶段低成本压缩候选输入', description:'评估器只接收已提供的发现状态，返回固定选项、评分与概率，用于候选粗筛和继续扫描判断。它不进入逐标的交易决策、不复核提案、不生成交易动作。', steps:['候选分批评分','高置信粗筛并保留质量抽样','不确定时交给发现 Agent'], next:'当前随仓库提供的插件实例使用 Jev；也可以安装任何满足同一粗筛契约的评估器。'},
+    research_tool: {title:'信息与研究', role:'注入预测市场专用工具', description:'补充跨市场查询、行情刷新、K线和业务历史等领域能力。通用搜索、网页、文件、命令和 skills 由官方 Codex/Claude CLI 自己完成。', steps:['模型提出业务问题','工具读取市场或账本','结果回到同一 CLI 会话'], next:'只启用需要的领域工具。官方 CLI 的通用能力不在这里重复配置。'},
+    agent_policy: {title:'Agent 行为风控', role:'管住框架执行的业务工具', description:'模型通过本框架协议发起的预测市场业务工具会经过这里。Codex/Claude 自己的搜索、文件、命令、skills 和插件由官方 CLI 权限与 sandbox 管理，本框架不会假装能够拦截。', steps:['模型提出业务调用','逐个询问已启用的插件','任意一个拒绝即整体失败'], next:'出厂不启用。可以同时启用多个，它们按启用顺序串成一条链：全部通过才放行；任意一个拒绝、或者它自己抛异常，这次业务调用就失败。'},
     risk: {title:'业务风控', role:'管住一切市场 API 动作', description:'审核每一次市场 API 调用——下单、撤单、赎回、转账这些写动作，以及查行情、查订单簿这些只读调用，与是谁发起的无关：模型提的、结算扫单产生的、手动触发的都一样。同一笔下单会先后经过 Agent 行为风控和业务风控两道检查，这是有意的重复。', steps:['接收市场 API 动作','逐个询问已启用的插件','任意一个拒绝即整体失败'], next:'出厂不启用任何业务风控，而且框架里根本没有内置的仓位上限或止损——要限额，要么在这里启用你自己的规则插件，要么把标准写进决策策略文本让模型读账执行。可以同时启用多个，它们按启用顺序串成一条链：全部通过才放行；任意一个拒绝、或者它自己抛异常，这次动作就失败。不要把“已启用”理解成已经配置了止损或保证不会亏损。'},
 };
 const SERVICE_TITLES = {codex:'Codex',claude:'Claude',openrouter:'OpenRouter'};
-const PLUGIN_CENTER_KINDS = ['api','market_discovery','decision_strategy','research_tool','agent_policy','risk'];
+const PLUGIN_CENTER_KINDS = ['api','market_discovery','decision_evaluator','decision_strategy','research_tool','agent_policy','risk'];
 const STRATEGY_LANES = {market_discovery:'discovery', decision_strategy:'decision'};
 const serviceTitle = name => SERVICE_TITLES[name] || (name?.startsWith('openrouter_')?'OpenRouter · '+name:name) || '没有服务名';
 function downloadCredentialBundle(name,status){
@@ -70,10 +71,23 @@ function processStrip(steps){return '<ol class="process-strip">'+steps.map(s=>'<
 function configLink(kind,name){return kind==='decision_provider'?'#model-config/'+encodeURIComponent(name):'#plugin_'+kind+'_'+name}
 function configurationFieldsHtml(kind,name,fields){
     if(kind!=='decision_provider')return '<div class="config-fields">'+fields.map(f=>fieldHtml(kind,name,f)).join('')+'</div>';
-    const primary=fields.filter(f=>/(?:_MODEL|_EFFORT|_HTTP_PROXY|_TIMEOUT_SECONDS|_MAX_OUTPUT_TOKENS|_API_KEY)$/.test(f.name));
+    const primary=fields.filter(f=>/(?:_MODEL|_EFFORT|_AGENT_CLI|_HTTP_PROXY|_TIMEOUT_SECONDS|_MAX_OUTPUT_TOKENS|_API_KEY)$/.test(f.name));
     const advanced=fields.filter(f=>!primary.includes(f));
     const primaryHtml='<div class="config-field-section"><div class="config-section-heading"><h5>模型、凭据与网络连接</h5><p>代理设置就在本区：INHERIT 跟随统一代理，DIRECT 直连，也可以填写该服务专用的完整 HTTP(S) 地址。</p></div><div class="config-fields">'+primary.map(f=>fieldHtml(kind,name,f)).join('')+'</div></div>';
     return primaryHtml+(advanced.length?'<details class="client-advanced-settings"><summary>客户端文件、登录与升级高级设置 · '+advanced.length+' 项</summary><div class="config-fields">'+advanced.map(f=>fieldHtml(kind,name,f)).join('')+'</div></details>':'');
+}
+
+const PLUGIN_FUNDS_NOTICE_KEYS=new Set(['wallet','wallet_backup','deposit','withdraw','funding']);
+const PLUGIN_NOTICE_READS=new Map();
+function pluginNoticeRead(kind,name,{fresh=false}={}){
+    const key=kind+':'+name;
+    if(fresh)PLUGIN_NOTICE_READS.delete(key);
+    if(!PLUGIN_NOTICE_READS.has(key)){
+        const request=post('/api/plugins/notices',{kind,name});
+        PLUGIN_NOTICE_READS.set(key,request);
+        request.catch(()=>PLUGIN_NOTICE_READS.get(key)===request&&PLUGIN_NOTICE_READS.delete(key));
+    }
+    return PLUGIN_NOTICE_READS.get(key);
 }
 
 /* Something a plugin needs a person for is worthless if the person is on another page.
@@ -87,7 +101,7 @@ async function refreshAttention(m){
     const asks=[];
     for(const kind of KINDS)for(const p of m.plugins[kind]||[]){
         if(!p.enabled||!p.has_notices)continue;
-        asks.push(post('/api/plugins/notices',{kind,name:p.name})
+        asks.push(pluginNoticeRead(kind,p.name)
             .then(r=>({kind,plugin:p,notices:r.notices||[],error:r.error}))
             .catch(e=>({kind,plugin:p,notices:[],error:e.message})));
     }
@@ -97,8 +111,8 @@ async function refreshAttention(m){
     for(const a of answers){
         const target='#plugin_'+a.kind+'_'+a.plugin.name;
         if(a.error)items.push({target,label:a.plugin.name,title:'插件状态读取失败：'+a.error,act:false});
-        for(const n of a.notices)items.push({
-            target,label:a.plugin.name,title:n.title,
+        for(const n of a.notices)if(n.attention!==false)items.push({
+            target:PLUGIN_FUNDS_NOTICE_KEYS.has(n.key)?'#funds':target,label:a.plugin.name,title:n.title,
             act:Boolean(n.action_label||n.dismiss_label),
         });
     }
@@ -144,7 +158,9 @@ function renderManager(m) {
             if(p.enabled&&p.readiness&&!ready)card.insertAdjacentHTML('beforeend','<details class="diagnostic-detail"><summary>为什么还未就绪？</summary><p>'+esc(p.readiness.reasons.join('；'))+'</p></details>');
             /* has_notices is what the summary carries; p.notices never existed, so this
                gate was always false and no plugin has ever shown a notice here. */
-            if(p.enabled&&p.has_notices)renderPluginNotices(card,kind,p);
+            if(p.enabled&&p.has_notices)renderPluginNotices(
+                card,kind,p,null,{exclude:PLUGIN_FUNDS_NOTICE_KEYS}
+            );
             if(p.enabled){
                 const fields=p.configuration?.fields;
                 card.insertAdjacentHTML('beforeend','<details class="plugin-config"><summary>编辑配置'+(fields?' · '+fields.length+' 项':'')+'</summary><div class="preset-slot"></div><p class="description">带 * 为必填。密钥留空会保留已保存值；删除需要明确操作。保存后将重新检查运行条件。</p>'+(fields?configurationFieldsHtml(kind,p.name,fields):'<p>此插件无需配置。</p>')+(fields?'<div class="toolbar form-actions"><button class="primary" onclick="savePluginConfig(\''+kind+'\',\''+p.name+'\')">保存配置</button><details class="inline-menu"><summary>重置配置</summary><button class="danger" onclick="deletePluginConfig(\''+kind+'\',\''+p.name+'\')">删除配置并恢复默认</button></details><span id="pluginStatus_'+kind+'_'+esc(p.name)+'" class="status plugin-card-status" role="status"></span></div>':'')+'</details>');
@@ -203,6 +219,10 @@ function renderAccountUsage(card,s,item,name){
     const box=controlNode('section','',card);box.className='usage-readout';
     controlNode('h5',openrouter?'OpenRouter 账号与额度':'账号状态与额度',box);
     if(s.message)controlNode('p',s.message,box).className='description';
+    if(openrouter&&s.agent_cli){
+        const cli=s.agent_cli,selected=cli.selected||'不可用',requested=cli.requested||'AUTO',available=(cli.available||[]).join('、')||'无';
+        const line=controlNode('p','Agent：'+selected+' CLI · 选择：'+requested+' · 当前可用：'+available,box);line.className='description'+(cli.selected?'':' danger');
+    }
     if(!usage.checked_at&&!usage.error){
         controlNode('p',openrouter?'尚未查询余额与 Key 用量。':'尚未查询当前账号额度。',box).className='description';
     }else if(usage.error){
@@ -227,7 +247,7 @@ function renderAccountUsage(card,s,item,name){
             if(usage.key.expires_at)controlNode('p','Key 到期时间：'+new Date(usage.key.expires_at).toLocaleString(),box).className='description';
         }
     }else{
-        const usageStatus=usage.status_text||((usage.available===false?'额度已用尽':usage.available===true?'额度可用':'额度未知')+(usage.note?' · '+usage.note:''));
+        const usageStatus=usage.status_text||((usage.available===false?'额度已用尽':usage.available===true?'额度可用':'额度服务未返回可判定结果')+(usage.note?' · '+usage.note:''));
         controlNode('p',usageStatus,box).className='description';
         if((usage.windows||[]).length){
             const rows=controlNode('ul','',box);rows.className='usage-windows';
@@ -247,6 +267,39 @@ function renderAccountUsage(card,s,item,name){
         if(action.group_note)controlNode('small',action.group_note,toolbar);
     }
 }
+function pluginConfigurationValues(plugin){
+    const values={};
+    for(const field of plugin?.configuration?.fields||[]){
+        values[field.name]=field.sensitive?'':field.value;
+    }
+    return values;
+}
+function renderOpenRouterCliPicker(card,s,item,plugin,name){
+    const cli=s.agent_cli||{},current=cli.requested||'AUTO',available=new Set(cli.available||[]);
+    const block=controlNode('section','',card);block.className='inline-control cli-picker';
+    const label=controlNode('label','Agent CLI ',block);label.className='field';
+    const select=controlNode('select','',label);select.setAttribute('aria-label',name+' Agent CLI');
+    for(const [value,title] of [['AUTO','自动选择（优先 Codex）'],['CODEX','Codex CLI'],['CLAUDE','Claude CLI']]){
+        const suffix=value==='AUTO'||available.has(value)?'':'（当前不可用）';
+        const option=controlNode('option',title+suffix,select);option.value=value;
+    }
+    select.value=current;
+    const status=controlNode('span','',block);status.className='status';status.setAttribute('role','status');
+    const button=controlNode('button','保存 Agent CLI',block);
+    button.onclick=async()=>{
+        const values=pluginConfigurationValues(plugin);
+        if(!Object.hasOwn(values,'OPENROUTER_AGENT_CLI')){
+            setOperationStatus(status,'当前插件没有 Agent CLI 配置字段','danger');return;
+        }
+        values.OPENROUTER_AGENT_CLI=select.value;button.disabled=true;
+        setOperationStatus(status,'正在保存并重新检查…','pending');
+        try{
+            await post('/api/plugins/config',{kind:item.kind,name:item.name,values,clear_secrets:[]});
+            await refreshManager();
+        }catch(e){setOperationStatus(status,e.message,'danger');button.disabled=false}
+    };
+    controlNode('p','OpenRouter 只提供背后的模型；这里明确选择由哪个官方 CLI 提供 Agent 工具、skills 与会话能力。',block).className='description';
+}
 function renderServiceConnections(){
     const root=document.getElementById('clientControls');
     if(root.contains(document.activeElement))return;
@@ -263,7 +316,8 @@ function renderServiceConnections(){
         const enabledLabel=controlNode('label','',selection),enabled=controlNode('input','',enabledLabel);enabled.type='checkbox';enabled.className='model-enable';enabled.dataset.name=name;enabled.checked=plugin?.enabled!==false;enabledLabel.append(' 启用此服务');
         const priorityLabel=controlNode('label','顺序 ',selection),priority=controlNode('input','',priorityLabel);priority.type='number';priority.min='1';priority.className='model-priority';priority.dataset.name=name;priority.value=plugin?.priority??99;priority.setAttribute('aria-label',name+' 模型服务顺序');
         const selectionStatus=controlNode('p','',card);selectionStatus.id='modelSelectionStatus_'+name;selectionStatus.className='status selection-status';selectionStatus.setAttribute('role','status');
-        controlNode('p',s?.control_type==='openrouter'?'使用 OpenRouter 推理 Key；余额与用量由该插件单独查询。':s?'使用客户端账号提供模型；登录和模型配置分别管理。':plugin?.enabled===false?'启用后才能加载配置。保存启用状态会重新检查运行条件。':'填写 OpenRouter API Key 并选择支持结构化输出的模型。',card).className='muted';
+        controlNode('p',s?.control_type==='openrouter'?'使用 OpenRouter 推理 Key；余额与用量由该插件单独查询。':s?'使用客户端账号提供模型；登录和模型配置分别管理。':plugin?.enabled===false?'启用后才能加载配置。保存启用状态会重新检查运行条件。':'填写 OpenRouter API Key 并选择同时支持结构化工具输入与结构化输出的模型。',card).className='muted';
+        if(s?.control_type==='openrouter')renderOpenRouterCliPicker(card,s,item,plugin,name);
         const bar=controlNode('div','',card);bar.className='toolbar service-actions';
         if(plugin?.enabled!==false){const config=controlNode('a',s?.control_type==='openrouter'?'配置 OpenRouter':s?'配置模型':'配置 OpenRouter',bar);config.className='button-link '+(!s?'primary':'');config.href=configLink('decision_provider',name)}
         let more;
@@ -1554,15 +1608,16 @@ function noticeContentHtml(box,content){
         }
     }
 }
-async function renderPluginNotices(card,kind,plugin){
+async function renderPluginNotices(card,kind,plugin,provided=null,filter={}){
     const host=controlNode('div','',card);host.className='plugin-notices';
-    host.innerHTML='<p class="muted">正在读取插件状态…</p>';
+    host.innerHTML='<p class="muted">正在从平台并行读取账户、余额、币种和链路；冷启动通常约十秒，随后刷新会复用连接与短期缓存…</p>';
     let payload;
-    try{payload=await post('/api/plugins/notices',{kind,name:plugin.name})}
-    catch(e){host.innerHTML='<p class="danger">读取插件状态失败：'+esc(e.message)+'</p>';return}
+    try{payload=provided||await pluginNoticeRead(kind,plugin.name,{fresh:Boolean(filter.fresh)})}
+    catch(e){host.innerHTML='<p class="danger">读取插件状态失败：'+esc(e.message)+'</p>';return -1}
     host.replaceChildren();
-    for(const notice of payload.notices||[]){
-        const box=controlNode('section','',host);box.className='notice-card';
+    const notices=(payload.notices||[]).filter(notice=>(!filter.only||filter.only.has(notice.key))&&(!filter.exclude||!filter.exclude.has(notice.key)));
+    for(const notice of notices){
+        const box=controlNode('section','',host);box.className='notice-card'+(notice.attention===false?' operation-card':'');
         const head=controlNode('div','',box);head.className='section-heading';
         controlNode('h5',notice.title,head);
         if(notice.description)controlNode('p',notice.description,box).className='muted';
@@ -1574,8 +1629,18 @@ async function renderPluginNotices(card,kind,plugin){
         for(const [verb,,fields] of verbs)for(const f of fields){
             if(inputs.has(f.name))continue;
             const wrap=controlNode('label',f.label+' ',box);wrap.className='field';
-            const input=controlNode(f.multiline?'textarea':'input','',wrap);
-            input.placeholder=f.placeholder||'';inputs.set(f.name,input);
+            const input=controlNode(f.type==='select'?'select':f.multiline?'textarea':'input','',wrap);
+            if(f.type==='select'){
+                for(const choice of f.options||[]){
+                    const option=controlNode('option',choice.label||choice.value,input);
+                    option.value=choice.value;
+                }
+                if(f.value)input.value=f.value;
+            }else{
+                input.placeholder=f.placeholder||'';
+                if(f.value)input.value=f.value;
+            }
+            inputs.set(f.name,input);
         }
         const bar=controlNode('div','',box);bar.className='toolbar';
         const status=controlNode('span','',bar);status.className='status muted';
@@ -1617,7 +1682,8 @@ async function renderPluginNotices(card,kind,plugin){
                     /* Redrawn whatever the answer was: "not found", "still confirming" and
                        "arrived" are all states of the same panel, and the plugin is the only
                        thing that knows which one it is in now. */
-                    renderPluginNotices(card,kind,plugin);
+                    PLUGIN_NOTICE_READS.delete(kind+':'+plugin.name);
+                    renderPluginNotices(card,kind,plugin,null,{...filter,fresh:true});
                     host.remove();
                     if(LAST_MANAGER)refreshAttention(LAST_MANAGER);
                 }catch(e){setOperationStatus(status,e.message,'danger')}
@@ -1627,6 +1693,35 @@ async function renderPluginNotices(card,kind,plugin){
         for(const [verb,label] of verbs)run(verb,label);
     }
     if(!host.children.length)host.remove();
+    return notices.length;
+}
+
+async function refreshFunds(fresh=false){
+    const root=document.getElementById('fundsWorkspace');
+    if(!root||!LAST_MANAGER)return;
+    root.innerHTML='<div class="empty-state"><strong>正在读取各平台资金状态…</strong></div>';
+    const platforms=(LAST_MANAGER.plugins.api||[]).filter(plugin=>plugin.enabled&&plugin.has_notices);
+    root.replaceChildren();
+    if(!platforms.length){
+        root.innerHTML='<div class="empty-state"><strong>尚未启用交易平台</strong><p>先在插件中心启用并配置交易平台，资金管理页才会读取对应账户。</p></div>';
+        return;
+    }
+    for(const plugin of platforms){
+        const card=controlNode('article','',root);card.className='plugin configuration-card funds-platform';
+        const head=controlNode('div','',card);head.className='section-heading';
+        controlNode('h4',plugin.name,head);
+        const badge=controlNode('span',plugin.readiness?.ready?'已连接':'待配置',head);badge.className='badge '+(plugin.readiness?.ready?'ready':'');
+        if(!plugin.readiness?.ready){
+            controlNode('p',(plugin.readiness?.reasons||[]).join('；')||'平台插件尚未就绪',card).className='danger';
+            const link=controlNode('a','打开平台配置 →',card);link.href='#plugin_api_'+plugin.name;link.className='button-link';
+            continue;
+        }
+        controlNode('h5','可用操作',card);
+        controlNode('p','钱包、充值和转出是随时可用的账户操作，不会被当成待处理事件；只有真实的到账请求或错误才会出现在顶部提醒。',card).className='muted';
+        const count=await renderPluginNotices(card,'api',plugin,null,{only:PLUGIN_FUNDS_NOTICE_KEYS,fresh});
+        if(count===0)card.remove();
+    }
+    if(!root.children.length)root.innerHTML='<div class="empty-state"><strong>已启用的平台没有资金面板</strong><p>资金能力由各平台插件声明；请检查是否安装了提供余额、充值或转出 notice 的版本。</p></div>';
 }
 
 // 转账附言：你写的话、机器人读出来的要求、做到哪一步了，以及删掉它。

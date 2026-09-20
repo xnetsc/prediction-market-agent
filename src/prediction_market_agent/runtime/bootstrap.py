@@ -5,6 +5,7 @@ import logging
 from typing import Any
 
 from ..agent.decision import make_provider
+from ..agent.decision_evaluator import DecisionEvaluatorPool
 from ..agent.market_discovery import BuiltInMarketDiscovery
 from ..agent.strategy import BuiltInDecisionStrategy
 from ..core.config import Config
@@ -40,6 +41,7 @@ class EngineComponents:
     api_registry: ApiPluginRegistry
     platforms: dict[str, PlatformRuntime]
     provider: Any
+    evaluator: DecisionEvaluatorPool
     research_contributions: list[Any]
     discovery_strategy: Any
     strategy_evolution: bool
@@ -155,6 +157,7 @@ def bootstrap_engine(
             api_registry=api_registry,
             platforms=platforms,
             provider=make_provider(config, catalog),
+            evaluator=_decision_evaluators(config, catalog),
             research_contributions=_optional_research(config, catalog),
             discovery_strategy=_discovery_strategy(config, catalog),
             strategy_evolution=bool(config.strategy_evolution),
@@ -192,3 +195,15 @@ def _optional_research(config: Config, catalog: PluginCatalog) -> list[Any]:
         except Exception as error:
             LOGGER.warning("optional research plugin %s could not start: %s", name, error)
     return contributions
+
+
+def _decision_evaluators(config: Config, catalog: PluginCatalog) -> DecisionEvaluatorPool:
+    evaluators: list[Any] = []
+    unavailable: dict[str, str] = {}
+    for name in config.decision_evaluators:
+        try:
+            evaluators.append(catalog.get("decision_evaluator", name).factory(config))
+        except Exception as error:
+            unavailable[name] = str(error)
+            LOGGER.warning("optional decision evaluator %s could not start: %s", name, error)
+    return DecisionEvaluatorPool(evaluators, unavailable)

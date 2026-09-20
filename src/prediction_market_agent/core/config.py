@@ -76,7 +76,7 @@ APPLICATION_FIELDS = (
     ),
     ApplicationConfigField(
         "plugin_directories_file", "插件目录文件", "string",
-        "保存七类插件扫描目录的 JSON 文件；文件不存在时使用安装包内置目录，界面保存后创建该文件。",
+        "保存八类插件扫描目录的 JSON 文件；文件不存在时使用安装包内置目录，界面保存后创建该文件。",
         "config/plugin_directories.json",
     ),
     ApplicationConfigField(
@@ -137,8 +137,8 @@ APPLICATION_FIELDS = (
     ),
     ApplicationConfigField(
         "agent_max_tool_steps", "Agent 工具步骤上限", "integer",
-        "每次最终决策前允许 Agent 自主调用研究工具的最大次数。它手上有二十多个工具（盘口、K 线、跨平台比价、"
-        "网页搜索、抓取页面、历史召回、查账），四步连把结算条款读完都不够，于是结论会普遍变成「信息不足，"
+        "每次最终决策前允许 Agent 自主调用框架业务工具的最大次数。它手上有盘口、K 线、跨平台比价、"
+        "业务历史和查账等工具；通用搜索与文件由官方 CLI 自己管理。步数过少会让业务核验停在半途，于是结论普遍变成「信息不足，"
         "所以观望」——那不是判断，是没得查。调高会让每次决策更慢、更贵，但研究本来就是用来消除「信息不足」的。",
         12, 0, 40,
     ),
@@ -147,12 +147,26 @@ APPLICATION_FIELDS = (
         "单个研究工具结果进入 Provider 上下文的最大字符数。", 12000, 1000, 1000000,
     ),
     ApplicationConfigField(
-        "context_window_chars", "Provider 上下文字符预算", "integer",
-        "发送给决策 Provider 的组合上下文字符预算。", 60000, 4000, 10000000,
+        "history_per_market", "历史查询默认条数", "integer",
+        "业务历史查询工具一次默认返回的记录数；不会自动拼接到模型上下文，CLI 自行读取统一历史库。", 12, 0, 10000,
     ),
     ApplicationConfigField(
-        "history_per_market", "每市场历史召回条数", "integer",
-        "自动加入当前市场决策上下文的历史记录数量。", 12, 0, 10000,
+        "discovery_max_scan_seconds", "发现安全时限（秒）", "integer",
+        "防止发现流程失控的硬时限；正常停止由协作策略的边际价值判断决定。", 45, 1, 3600,
+    ),
+    ApplicationConfigField(
+        "discovery_max_pages", "发现安全页数", "integer",
+        "单批发现允许读取的最大分页数，只是资源保护，不是候选业务配额；未处理状态可在后续批次恢复。",
+        20, 1, 10000,
+    ),
+    ApplicationConfigField(
+        "decision_max_attempts", "决策安全尝试数", "integer",
+        "单批允许开始的最大 outcome 评估次数；失败、HOLD、提案和成交会分别计数。正常停止不依赖填满此数。",
+        100, 1, 10000,
+    ),
+    ApplicationConfigField(
+        "decision_max_cycle_seconds", "决策安全时限（秒）", "integer",
+        "单批候选处理的硬时限，防止长任务阻塞持仓、订单和其他平台事件。", 180, 1, 7200,
     ),
     ApplicationConfigField(
         "shared_http_proxy", "统一 HTTP 代理", "string",
@@ -308,6 +322,7 @@ def _runtime_path(value: str, base: Path | None = None) -> Path:
 class Config:
     working_directory: Path = Path(".")
     decision_providers: tuple[str, ...] = ()
+    decision_evaluators: tuple[str, ...] = ()
 
     agent_language: str = "zh"
     """Which language the model writes its human-readable text in. Prose only, never the schema."""
@@ -326,8 +341,11 @@ class Config:
 
     agent_max_tool_steps: int = 12
     agent_tool_result_chars: int = 12_000
-    context_window_chars: int = 60_000
     history_per_market: int = 12
+    discovery_max_scan_seconds: int = 45
+    discovery_max_pages: int = 20
+    decision_max_attempts: int = 100
+    decision_max_cycle_seconds: int = 180
     session_db: Path = Path("agent_sessions.sqlite3")
     auth_db: Path = Path("admin_auth.sqlite3")
     admin_session_hours: int = 72
@@ -362,6 +380,7 @@ class Config:
         cfg = cls(
             working_directory=working_directory,
             decision_providers=managed.selected("decision_provider", ()),
+            decision_evaluators=managed.selected("decision_evaluator", ()),
             agent_language=str(values["agent_language"]),
             paper_trading=str(values["paper_trading"]) == "on",
             paper_trading_funds=float(values["paper_trading_funds"]),
@@ -369,8 +388,11 @@ class Config:
             strategy_max_trade_usdt=float(values["strategy_max_trade_usdt"]),
             agent_max_tool_steps=int(values["agent_max_tool_steps"]),
             agent_tool_result_chars=int(values["agent_tool_result_chars"]),
-            context_window_chars=int(values["context_window_chars"]),
             history_per_market=int(values["history_per_market"]),
+            discovery_max_scan_seconds=int(values["discovery_max_scan_seconds"]),
+            discovery_max_pages=int(values["discovery_max_pages"]),
+            decision_max_attempts=int(values["decision_max_attempts"]),
+            decision_max_cycle_seconds=int(values["decision_max_cycle_seconds"]),
             session_db=_runtime_path(str(values["session_db"]), working_directory),
             admin_session_hours=int(values["admin_session_hours"]),
             admin_absolute_session_hours=int(values["admin_absolute_session_hours"]),
@@ -419,8 +441,6 @@ class Config:
             raise ValueError("agent_max_tool_steps must be in [0, 40]")
         if self.agent_tool_result_chars < 1000:
             raise ValueError("agent_tool_result_chars must be at least 1000")
-        if self.context_window_chars < 4_000:
-            raise ValueError("context_window_chars must be at least 4000")
         if self.history_per_market < 0:
             raise ValueError("history_per_market cannot be negative")
         if not 1 <= self.admin_session_hours <= 720:

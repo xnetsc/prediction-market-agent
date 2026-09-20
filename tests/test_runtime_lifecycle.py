@@ -28,23 +28,21 @@ class PlatformOwnedLoopTests(unittest.TestCase):
             scan_interval_seconds=3600,
             error_backoff_seconds=30,
             error_backoff_max_seconds=900,
-            max_topics_per_cycle=3,
-            max_decisions_per_cycle=2,
             topic_page_size=100,
         )
         for runtime_type in (BinanceEventLoop, PolymarketEventLoop):
             with self.subTest(runtime=runtime_type.__name__):
                 called = threading.Event()
-                values: list[tuple[object, int]] = []
-                asked: list[int] = []
+                values: list[object] = []
+                asked: list[bool] = []
                 runtime = runtime_type(lambda: settings)
 
-                def discover_markets(maximum_topics: int):
-                    asked.append(maximum_topics)
+                def discover_markets():
+                    asked.append(True)
                     return ("discovered",)
 
-                def submit_scan(topics, decisions: int) -> None:
-                    values.append((topics, decisions))
+                def submit_scan(topics) -> None:
+                    values.append(topics)
                     called.set()
 
                 runtime.start(
@@ -52,8 +50,8 @@ class PlatformOwnedLoopTests(unittest.TestCase):
                 )
                 self.assertTrue(called.wait(1), "first plugin-owned cycle did not start")
                 runtime.stop()
-                self.assertEqual(asked, [3], "platform must ask the framework to discover")
-                self.assertEqual(values, [(("discovered",), 2)])
+                self.assertEqual(asked, [True], "platform must ask the framework to discover")
+                self.assertEqual(values, [("discovered",)])
                 self.assertFalse(runtime.status()["running"])
 
 
@@ -107,12 +105,12 @@ class RuntimeManagerTests(unittest.TestCase):
                 self.catalog = catalog
                 self.calls = []
 
-            def run_platform_once(self, platform, topics, decisions):
-                self.calls.append((platform, topics, decisions))
+            def run_platform_once(self, platform):
+                self.calls.append((platform,))
                 return {}
 
-            def process_platform_scan(self, platform, topics, decisions):
-                self.calls.append((platform, topics, decisions))
+            def process_platform_scan(self, platform, topics):
+                self.calls.append((platform, topics))
                 return {}
 
             def close(self):
@@ -135,8 +133,8 @@ class RuntimeManagerTests(unittest.TestCase):
             status = manager.reconcile()
             self.assertTrue(status["running"])
             self.assertEqual(len(starts), 1)
-            starts[0]["submit_scan"]((), 2)
-            self.assertEqual(manager._engine.calls, [("platform", (), 2)])
+            starts[0]["submit_scan"](())
+            self.assertEqual(manager._engine.calls, [("platform", ())])
             self.assertEqual(manager.status()["event_loop"]["processed"], 1)
             manager.stop()
         self.assertTrue(stops)
@@ -231,7 +229,7 @@ class RuntimeManagerTests(unittest.TestCase):
             def __init__(self, config, *, catalog):
                 self.config = config
 
-            def process_platform_scan(self, platform, topics, decisions):
+            def process_platform_scan(self, platform, topics):
                 return {}
 
             def close(self):
@@ -347,7 +345,7 @@ class RuntimeManagerTests(unittest.TestCase):
             def __init__(self, config, *, catalog):
                 self.config = config
 
-            def process_platform_scan(self, platform, topics, decisions):
+            def process_platform_scan(self, platform, topics):
                 return {}
 
             def close(self):

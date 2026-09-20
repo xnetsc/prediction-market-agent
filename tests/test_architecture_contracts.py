@@ -178,6 +178,9 @@ class ArchitectureContractTests(unittest.TestCase):
         self.assertIn("CREATE TABLE IF NOT EXISTS decision_ledger", memory)
         self.assertIn("/api/decisions", dashboard)
         self.assertIn("决策账本", dashboard)
+        self.assertIn('href="#funds"', dashboard)
+        self.assertIn('data-view="funds"', dashboard)
+        self.assertIn("账户余额、充值与转出", dashboard)
         for name in (
             "context_json",
             "research_json",
@@ -206,6 +209,7 @@ class ArchitectureContractTests(unittest.TestCase):
         expected = {
             "api_plugins": "*.py",
             "decision_provider_plugins": "*.py",
+            "decision_evaluator_plugins": "*.py",
             "decision_strategy_plugins": "*.py",
             "market_discovery_plugins": "*.py",
             "research_tool_plugins": "*.py",
@@ -216,6 +220,16 @@ class ArchitectureContractTests(unittest.TestCase):
         }
         missing = [name for name, pattern in expected.items() if not list((examples / name).glob(pattern))]
         self.assertEqual(missing, [])
+
+    def test_generic_evaluator_pipeline_does_not_branch_on_builtin_plugin_name(self) -> None:
+        sources = (
+            PACKAGE / "agent" / "decision_evaluator.py",
+            PACKAGE / "runtime" / "bootstrap.py",
+            PACKAGE / "runtime" / "evaluation.py",
+            PACKAGE / "runtime" / "market_discovery.py",
+        )
+        combined = "\n".join(path.read_text(encoding="utf-8") for path in sources).casefold()
+        self.assertNotIn("jev", combined)
 
     def test_builtin_plugin_configs_have_complete_sanitized_examples(self) -> None:
         examples = ROOT / "examples" / "plugin_configs"
@@ -233,6 +247,7 @@ class ArchitectureContractTests(unittest.TestCase):
             for kind in (
                 "api",
                 "decision_provider",
+                "decision_evaluator",
                 "decision_strategy",
                 "research_tool",
                 "risk",
@@ -250,6 +265,8 @@ class ArchitectureContractTests(unittest.TestCase):
                         if field.field_type != "secret":
                             continue
                         value = values[field.name]
+                        if value == "" and not field.required and not field.needed_to_run:
+                            continue
                         self.assertRegex(
                             value,
                             rf"^<{field.name}>$",
@@ -273,6 +290,7 @@ class ArchitectureContractTests(unittest.TestCase):
         locations = {
             "api": package_plugins / "api",
             "decision_provider": package_plugins / "providers",
+            "decision_evaluator": package_plugins / "evaluators",
             "decision_strategy": package_plugins / "strategies",
             "market_discovery": package_plugins / "market_discovery",
             "research_tool": package_plugins / "research",

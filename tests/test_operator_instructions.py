@@ -344,7 +344,7 @@ class TheyBindBeforePreferencesTests(unittest.TestCase):
         source = Path("src/prediction_market_agent/runtime/engine.py").read_text()
         body = source[source.index("def _process_platform_topics"):source.index("def _catch_up_on_notes")]
         self.assertIn("self._catch_up_on_notes(runtime)", body)
-        self.assertLess(body.index("self._catch_up_on_notes(runtime)"), body.index("self._evaluate_topic"))
+        self.assertLess(body.index("self._catch_up_on_notes(runtime)"), body.index("self._evaluate_outcome"))
 
 
 if __name__ == "__main__":

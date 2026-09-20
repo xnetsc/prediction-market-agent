@@ -157,6 +157,31 @@ class HostProxyTests(unittest.TestCase):
         self.assertNotIn("shared.internal", direct["no_proxy"])
         self.assertEqual(direct["inherited"], "false")
 
+    def test_host_snapshot_uses_the_address_for_the_current_runtime(self):
+        with tempfile.TemporaryDirectory() as directory:
+            snapshot = Path(directory) / "host-proxy.json"
+            snapshot.write_text(json.dumps({
+                "status": "proxy",
+                "proxy": "http://host.docker.internal:7892",
+                "host_proxy": "http://127.0.0.1:7892",
+                "source": "fixture",
+                "no_proxy": "",
+            }), encoding="utf-8")
+
+            on_host = resolve_proxy_settings(
+                "INHERIT", inherited_value="HOST", snapshot_file=snapshot,
+                inside_container=False,
+            )
+            in_container = resolve_proxy_settings(
+                "INHERIT", inherited_value="HOST", snapshot_file=snapshot,
+                inside_container=True,
+            )
+
+            self.assertEqual(on_host["proxy"], "http://127.0.0.1:7892")
+            self.assertEqual(in_container["proxy"], "http://host.docker.internal:7892")
+            self.assertEqual(on_host["inherited"], "true")
+            self.assertEqual(in_container["inherited"], "true")
+
     def test_relative_host_snapshot_is_resolved_from_working_directory(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -191,7 +216,7 @@ class HostProxyTests(unittest.TestCase):
             finally:
                 catalog.shutdown()
 
-    def test_platform_and_research_plugins_default_to_shared_proxy(self):
+    def test_networked_platform_plugins_default_to_shared_proxy(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             context = lambda kind, name: PluginInitializationContext(
@@ -203,9 +228,6 @@ class HostProxyTests(unittest.TestCase):
             specs = (
                 binance.initialize_plugin(context("api", "binance")),
                 polymarket.initialize_plugin(context("api", "polymarket")),
-                standard_research.initialize_plugin(
-                    context("research_tool", "standard_research")
-                ),
             )
             try:
                 for spec in specs:

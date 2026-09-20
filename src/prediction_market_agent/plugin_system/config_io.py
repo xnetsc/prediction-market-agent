@@ -73,6 +73,7 @@ def resolve_proxy_settings(
     inherited_value: str = "DIRECT",
     inherited_no_proxy: str = "",
     snapshot_file: Path | None = None,
+    inside_container: bool | None = None,
 ) -> dict[str, str]:
     """Resolve a plugin selector plus the application's shared proxy settings."""
     selected = validate_proxy_selector(value, field_name=field_name, allow_inherit=True)
@@ -92,7 +93,21 @@ def resolve_proxy_settings(
                 raise ValueError("无法读取宿主机代理检测文件，请重新运行一键启动器") from None
             if data.get("status") not in {"direct", "proxy"}:
                 raise ValueError("宿主机代理未就绪；请查看启动器日志，或改用直连/手动代理")
-            selected = data.get("proxy", "") if data["status"] == "proxy" else "DIRECT"
+            running_in_container = (
+                Path("/.dockerenv").exists() or Path("/run/.containerenv").exists()
+                if inside_container is None else bool(inside_container)
+            )
+            if data["status"] == "proxy":
+                # The launcher records both views of a loopback proxy. Containers need the
+                # translated host name; source runs on the host need the original loopback URL.
+                # Older snapshots may not have host_proxy, so retain their existing proxy value.
+                selected = (
+                    data.get("proxy", "")
+                    if running_in_container
+                    else data.get("host_proxy") or data.get("proxy", "")
+                )
+            else:
+                selected = "DIRECT"
             source = ("统一代理 · " if inherited else "") + str(data.get("source", "宿主机检测"))
             captured = str(data.get("captured_at", ""))
             bypass = ",".join(filter(None, (bypass, str(data.get("no_proxy", "")))))

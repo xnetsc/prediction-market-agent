@@ -3,6 +3,7 @@
     const views = {
         overview: ['运行概览', '查看运行状态与关键指标，管理各平台的暂停状态。', 'WORKSPACE / OVERVIEW'],
         decisions: ['决策账本', '从研究证据到执行结果，追溯每一次决策的完整过程。', 'WORKSPACE / DECISIONS'],
+        funds: ['资金管理', '查看平台余额，按平台实时支持的链与币种充值或转出。', 'WORKSPACE / FUNDS'],
         models: ['模型服务', '连接 Codex、Claude 或 OpenRouter，为机器人选择可用的模型。', 'CONFIGURATION / MODELS'],
         plugins: ['插件中心', '按用途选择能力，了解它们如何配合，再配置需要的部分。', 'CONFIGURATION / PLUGINS'],
         settings: ['程序设置', '管理部署参数、数据位置与插件目录。', 'CONFIGURATION / SETTINGS'],
@@ -62,6 +63,7 @@
         } else window.scrollTo(0, 0);
         activateChoiceLists();
         if(modelName)loadCurrentModelConfig(modelName);
+        if(name==='funds')refreshFunds();
     }
     window.showDashboardView = showView;
     window.addEventListener('hashchange', showView);

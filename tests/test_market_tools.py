@@ -3,10 +3,38 @@ from __future__ import annotations
 
 import unittest
 from types import SimpleNamespace
+from urllib.parse import parse_qs, urlsplit
 
 from prediction_market_agent.core.risk import RiskCoordinator, RuleDecision
 from prediction_market_agent.runtime.market_guard import GuardedMarketApi, MarketActionRejected
 from prediction_market_agent.runtime.market_tools import DESCRIPTIONS, MarketToolset
+
+
+class BinanceSignedTransportTests(unittest.TestCase):
+    def test_signed_reads_allow_the_configured_proxy_round_trip(self) -> None:
+        from prediction_market_agent.plugins.api._binance.read import BinancePredictionReadClient
+
+        captured = {}
+
+        class Response:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return None
+
+            def read(self):
+                return b'{"data": []}'
+
+        client = BinancePredictionReadClient("key", "secret", "https://example.test")
+        client._opener = SimpleNamespace(
+            open=lambda request, timeout: captured.update(url=request.full_url, timeout=timeout)
+            or Response()
+        )
+        client.list_markets(limit=1)
+        query = parse_qs(urlsplit(captured["url"]).query)
+        self.assertEqual(query["recvWindow"], ["20000"])
+        self.assertEqual(captured["timeout"], 15)
 
 
 class FakeBook:
@@ -79,7 +107,6 @@ class ToolCoverageTests(unittest.TestCase):
         plumbing = {
             "create_write_gateway", "write_transport", "configuration_manifest",
             "topic_page_size", "capabilities", "name", "mark",
-            "cycle_limits",      # how often the platform scans, not a decision input
             "business_risk",     # the injected filter callback, not a capability
         }
         covered = set(DESCRIPTIONS) | {
@@ -312,12 +339,14 @@ class FundsSemanticsTests(unittest.TestCase):
         plugin._write_transport.collateral_balance = lambda: 5.0
         plugin._write_transport.deposit_target = lambda: {
             "wallet_address": "0xabc", "signer_address": "0xdef", "wallet_type": "proxy",
-            "collateral_token": "0xUSDC", "self_funding_possible": False,
+            "deposit_address": "0xbridge", "source_chain": "Polygon",
+            "supported_tokens": [{"symbol": "USDC", "contract": "0xUSDC"}],
+            "collateral_token": "0xpUSD", "self_funding_possible": False,
         }
         result = plugin.ensure_funds(50.0, "pUSD")
         self.assertFalse(result.satisfied)
         self.assertEqual(result.action, "awaiting_external_transfer")
-        self.assertIn("0xabc", result.detail, "say where the money has to go")
+        self.assertIn("0xbridge", result.detail, "say where the money has to go")
 
     def test_a_confirmation_is_checked_against_the_balance_not_believed(self) -> None:
         from prediction_market_agent.plugins.api._polymarket.adapter import PolymarketApiPlugin
@@ -339,6 +368,90 @@ class FundsSemanticsTests(unittest.TestCase):
         accepted = plugin.confirm_funding()
         self.assertTrue(accepted["ok"], accepted)
         self.assertIsNone(plugin.funding_requests.pending())
+
+    def test_no_balance_increase_keeps_the_request_waiting(self) -> None:
+        """A receipt alone is not a partial answer until the venue credits spendable funds."""
+        import tempfile
+        from pathlib import Path
+        from prediction_market_agent.plugins.api._polymarket.adapter import PolymarketApiPlugin
+        from tests._support import POLYMARKET_ENV
+
+        with tempfile.TemporaryDirectory() as directory:
+            plugin = PolymarketApiPlugin({
+                **POLYMARKET_ENV,
+                "POLYMARKET_FUNDING_REQUEST_FILE": str(Path(directory) / "request.json"),
+            })
+            plugin._write_transport.collateral_balance = lambda: 5.0
+            plugin._write_transport.deposit_target = lambda: {
+                "deposit_address": "0xbridge", "source_chain": "Polygon",
+                "supported_tokens": [{"symbol": "USDC", "contract": "0xUSDC"}],
+            }
+            request = plugin.ensure_funds(50.0, "pUSD")
+            answer = plugin.confirm_funding()
+            self.assertFalse(answer["ok"])
+            self.assertEqual(plugin.funding_requests.pending()["request_id"], request.request_id)
+
+    def test_a_real_partial_credit_becomes_one_decision_answer(self) -> None:
+        """The original ask closes as partial so the runtime wakes once, not every cycle."""
+        import tempfile
+        from pathlib import Path
+        from prediction_market_agent.plugins.api._polymarket.adapter import PolymarketApiPlugin
+        from tests._support import POLYMARKET_ENV
+
+        with tempfile.TemporaryDirectory() as directory:
+            plugin = PolymarketApiPlugin({
+                **POLYMARKET_ENV,
+                "POLYMARKET_FUNDING_REQUEST_FILE": str(Path(directory) / "request.json"),
+            })
+            balance = {"value": 5.0}
+            plugin._write_transport.collateral_balance = lambda: balance["value"]
+            plugin._write_transport.deposit_target = lambda: {
+                "deposit_address": "0xbridge", "source_chain": "Polygon",
+                "supported_tokens": [{"symbol": "USDC", "contract": "0xUSDC"}],
+            }
+            request = plugin.ensure_funds(50.0, "pUSD")
+            balance["value"] = 25.0
+            answer = plugin.confirm_funding()
+            self.assertFalse(answer["ok"])
+            self.assertIsNone(plugin.funding_requests.pending())
+            status = plugin.funding_status(request.request_id)
+            self.assertEqual(status.state, "partial")
+            self.assertEqual(status.available, 25.0)
+
+    def test_provider_funding_request_settles_only_after_verified_deposit_and_balance(self) -> None:
+        """ENSURE_FUNDS survives the UI move and closes through the same deposit workflow."""
+        import tempfile
+        from pathlib import Path
+        from prediction_market_agent.plugins.api._polymarket.adapter import PolymarketApiPlugin
+        from tests._support import POLYMARKET_ENV
+
+        with tempfile.TemporaryDirectory() as directory:
+            values = {
+                **POLYMARKET_ENV,
+                "POLYMARKET_FUNDING_REQUEST_FILE": str(Path(directory) / "request.json"),
+            }
+            plugin = PolymarketApiPlugin(values)
+            balance = {"value": 5.0}
+            plugin._write_transport.collateral_balance = lambda: balance["value"]
+            plugin._write_transport.deposit_target = lambda: {
+                "wallet_address": "0xaccount", "signer_address": "0xsigner",
+                "wallet_type": "proxy", "deposit_address": "0xbridge",
+                "source_chain": "Polygon",
+                "supported_tokens": [{"symbol": "USDC", "contract": "0xUSDC"}],
+                "collateral_token": "0xpUSD", "self_funding_possible": False,
+            }
+            request = plugin.ensure_funds(50.0, "pUSD", reason="decision needs capital")
+            self.assertEqual(request.state, "pending")
+            self.assertEqual(plugin.funding_requests.pending()["reason"], "decision needs capital")
+
+            plugin._write_transport.deposit_status = lambda txid: {
+                "state": "arrived", "detail": "Bridge completed", "amount": 45.0,
+            }
+            balance["value"] = 50.0
+            answer = plugin.confirm_deposit({"txid": "0x" + "a" * 64})
+            self.assertTrue(answer["ok"], answer)
+            self.assertEqual(answer["request"], "satisfied")
+            self.assertIsNone(plugin.funding_requests.pending())
 
 
 class FrameworkStaysGenericTests(unittest.TestCase):
@@ -475,8 +588,9 @@ class TheVenueNotTheDecisionChecksTheMoneyTests(unittest.TestCase):
         # Asked for after the size is decided, and for that size - one run asked for the whole
         # depth of the book before it had settled on a trade at all.
         self.assertIn("Size the trade first", text)
-        self.assertIn("call ENSURE_FUNDS for exactly that", text)
-        self.assertIn("Not for what the book could absorb", text)
+        self.assertIn("ENSURE_FUNDS with the exact target", text)
+        self.assertIn("provider computes the transfer shortfall", text)
+        self.assertIn("Do not ask for what the book could absorb", text)
         for gone in ("Do not propose a buy larger than ACCOUNT_FUNDS", "A pending request is not funding"):
             with self.subTest(removed=gone):
                 self.assertNotIn(gone, text)

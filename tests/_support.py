@@ -72,9 +72,9 @@ POLYMARKET_ENV = {
     "POLYMARKET_CLOB_URL": "https://clob.polymarket.com",
     "POLYMARKET_DATA_URL": "https://data-api.polymarket.com",
     "POLYMARKET_RELAYER_URL": "https://relayer-v2.polymarket.com",
+    "POLYMARKET_BRIDGE_URL": "https://bridge.polymarket.com",
     "POLYMARKET_RPC_URL": "https://polygon.drpc.org",
     "POLYMARKET_CHAIN_ID": "137",
     "POLYMARKET_HTTP_PROXY": "DIRECT",
 }
-
 

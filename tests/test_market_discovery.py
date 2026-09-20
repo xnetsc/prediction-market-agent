@@ -64,9 +64,6 @@ class FakePlugin:
     def topic_page_size(self) -> int:
         return 25
 
-    def cycle_limits(self) -> tuple[int, int]:
-        return (5, 5)
-
     def list_topics(self, *, offset: int, limit: int) -> TopicPage:
         self.list_calls += 1
         page = self.topics[offset : offset + limit]
@@ -114,7 +111,7 @@ class RecordingProvider:
                 else {"market_id": f"m{first['topic_id']}", "outcome_id": "yes"}
             )
             self.tool_results.append(executor(name, arguments))
-        picks = payload["candidates"][: payload["maximum_selections"]]
+        picks = payload["candidates"][:5]
         return AgentRunResult(
             value={
                 "selections": [
@@ -156,7 +153,7 @@ class DiscoveryTests(unittest.TestCase):
     def test_survey_is_wider_than_the_platform_submission_ceiling(self) -> None:
         plugin, provider = FakePlugin(60), RecordingProvider()
         selected = self._engine(provider).discover(
-            platform="fake", plugin=plugin, maximum_topics=5
+            platform="fake", plugin=plugin
         )
         observed = self.memory.connection.execute(
             "SELECT COUNT(*) FROM topic_observations"
@@ -172,8 +169,8 @@ class DiscoveryTests(unittest.TestCase):
     def test_selection_rotates_instead_of_repeating_the_same_slate(self) -> None:
         plugin, provider = FakePlugin(60), RecordingProvider()
         engine = self._engine(provider)
-        first = engine.discover(platform="fake", plugin=plugin, maximum_topics=5)
-        second = engine.discover(platform="fake", plugin=plugin, maximum_topics=5)
+        first = engine.discover(platform="fake", plugin=plugin)
+        second = engine.discover(platform="fake", plugin=plugin)
         self.assertTrue(first and second)
         self.assertFalse(
             {topic.topic_id for topic in first} & {topic.topic_id for topic in second},
@@ -185,9 +182,9 @@ class DiscoveryTests(unittest.TestCase):
         plugin = FakePlugin(30)
         budget = BuiltInMarketDiscovery().budget()
         provider = RecordingProvider(tools=("TOPIC_DETAIL", "OUTCOME_BOOK", "TOPIC_HISTORY"))
-        self._engine(provider).discover(platform="fake", plugin=plugin, maximum_topics=3)
-        self.assertLessEqual(plugin.detail_calls, budget.detail_lookups)
-        self.assertLessEqual(plugin.book_calls, budget.book_lookups)
+        self._engine(provider).discover(platform="fake", plugin=plugin)
+        self.assertLessEqual(plugin.detail_calls, budget.detail_read_safety_limit)
+        self.assertLessEqual(plugin.book_calls, budget.book_read_safety_limit)
         self.assertIn("MARKET_DISCOVERY_STRATEGY", provider.instructions)
         self.assertIn("MISSION", provider.instructions)
 
@@ -205,7 +202,7 @@ class DiscoveryTests(unittest.TestCase):
                 return super().run(payload, **options)
 
         provider = Verifier()
-        self._engine(provider).discover(platform="fake", plugin=plugin, maximum_topics=3)
+        self._engine(provider).discover(platform="fake", plugin=plugin)
         candidates = provider.requests[0]["candidates"]
         self.assertTrue(candidates)
         self.assertFalse(any("spread" in item for item in candidates),
@@ -223,7 +220,7 @@ class DiscoveryTests(unittest.TestCase):
     def test_missing_agent_degrades_to_prescore_and_is_recorded_as_such(self) -> None:
         plugin = FakePlugin(20)
         selected = self._engine(LegacyProvider()).discover(
-            platform="fake", plugin=plugin, maximum_topics=4
+            platform="fake", plugin=plugin
         )
         strategies = {
             row[0]
@@ -231,16 +228,16 @@ class DiscoveryTests(unittest.TestCase):
                 "SELECT DISTINCT strategy FROM discovery_selections"
             )
         }
-        self.assertEqual(len(selected), 4, "a failing Agent must not stop the platform")
+        self.assertEqual(len(selected), 20, "a failing Agent must not stop or silently truncate the platform")
         self.assertEqual(strategies, {"built_in:mechanical"})
 
     def test_budget_refuses_reads_beyond_the_configured_allowance(self) -> None:
         plugin = FakePlugin(30)
         budget = BuiltInMarketDiscovery().budget()
-        provider = RecordingProvider(tools=("TOPIC_DETAIL",) * (budget.detail_lookups + 2))
-        self._engine(provider).discover(platform="fake", plugin=plugin, maximum_topics=2)
+        provider = RecordingProvider(tools=("TOPIC_DETAIL",) * (budget.detail_read_safety_limit + 2))
+        self._engine(provider).discover(platform="fake", plugin=plugin)
         refused = [item for item in provider.tool_results if not item.get("ok")]
-        self.assertEqual(plugin.detail_calls, budget.detail_lookups)
+        self.assertEqual(plugin.detail_calls, budget.detail_read_safety_limit)
         self.assertTrue(refused and "budget exhausted" in refused[0]["error"])
 
 
@@ -634,7 +631,7 @@ class EveryModelCallIsRecordedTests(unittest.TestCase):
         DiscoveryEngine(
             memory=self.memory, provider=provider, strategy=BuiltInMarketDiscovery(),
             evolution_enabled=True,
-        ).discover(platform="fake", plugin=FakePlugin(30), maximum_topics=3)
+        ).discover(platform="fake", plugin=FakePlugin(30))
 
     def test_a_round_that_selected_something_is_recorded(self) -> None:
         self._discover(RecordingProvider())
@@ -694,7 +691,7 @@ class DiscoveryCanFillItsOwnGapsTests(unittest.TestCase):
     def test_the_open_web_is_offered_to_discovery_not_only_to_decisions(self) -> None:
         provider = RecordingProvider()
         self._engine(provider, [self._Research()]).discover(
-            platform="fake", plugin=FakePlugin(20), maximum_topics=2
+            platform="fake", plugin=FakePlugin(20)
         )
         offered = provider.tool_descriptions or {}
         for tool in ("SEARCH_WEB", "FETCH_URL"):
@@ -703,7 +700,7 @@ class DiscoveryCanFillItsOwnGapsTests(unittest.TestCase):
     def test_a_research_tool_actually_runs_from_discovery(self) -> None:
         provider = RecordingProvider(tools=("SEARCH_WEB",))
         self._engine(provider, [self._Research()]).discover(
-            platform="fake", plugin=FakePlugin(20), maximum_topics=2
+            platform="fake", plugin=FakePlugin(20)
         )
         used = [r for r in provider.tool_results if r.get("tool") == "SEARCH_WEB"]
         self.assertTrue(used and used[0]["ok"], f"the tool was offered but not usable: {provider.tool_results}")
@@ -711,7 +708,7 @@ class DiscoveryCanFillItsOwnGapsTests(unittest.TestCase):
     def test_without_research_plugins_discovery_still_works(self) -> None:
         provider = RecordingProvider()
         selected = self._engine(provider, []).discover(
-            platform="fake", plugin=FakePlugin(20), maximum_topics=2
+            platform="fake", plugin=FakePlugin(20)
         )
         self.assertTrue(selected)
         self.assertNotIn("SEARCH_WEB", provider.tool_descriptions or {})
@@ -754,7 +751,7 @@ class OneBadCandidateDoesNotEndTheRoundTests(unittest.TestCase):
         selected = DiscoveryEngine(
             memory=self.memory, provider=provider, strategy=BuiltInMarketDiscovery(),
             evolution_enabled=True,
-        ).discover(platform="fake", plugin=plugin, maximum_topics=3)
+        ).discover(platform="fake", plugin=plugin)
         return selected, provider
 
     def test_a_market_with_no_order_book_still_leaves_a_round(self) -> None:
@@ -821,7 +818,7 @@ class TheAgentSetsTheNextLookTests(unittest.TestCase):
 
     def test_what_it_asked_for_is_kept(self) -> None:
         self._engine(self._Planner()).discover(
-            platform="fake", plugin=FakePlugin(20), maximum_topics=2
+            platform="fake", plugin=FakePlugin(20)
         )
         plan = self.memory.survey_plan("fake")
         self.assertEqual(plan["next_scan_seconds"], 900)
@@ -836,7 +833,7 @@ class TheAgentSetsTheNextLookTests(unittest.TestCase):
             platform="fake", queries=["opec meeting"], next_scan_seconds=0, reason="",
         )
         self._engine(RecordingProvider()).discover(
-            platform="fake", plugin=plugin, maximum_topics=2
+            platform="fake", plugin=plugin
         )
         self.assertEqual(asked, ["opec meeting"])
 
@@ -847,7 +844,7 @@ class TheAgentSetsTheNextLookTests(unittest.TestCase):
             platform="fake", queries=["nothing matches this"], next_scan_seconds=0, reason="",
         )
         selected = self._engine(RecordingProvider()).discover(
-            platform="fake", plugin=plugin, maximum_topics=2
+            platform="fake", plugin=plugin
         )
         self.assertTrue(selected, "the listing must still be surveyed")
 
@@ -863,7 +860,7 @@ class TheAgentSetsTheNextLookTests(unittest.TestCase):
         )
         self.assertTrue(
             self._engine(RecordingProvider()).discover(
-                platform="fake", plugin=plugin, maximum_topics=2
+                platform="fake", plugin=plugin
             )
         )
 
@@ -1003,7 +1000,7 @@ class ShortDatedSmallAndOutAgainTests(unittest.TestCase):
         DiscoveryEngine(
             memory=self.memory, provider=provider,
             strategy=BuiltInMarketDiscovery(horizon_days=3), evolution_enabled=False,
-        ).discover(platform="fake", plugin=_HorizonPlatform(), maximum_topics=2)
+        ).discover(platform="fake", plugin=_HorizonPlatform())
         request = provider.requests[0]
         self.assertEqual(len(request["candidates"]), 4, "nothing is withheld from the round")
         preferences = request["operator_preferences"]
@@ -1018,7 +1015,7 @@ class ShortDatedSmallAndOutAgainTests(unittest.TestCase):
         DiscoveryEngine(
             memory=self.memory, provider=provider,
             strategy=BuiltInMarketDiscovery(horizon_days=3), evolution_enabled=False,
-        ).discover(platform="fake", plugin=_NearAndFarPlatform(), maximum_topics=2)
+        ).discover(platform="fake", plugin=_NearAndFarPlatform())
         candidates = provider.requests[0]["candidates"]
         self.assertEqual(candidates[0]["topic_id"], "near-1")
         self.assertTrue(candidates[0]["settles_inside_preferred_window"])
@@ -1097,7 +1094,7 @@ class WhenToComeBackTests(unittest.TestCase):
         DiscoveryEngine(
             memory=self.memory, provider=provider,
             strategy=BuiltInMarketDiscovery(horizon_days=3), evolution_enabled=False,
-        ).discover(platform="fake", plugin=_HorizonPlatform(), maximum_topics=2)
+        ).discover(platform="fake", plugin=_HorizonPlatform())
         request = provider.requests[0]
         self.assertEqual(request["operator_preferences"]["settles_within_days"], 3)
         self.assertIn("VERIFY_TOPICS", request["nothing_here_is_priced_yet"])
@@ -1149,7 +1146,7 @@ class TheVenueIsAskedForWhatSettlesSoonTests(unittest.TestCase):
         DiscoveryEngine(
             memory=self.memory, provider=provider,
             strategy=BuiltInMarketDiscovery(horizon_days=3), evolution_enabled=False,
-        ).discover(platform="fake", plugin=venue, maximum_topics=2)
+        ).discover(platform="fake", plugin=venue)
         self.assertEqual(venue.deadline_calls[0]["window_days"], 3, "the window is the horizon")
         observed = {row["market_topic_id"] for row in self.memory.connection.execute(
             "SELECT market_topic_id FROM topic_observations"
@@ -1164,7 +1161,7 @@ class TheVenueIsAskedForWhatSettlesSoonTests(unittest.TestCase):
         DiscoveryEngine(
             memory=self.memory, provider=provider,
             strategy=BuiltInMarketDiscovery(horizon_days=3), evolution_enabled=False,
-        ).discover(platform="fake", plugin=FakePlugin(topics=3), maximum_topics=2)
+        ).discover(platform="fake", plugin=FakePlugin(topics=3))
         self.assertTrue(provider.requests, "the ordinary listing round stopped working")
 
     def test_an_event_whose_date_has_passed_reads_as_settled(self) -> None:
@@ -1239,7 +1236,7 @@ class TheRoundCanFetchItsOwnCandidatesTests(unittest.TestCase):
         selected = DiscoveryEngine(
             memory=self.memory, provider=provider,
             strategy=BuiltInMarketDiscovery(horizon_days=3), evolution_enabled=False,
-        ).discover(platform="fake", plugin=venue, maximum_topics=2)
+        ).discover(platform="fake", plugin=venue)
         self.assertEqual(venue.searched, ["settling tonight"])
         self.assertEqual([topic.topic_id for topic in selected], ["soon-1"])
 
@@ -1250,7 +1247,7 @@ class TheRoundCanFetchItsOwnCandidatesTests(unittest.TestCase):
         DiscoveryEngine(
             memory=self.memory, provider=provider,
             strategy=BuiltInMarketDiscovery(horizon_days=3), evolution_enabled=False,
-        ).discover(platform="fake", plugin=self._ListingOnlyVenue(), maximum_topics=1)
+        ).discover(platform="fake", plugin=self._ListingOnlyVenue())
         self.assertIn("TOPICS_BY_DEADLINE", provider.tool_descriptions)
         self.assertIn("FIND_TOPICS", provider.tool_descriptions)
         text = BuiltInMarketDiscovery(horizon_days=3).instructions

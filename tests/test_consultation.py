@@ -510,7 +510,16 @@ class DerivableConfigurationTests(unittest.TestCase):
         derive = inspect.getsource(write.PolymarketWriteTransport.derive_credentials)
         self.assertIn("self._http_client(", derive, "the transport must be the plugin's own")
         require = inspect.getsource(write.PolymarketWriteTransport._require_client)
-        self.assertIn("self.derive_credentials(environment)", require)
+        self.assertIn("pool.submit(self.derive_credentials, environment)", require)
+        self.assertIn("_resolve_requested_wallet_sync", require)
+
+    def test_an_existing_clob_key_is_derived_before_trying_to_create_one(self) -> None:
+        """The expected create-400 must not add a full round trip to every cold account read."""
+        import inspect
+        from prediction_market_agent.plugins.api._polymarket.write import PolymarketWriteTransport
+
+        source = inspect.getsource(PolymarketWriteTransport.derive_credentials)
+        self.assertLess(source.index("derive_api_key_sync"), source.index("create_api_key_sync"))
 
     def test_generating_a_wallet_is_offered_and_never_taken_unasked(self) -> None:
         """Who holds the key is the operator's decision, so it waits for them to make it."""
@@ -532,13 +541,13 @@ class NoticesReachThePageTests(unittest.TestCase):
         from prediction_market_agent.plugin_system.discovery import PluginSpec
 
         script = Path("src/prediction_market_agent/runtime/static/dashboard-views.js").read_text()
-        gate = [
-            line for line in script.split("\n")
-            if "renderPluginNotices(card" in line and "p.enabled" in line
-        ]
-        self.assertEqual(len(gate), 1, "one place decides whether a plugin's notices are drawn")
-        self.assertIn("p.has_notices", gate[0])
-        self.assertNotIn("p.notices", gate[0])
+        gate = script[script.index("if(p.enabled&&p.has_notices)"):]
+        gate = gate[:gate.index("if(p.enabled){")]
+        self.assertIn("renderPluginNotices(", gate)
+        self.assertIn("p.has_notices", gate)
+        self.assertNotIn("p.notices", gate)
+        self.assertIn("exclude:PLUGIN_FUNDS_NOTICE_KEYS", gate,
+                      "fund operations belong on the dedicated funds page")
 
         manifest = PluginSpec(
             kind="api", name="probe", description="a plugin that has something to say",

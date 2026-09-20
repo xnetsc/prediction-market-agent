@@ -1,17 +1,21 @@
 from __future__ import annotations
 
 import json
+import hashlib
+import os
 import secrets
 import subprocess
 import tempfile
 import threading
 import time
+import uuid
 import urllib.error
 import urllib.parse
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from contextlib import contextmanager
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from prediction_market_agent.agent.decision import (
     DecisionProviderError,
@@ -30,8 +34,11 @@ from prediction_market_agent.plugin_system.discovery import (
 )
 from prediction_market_agent.plugin_system.network_diagnostics import configured_proxy_route
 from prediction_market_agent.plugins.providers._shared import (
+    client_subprocess_environment,
+    configured_client_homes,
     resolve_executable,
-    subprocess_environment,
+    shared_agent_history_instruction,
+    subprocess_output_text,
 )
 
 
@@ -41,7 +48,187 @@ OPENROUTER_MODELS_URL = (
 )
 OPENROUTER_KEY_URL = OPENROUTER_API_BASE + "/key"
 OPENROUTER_CREDITS_URL = OPENROUTER_API_BASE + "/credits"
-STRUCTURED_OUTPUT_PARAMETER = "structured_outputs"
+REQUIRED_MODEL_PARAMETERS = frozenset({"structured_outputs", "tools"})
+CODEX_REQUIRED_MODEL_PARAMETERS = REQUIRED_MODEL_PARAMETERS
+AGENT_CLI_OPTIONS = ("AUTO", "CODEX", "CLAUDE")
+
+
+def _server_tool_parameters(tool: dict[str, Any]) -> dict[str, Any]:
+    """Translate official CLI server-tool options to OpenRouter's equivalent shape."""
+    parameters = dict(tool.get("parameters") or {})
+    for name in (
+        "engine",
+        "max_results",
+        "max_total_results",
+        "max_uses",
+        "search_context_size",
+        "max_characters",
+        "user_location",
+        "allowed_domains",
+        "excluded_domains",
+    ):
+        if name in tool:
+            parameters[name] = tool[name]
+    filters = tool.get("filters")
+    if isinstance(filters, dict) and isinstance(filters.get("allowed_domains"), list):
+        parameters["allowed_domains"] = filters["allowed_domains"]
+    if "blocked_domains" in tool:
+        parameters["excluded_domains"] = tool["blocked_domains"]
+    return parameters
+
+
+def _adapt_server_tools(
+    body: dict[str, Any], native_model_parameters: frozenset[str] = frozenset()
+) -> dict[str, tuple[str, str]]:
+    """Keep CLI protocol I/O while replacing provider-specific hosted tool declarations.
+
+    OpenRouter executes these tools inside the same Responses or Messages request and returns the
+    result using the protocol the caller used.  The child CLI therefore retains its native event
+    stream and Agent loop; only the declaration at this private forwarding boundary changes.
+    """
+    tools = body.get("tools")
+    if not isinstance(tools, list):
+        return {}
+    adapted: list[Any] = []
+    namespace_names: dict[str, tuple[str, str]] = {}
+    for tool in tools:
+        if not isinstance(tool, dict):
+            adapted.append(tool)
+            continue
+        tool_type = str(tool.get("type", ""))
+        if tool_type == "namespace" and "namespace_tools" not in native_model_parameters:
+            namespace = str(tool.get("name", ""))
+            for child in tool.get("tools") or []:
+                if not isinstance(child, dict) or child.get("type") != "function":
+                    continue
+                flattened = dict(child)
+                child_name = str(child.get("name", ""))
+                if not child_name:
+                    continue
+                if namespace and namespace != "functions":
+                    candidate = namespace + "__" + child_name
+                    if len(candidate) > 64:
+                        digest = hashlib.sha256(candidate.encode()).hexdigest()[:12]
+                        candidate = candidate[: 51] + "_" + digest
+                    flattened["name"] = candidate
+                    namespace_names[candidate] = (namespace, child_name)
+                adapted.append(flattened)
+            continue
+        if tool_type in {"web_search", "web_search_preview"} or tool_type.startswith(
+            "web_search_"
+        ):
+            native_search = tool_type in native_model_parameters or (
+                tool_type in {"web_search", "web_search_preview"}
+                and "web_search_options" in native_model_parameters
+            )
+            if native_search:
+                adapted.append(tool)
+                continue
+            replacement: dict[str, Any] = {"type": "openrouter:web_search"}
+            parameters = _server_tool_parameters(tool)
+            if parameters:
+                replacement["parameters"] = parameters
+            adapted.append(replacement)
+            continue
+        if tool_type == "web_fetch" or tool_type.startswith("web_fetch_"):
+            if tool_type in native_model_parameters:
+                adapted.append(tool)
+                continue
+            replacement = {"type": "openrouter:web_fetch"}
+            parameters = _server_tool_parameters(tool)
+            if parameters:
+                replacement["parameters"] = parameters
+            adapted.append(replacement)
+            continue
+        adapted.append(tool)
+    body["tools"] = adapted
+    return namespace_names
+
+
+def _adapt_optional_parameters(
+    body: dict[str, Any], native_model_parameters: frozenset[str]
+) -> None:
+    """Drop only Codex transport optimizations a selected model did not advertise."""
+    for field in ("client_metadata", "parallel_tool_calls", "prompt_cache_key", "store"):
+        if field not in native_model_parameters:
+            body.pop(field, None)
+    reasoning = body.get("reasoning")
+    if isinstance(reasoning, dict) and "reasoning_summary" not in native_model_parameters:
+        reasoning.pop("summary", None)
+    if "include_reasoning" not in native_model_parameters:
+        body.pop("include", None)
+
+
+def _adapt_claude_parameters(
+    body: dict[str, Any],
+    model: str,
+    native_model_parameters: frozenset[str],
+) -> None:
+    """Remove only Claude transport hints the selected route cannot honor.
+
+    Claude Code 2.1 sends output_config.effort even when the user did not configure an
+    OpenRouter reasoning effort.  Anthropic first-party routes accept that native field, but a
+    non-Anthropic model can advertise generic reasoning support while rejecting this
+    Anthropic-specific nesting under provider.require_parameters.  Structured output format is
+    retained independently.
+    """
+    output_config = body.get("output_config")
+    if not isinstance(output_config, dict):
+        return
+    native_effort = (
+        model.startswith("anthropic/")
+        or model.startswith("~anthropic/")
+        or "output_config" in native_model_parameters
+        or "effort" in native_model_parameters
+    )
+    if not native_effort:
+        output_config.pop("effort", None)
+    if not output_config:
+        body.pop("output_config", None)
+
+
+def _restore_namespace_calls(
+    payload: bytes, content_type: str, names: dict[str, tuple[str, str]]
+) -> bytes:
+    if not names:
+        return payload
+
+    def restore(value: Any) -> Any:
+        if isinstance(value, dict):
+            name = value.get("name")
+            if isinstance(name, str) and name in names:
+                namespace, child = names[name]
+                value["name"] = child
+                value["namespace"] = namespace
+            for child_value in value.values():
+                restore(child_value)
+        elif isinstance(value, list):
+            for child_value in value:
+                restore(child_value)
+        return value
+
+    if "text/event-stream" not in content_type.lower():
+        try:
+            return json.dumps(restore(json.loads(payload))).encode("utf-8")
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            return payload
+    output: list[bytes] = []
+    for line in payload.splitlines(keepends=True):
+        prefix, separator, data = line.partition(b"data:")
+        if not separator:
+            output.append(line)
+            continue
+        suffix = b"\n" if data.endswith(b"\n") else b""
+        raw = data.strip()
+        if not raw or raw == b"[DONE]":
+            output.append(line)
+            continue
+        try:
+            rewritten = json.dumps(restore(json.loads(raw))).encode("utf-8")
+            output.append(prefix + separator + b" " + rewritten + suffix)
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            output.append(line)
+    return b"".join(output)
 
 
 class NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -65,7 +252,7 @@ def model_choices(
     models_url: str = OPENROUTER_MODELS_URL,
     proxy_settings: dict[str, str] | None = None,
 ) -> list[dict[str, str]]:
-    """Return only models that OpenRouter advertises for structured output."""
+    """Return only models advertising schema output and schema-defined tool input."""
     parsed = urllib.parse.urlsplit(models_url)
     if parsed.scheme != "https" and not (
         parsed.scheme == "http"
@@ -84,12 +271,26 @@ def model_choices(
             data = json.loads(response.read(8 * 1024 * 1024))["data"]
         if not isinstance(data, list):
             raise ValueError("Invalid model list")
+        agent_cli = str(
+            values.get("_RESOLVED_AGENT_CLI")
+            or values.get("OPENROUTER_AGENT_CLI")
+            or "CODEX"
+        ).upper()
+        if agent_cli == "AUTO":
+            agent_cli = "CODEX"
+        required_parameters = (
+            CODEX_REQUIRED_MODEL_PARAMETERS
+            if agent_cli == "CODEX"
+            else REQUIRED_MODEL_PARAMETERS
+        )
         supported = []
         for item in data:
             if not isinstance(item, dict) or not isinstance(item.get("id"), str):
                 continue
             parameters = item.get("supported_parameters")
-            if not isinstance(parameters, list) or STRUCTURED_OUTPUT_PARAMETER not in parameters:
+            if not isinstance(parameters, list) or not required_parameters.issubset(
+                parameters
+            ):
                 continue
             supported.append(
                 {
@@ -103,7 +304,7 @@ def model_choices(
             f"获取 OpenRouter 模型列表失败：HTTP {error.code}，请检查 Key 和代理"
         ) from None
     except (OSError, ValueError, KeyError, TypeError):
-        raise ValueError("获取 OpenRouter 结构化输出模型列表失败，请检查网络、Key 和代理") from None
+        raise ValueError("获取 OpenRouter 结构化输入/输出模型列表失败，请检查网络、Key 和代理") from None
 
 
 def _account_json(
@@ -148,23 +349,25 @@ class OpenRouterAccountControl:
         *,
         key_url: str = OPENROUTER_KEY_URL,
         credits_url: str = OPENROUTER_CREDITS_URL,
+        values_loader: Callable[[], dict[str, Any]] | None = None,
     ):
         self.configuration = configuration
         self.context = context
         self.key_url = key_url
         self.credits_url = credits_url
+        self.values_loader = values_loader or configuration.load
         self.lock = threading.RLock()
         self.usage: dict[str, Any] = {}
         self.controls = PluginControls(self.snapshot, self.action)
 
     def proxy_settings(self) -> dict[str, str]:
-        values = self.configuration.load()
+        values = self.values_loader()
         return self.context.proxy_settings(
             values["OPENROUTER_HTTP_PROXY"], field_name="OPENROUTER_HTTP_PROXY"
         )
 
     def snapshot(self) -> dict[str, Any]:
-        values = self.configuration.load()
+        values = self.values_loader()
         api_key = str(values.get("OPENROUTER_API_KEY", "")).strip()
         model = str(values.get("OPENROUTER_MODEL", "")).strip()
         configured = bool(api_key and model)
@@ -175,15 +378,49 @@ class OpenRouterAccountControl:
             proxy_message = str(error)
         with self.lock:
             usage = json.loads(json.dumps(self.usage))
+        requested_cli = str(values.get("OPENROUTER_AGENT_CLI", "AUTO") or "AUTO").upper()
+        available_clis: list[str] = []
+        unavailable_clis: dict[str, str] = {}
+        for cli_name, field_name, default in (
+            ("CODEX", "CODEX_CLI_PATH", "codex"),
+            ("CLAUDE", "CLAUDE_CLI_PATH", "claude"),
+        ):
+            cli_load, _save, _delete, _storage = json_file_callbacks(
+                self.context.working_directory
+                / "config"
+                / "plugins"
+                / f"{cli_name.lower()}.json"
+            )
+            configured_path = str(cli_load().get(field_name, default) or default).strip()
+            try:
+                resolve_executable(configured_path)
+                available_clis.append(cli_name)
+            except DecisionProviderError as error:
+                unavailable_clis[cli_name] = str(error)
+        selected_cli = (
+            next((item for item in ("CODEX", "CLAUDE") if item in available_clis), "")
+            if requested_cli == "AUTO"
+            else requested_cli if requested_cli in available_clis else ""
+        )
+        account_configured = configured
+        configured = account_configured and bool(selected_cli)
+        if not account_configured:
+            message = "请填写推理 API Key 并选择结构化输出模型"
+        elif not selected_cli:
+            message = "OpenRouter 配置完整，但没有可用的 Codex 或 Claude CLI"
+        else:
+            message = "推理 Key、结构化输出模型与 Agent CLI 均已就绪"
         return {
             "control_type": "openrouter",
             "state": "configured" if configured else "incomplete",
-            "message": (
-                "推理 Key 与结构化输出模型均已配置"
-                if configured
-                else "请填写推理 API Key 并选择结构化输出模型"
-            ),
+            "message": message,
             "model": model,
+            "agent_cli": {
+                "requested": requested_cli,
+                "selected": selected_cli,
+                "available": available_clis,
+                "unavailable": unavailable_clis,
+            },
             "proxy_message": proxy_message,
             "usage": usage,
             "actions": [
@@ -205,7 +442,7 @@ class OpenRouterAccountControl:
         if action != "refresh_usage":
             raise ValueError("Unknown OpenRouter control action")
         checked_at = int(time.time())
-        configured = self.configuration.load()
+        configured = self.values_loader()
         api_key = str(configured.get("OPENROUTER_API_KEY", "")).strip()
         management_key = str(
             configured.get("OPENROUTER_MANAGEMENT_API_KEY", "")
@@ -279,110 +516,14 @@ class OpenRouterAccountControl:
         return reading
 
 
-def _codex_messages(body: dict[str, Any]) -> list[dict[str, str]]:
-    messages: list[dict[str, str]] = []
-    instructions = body.get("instructions")
-    if isinstance(instructions, str) and instructions.strip():
-        messages.append({"role": "system", "content": instructions})
-    for item in body.get("input") or []:
-        if not isinstance(item, dict) or item.get("type") != "message":
-            continue
-        text = "\n".join(
-            str(part.get("text", ""))
-            for part in item.get("content") or []
-            if isinstance(part, dict)
-            and part.get("type") in {"input_text", "output_text"}
-        )
-        role = str(item.get("role") or "user")
-        if role == "developer":
-            role = "system"
-        if role not in {"system", "user", "assistant"}:
-            continue
-        messages.append({"role": role, "content": text})
-    return messages
-
-
-def _responses_event_stream(answer: str, usage: dict[str, Any]) -> bytes:
-    response_id = "resp_" + secrets.token_hex(12)
-    item_id = "msg_" + secrets.token_hex(12)
-    content = {"type": "output_text", "text": answer, "annotations": []}
-    item = {
-        "id": item_id,
-        "type": "message",
-        "status": "completed",
-        "role": "assistant",
-        "content": [content],
-    }
-    response_usage = {
-        "input_tokens": int(usage.get("prompt_tokens") or 0),
-        "output_tokens": int(usage.get("completion_tokens") or 0),
-        "total_tokens": int(usage.get("total_tokens") or 0),
-    }
-    events = (
-        {
-            "type": "response.created",
-            "response": {
-                "id": response_id,
-                "object": "response",
-                "status": "in_progress",
-                "output": [],
-            },
-        },
-        {
-            "type": "response.output_item.added",
-            "output_index": 0,
-            "item": {**item, "status": "in_progress", "content": []},
-        },
-        {
-            "type": "response.content_part.added",
-            "item_id": item_id,
-            "output_index": 0,
-            "content_index": 0,
-            "part": {**content, "text": ""},
-        },
-        {
-            "type": "response.output_text.delta",
-            "item_id": item_id,
-            "output_index": 0,
-            "content_index": 0,
-            "delta": answer,
-        },
-        {
-            "type": "response.output_text.done",
-            "item_id": item_id,
-            "output_index": 0,
-            "content_index": 0,
-            "text": answer,
-        },
-        {
-            "type": "response.content_part.done",
-            "item_id": item_id,
-            "output_index": 0,
-            "content_index": 0,
-            "part": content,
-        },
-        {"type": "response.output_item.done", "output_index": 0, "item": item},
-        {
-            "type": "response.completed",
-            "response": {
-                "id": response_id,
-                "object": "response",
-                "status": "completed",
-                "output": [item],
-                "usage": response_usage,
-            },
-        },
-    )
-    return (
-        "".join(
-            "data: " + json.dumps(event, ensure_ascii=False) + "\n\n"
-            for event in events
-        )
-        + "data: [DONE]\n\n"
-    ).encode("utf-8")
-
-
 class _BridgeServer(ThreadingHTTPServer):
+    """OpenRouter-only transparent guard in front of official CLI protocols.
+
+    It keeps messages, tool calls/results, and streaming events in the CLI's native protocol.
+    Provider-specific hosted tool declarations are adapted to OpenRouter server tools at this
+    boundary, so models need tool support but not a provider's private web-search parameter.
+    """
+
     daemon_threads = True
 
     def __init__(
@@ -393,7 +534,10 @@ class _BridgeServer(ThreadingHTTPServer):
         opener: urllib.request.OpenerDirector,
         timeout: int,
         max_output_tokens: int,
-        chat_url: str,
+        responses_url: str,
+        messages_url: str | None = None,
+        model_catalog: bytes | None = None,
+        native_model_parameters: frozenset[str] = frozenset(),
     ):
         self.token = token
         self.api_key = api_key
@@ -401,12 +545,33 @@ class _BridgeServer(ThreadingHTTPServer):
         self.opener = opener
         self.timeout = timeout
         self.max_output_tokens = max_output_tokens
-        self.chat_url = chat_url
+        self.responses_url = responses_url
+        self.models_url = responses_url.rsplit("/responses", 1)[0] + "/models"
+        self.messages_url = messages_url or responses_url.rsplit("/responses", 1)[0] + "/messages"
+        self.model_catalog = model_catalog
+        self.native_model_parameters = native_model_parameters
         super().__init__(("127.0.0.1", 0), _BridgeHandler)
 
 
 class _BridgeHandler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
+    _HOP_BY_HOP_HEADERS = frozenset(
+        {
+            "authorization",
+            "accept-encoding",
+            "connection",
+            "content-length",
+            "host",
+            "keep-alive",
+            "proxy-authorization",
+            "proxy-connection",
+            "te",
+            "trailer",
+            "transfer-encoding",
+            "upgrade",
+            "x-api-key",
+        }
+    )
 
     def log_message(self, *_):
         pass
@@ -418,53 +583,138 @@ class _BridgeHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(payload)
 
-    def do_POST(self) -> None:
+    def _authorized(self, server: _BridgeServer) -> bool:
+        authorization = self.headers.get("Authorization")
+        api_key = self.headers.get("x-api-key")
+        return authorization == "Bearer " + server.token or api_key == server.token
+
+    def _upstream_headers(
+        self, server: _BridgeServer, *, content_type: str | None = None
+    ) -> dict[str, str]:
+        # Keep CLI protocol/version/feature headers intact. Only transport headers and the
+        # child-facing one-time credential are replaced at this provider boundary.
+        headers = {
+            name: value
+            for name, value in self.headers.items()
+            if name.lower() not in self._HOP_BY_HOP_HEADERS
+        }
+        headers["Authorization"] = "Bearer " + server.api_key
+        headers.setdefault("User-Agent", "prediction-market-agent/1")
+        if content_type:
+            headers["Content-Type"] = content_type
+        return headers
+
+    def do_GET(self) -> None:
         server: _BridgeServer = self.server  # type: ignore[assignment]
-        if self.path != "/v1/responses" or self.headers.get("Authorization") != "Bearer " + server.token:
+        parsed_path = urllib.parse.urlsplit(self.path)
+        if not self._authorized(server) or parsed_path.path != "/v1/models":
             self._write(404, "application/json", b'{"error":{"message":"not found"}}')
             return
+        if server.model_catalog is not None:
+            self._write(200, "application/json", server.model_catalog)
+            return
+        upstream = server.models_url
+        if parsed_path.query:
+            upstream += "?" + parsed_path.query
+        request = urllib.request.Request(
+            upstream,
+            headers=self._upstream_headers(server),
+        )
+        try:
+            with server.opener.open(request, timeout=server.timeout) as response:
+                payload = response.read(16 * 1024 * 1024)
+                status = response.status
+            document = json.loads(payload)
+            candidates = document.get("models") or document.get("data") or []
+            if not isinstance(candidates, list):
+                raise ValueError("OpenRouter model catalog must contain a model list")
+            selected = [
+                item
+                for item in candidates
+                if isinstance(item, dict)
+                and str(item.get("slug") or item.get("id") or "") == server.model
+            ]
+            # Codex receives metadata for exactly the model selected in this plugin. The UI owns
+            # model selection; the CLI catalog refresh may describe that choice but cannot replace
+            # it with another OpenRouter model.
+            self._write(
+                status,
+                "application/json",
+                json.dumps({"models": selected}).encode("utf-8"),
+            )
+        except urllib.error.HTTPError as error:
+            self._write(error.code, "application/json", error.read(1024 * 1024))
+        except Exception as error:
+            payload = json.dumps(
+                {"error": {"message": str(error)[:1000], "type": "openrouter_bridge"}}
+            ).encode("utf-8")
+            self._write(502, "application/json", payload)
+
+    def do_POST(self) -> None:
+        server: _BridgeServer = self.server  # type: ignore[assignment]
+        parsed_path = urllib.parse.urlsplit(self.path)
+        path = parsed_path.path
+        if not self._authorized(server):
+            self._write(404, "application/json", b'{"error":{"message":"not found"}}')
+            return
+        if path == "/v1/responses" or path.startswith("/v1/responses/"):
+            upstream = server.responses_url + path.removeprefix("/v1/responses")
+            output_limit_field = "max_output_tokens"
+            require_response_schema = path == "/v1/responses"
+            claude_messages = False
+        elif path == "/api/v1/messages" or path.startswith("/api/v1/messages/"):
+            upstream = server.messages_url + path.removeprefix("/api/v1/messages")
+            output_limit_field = "max_tokens"
+            require_response_schema = False
+            claude_messages = True
+        else:
+            self._write(404, "application/json", b'{"error":{"message":"not found"}}')
+            return
+        if parsed_path.query:
+            upstream += "?" + parsed_path.query
         try:
             length = int(self.headers.get("Content-Length", "0"))
             if length <= 0 or length > 32 * 1024 * 1024:
                 raise ValueError("invalid request size")
             body = json.loads(self.rfile.read(length))
-            output_format = body["text"]["format"]
-            if output_format.get("type") != "json_schema":
+            if not isinstance(body, dict):
+                raise ValueError("request body must be an object")
+            output_format = (body.get("text") or {}).get("format")
+            if require_response_schema and (
+                not isinstance(output_format, dict)
+                or output_format.get("type") != "json_schema"
+            ):
                 raise ValueError("Codex request did not include a JSON schema")
-            request_body = {
-                "model": server.model,
-                "messages": _codex_messages(body),
-                "response_format": {
-                    "type": "json_schema",
-                    "json_schema": {
-                        "name": output_format.get("name", "codex_output_schema"),
-                        "strict": bool(output_format.get("strict", True)),
-                        "schema": output_format["schema"],
-                    },
-                },
-                "provider": {"require_parameters": True},
-                "max_tokens": server.max_output_tokens,
-                "temperature": 0,
-            }
+            provider = body.get("provider") or {}
+            if not isinstance(provider, dict):
+                raise ValueError("provider routing options must be an object")
+            body["provider"] = {**provider, "require_parameters": True}
+            body["model"] = server.model
+            body.setdefault(output_limit_field, server.max_output_tokens)
+            _adapt_optional_parameters(body, server.native_model_parameters)
+            if claude_messages:
+                _adapt_claude_parameters(
+                    body, server.model, server.native_model_parameters
+                )
+            namespace_names = _adapt_server_tools(
+                body, server.native_model_parameters
+            )
             request = urllib.request.Request(
-                server.chat_url,
-                data=json.dumps(request_body).encode("utf-8"),
-                headers={
-                    "Authorization": "Bearer " + server.api_key,
-                    "Content-Type": "application/json",
-                    "User-Agent": "prediction-market-agent/1",
-                },
+                upstream,
+                data=json.dumps(body).encode("utf-8"),
+                headers=self._upstream_headers(
+                    server, content_type="application/json"
+                ),
                 method="POST",
             )
             with server.opener.open(request, timeout=server.timeout) as response:
-                result = json.load(response)
-            answer = result["choices"][0]["message"]["content"]
-            if isinstance(answer, dict):
-                answer = json.dumps(answer, ensure_ascii=False)
-            if not isinstance(answer, str):
-                raise ValueError("OpenRouter returned no text response")
-            payload = _responses_event_stream(answer, result.get("usage") or {})
-            self._write(200, "text/event-stream", payload)
+                payload = response.read(64 * 1024 * 1024)
+                content_type = response.headers.get("Content-Type", "application/json")
+                status = response.status
+            payload = _restore_namespace_calls(
+                payload, content_type, namespace_names
+            )
+            self._write(status, content_type, payload)
         except urllib.error.HTTPError as error:
             detail = error.read(1024 * 1024)
             self._write(error.code, "application/json", detail)
@@ -486,24 +736,221 @@ class OpenRouterBackend:
         timeout: int,
         max_output_tokens: int,
         *,
-        chat_url: str = OPENROUTER_API_BASE + "/chat/completions",
+        responses_url: str = OPENROUTER_API_BASE + "/responses",
+        messages_url: str = OPENROUTER_API_BASE + "/messages",
+        agent_cli: str = "AUTO",
+        cli_paths: dict[str, str] | None = None,
+        history_database: Path | None = None,
+        client_homes: dict[str, Path] | None = None,
     ):
         if not api_key or not model:
             raise DecisionProviderError("请填写 OpenRouter API Key 和模型 ID")
         self.name = name
-        self.executable = resolve_executable(executable)
+        requested_cli = str(agent_cli or "AUTO").strip().upper()
+        if requested_cli not in AGENT_CLI_OPTIONS:
+            raise DecisionProviderError(
+                "OpenRouter Agent CLI 必须是 AUTO、CODEX 或 CLAUDE"
+            )
+        configured_paths = {
+            "CODEX": executable,
+            "CLAUDE": "claude",
+            **{str(key).upper(): str(value) for key, value in (cli_paths or {}).items()},
+        }
+        available: dict[str, str] = {}
+        unavailable: dict[str, str] = {}
+        for candidate in ("CODEX", "CLAUDE"):
+            try:
+                available[candidate] = resolve_executable(configured_paths[candidate])
+            except DecisionProviderError as error:
+                unavailable[candidate] = str(error)
+        if requested_cli == "AUTO":
+            selected_cli = next((item for item in ("CODEX", "CLAUDE") if item in available), "")
+        else:
+            selected_cli = requested_cli if requested_cli in available else ""
+        if not selected_cli:
+            detail = "；".join(
+                f"{item}: {unavailable.get(item, '不可用')}" for item in ("CODEX", "CLAUDE")
+                if requested_cli == "AUTO" or item == requested_cli
+            )
+            raise DecisionProviderError(
+                "OpenRouter 只提供 LLM，必须有可用的 Codex 或 Claude CLI 作为 Agent；" + detail
+            )
+        self.agent_cli = selected_cli
+        self.available_agent_clis = tuple(item for item in ("CODEX", "CLAUDE") if item in available)
+        self.executable = available[selected_cli]
         self.api_key = api_key
         self.model = model
         self.proxy_settings = dict(proxy_settings)
         self.timeout = timeout
         self.max_output_tokens = max_output_tokens
-        self.chat_url = chat_url
+        self.responses_url = responses_url
+        self.messages_url = messages_url
         self.opener = _opener(self.proxy_settings["proxy"])
+        self.history_database = history_database.resolve() if history_database else None
+        self.client_homes = client_homes or {
+            "CODEX": Path(
+                os.environ.get("CODEX_HOME", str(Path.home() / ".codex"))
+            ).resolve(),
+            "CLAUDE": Path(
+                os.environ.get("CLAUDE_CONFIG_DIR", str(Path.home() / ".claude"))
+            ).resolve(),
+        }
+        self._sessions = threading.local()
+        self._catalog_lock = threading.RLock()
+        self._codex_model_catalog: bytes | None = None
+        self._model_parameters: frozenset[str] | None = None
+
+    def _selected_model_parameters(self) -> frozenset[str]:
+        """Read the chosen model's advertised native features once per backend instance."""
+        if self._model_parameters is not None:
+            return self._model_parameters
+        if "/" in self.executable and not Path(self.executable).exists():
+            self._model_parameters = REQUIRED_MODEL_PARAMETERS
+            return self._model_parameters
+        parsed = urllib.parse.urlsplit(self.responses_url)
+        if parsed.hostname != "openrouter.ai":
+            self._model_parameters = REQUIRED_MODEL_PARAMETERS
+            return self._model_parameters
+        model_url = (
+            self.responses_url.rsplit("/responses", 1)[0]
+            + "/model/"
+            + urllib.parse.quote(self.model, safe="/")
+        )
+        request = urllib.request.Request(
+            model_url,
+            headers={
+                "Authorization": "Bearer " + self.api_key,
+                "User-Agent": "prediction-market-agent/1",
+            },
+        )
+        try:
+            with self.opener.open(request, timeout=self.timeout) as response:
+                model_data = json.loads(response.read(1024 * 1024)).get("data") or {}
+            parameters = model_data.get("supported_parameters") or []
+            supported = frozenset(str(item) for item in parameters)
+            missing = sorted(REQUIRED_MODEL_PARAMETERS - supported)
+            if missing:
+                raise DecisionProviderError(
+                    f"所选 OpenRouter 模型 {self.model} 不支持 Agent CLI 所需参数："
+                    + "、".join(missing)
+                )
+            self._model_parameters = supported
+            return supported
+        except DecisionProviderError:
+            raise
+        except (OSError, ValueError, KeyError, TypeError) as error:
+            raise DecisionProviderError(
+                "无法读取所选 OpenRouter 模型的能力元数据"
+            ) from error
+
+    def _selected_codex_catalog(self) -> bytes | None:
+        """Cache OpenRouter's Codex metadata for exactly the configured model."""
+        if self.agent_cli != "CODEX":
+            return None
+        if "/" in self.executable and not Path(self.executable).exists():
+            # Test doubles may use a synthetic executable path; production paths were already
+            # validated by resolve_executable during construction.
+            return None
+        parsed = urllib.parse.urlsplit(self.responses_url)
+        if parsed.hostname != "openrouter.ai":
+            return None
+        with self._catalog_lock:
+            if self._codex_model_catalog is not None:
+                return self._codex_model_catalog
+            try:
+                self._selected_model_parameters()
+                version_output = subprocess.check_output(
+                    [self.executable, "--version"],
+                    text=True,
+                    timeout=5,
+                    env=client_subprocess_environment(
+                        "CODEX", self.client_homes["CODEX"], "",
+                        self.proxy_settings["no_proxy"],
+                    ),
+                )
+                version = version_output.strip().rsplit(" ", 1)[-1]
+                catalog_url = (
+                    self.responses_url.rsplit("/responses", 1)[0]
+                    + "/models?client_version="
+                    + urllib.parse.quote(version)
+                )
+                request = urllib.request.Request(
+                    catalog_url,
+                    headers={
+                        "Authorization": "Bearer " + self.api_key,
+                        "User-Agent": "codex_cli_rs/" + version,
+                    },
+                )
+                with self.opener.open(request, timeout=self.timeout) as response:
+                    document = json.loads(response.read(16 * 1024 * 1024))
+                models = document.get("models") or []
+                selected = [
+                    item
+                    for item in models
+                    if isinstance(item, dict) and item.get("slug") == self.model
+                ]
+                if not selected:
+                    raise DecisionProviderError(
+                        f"OpenRouter no longer advertises the selected model to Codex: {self.model}"
+                    )
+                self._codex_model_catalog = json.dumps(
+                    {"models": selected}, separators=(",", ":")
+                ).encode("utf-8")
+                return self._codex_model_catalog
+            except DecisionProviderError:
+                raise
+            except (OSError, ValueError, KeyError, subprocess.SubprocessError) as error:
+                raise DecisionProviderError(
+                    "无法读取所选 OpenRouter 模型的 Codex 元数据"
+                ) from error
+
+    @contextmanager
+    def session(self):
+        """One new Codex/Claude conversation for one application round."""
+        if getattr(self._sessions, "root", None) is not None:
+            yield
+            return
+        with tempfile.TemporaryDirectory(prefix="prediction-openrouter-round-") as directory:
+            self._sessions.root = Path(directory)
+            self._sessions.started = False
+            self._sessions.session_id = str(uuid.uuid4())
+            self._sessions.thread_id = ""
+            try:
+                yield
+            finally:
+                self._sessions.root = None
+                self._sessions.started = False
+                self._sessions.session_id = ""
+                self._sessions.thread_id = ""
+
+    def _with_history(self, prompt: str) -> str:
+        return prompt + shared_agent_history_instruction(
+            self.history_database, self.client_homes
+        )
+
+    @staticmethod
+    def _thread_id(stdout: str) -> str:
+        for line in stdout.splitlines():
+            try:
+                event = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if event.get("type") == "thread.started" and event.get("thread_id"):
+                return str(event["thread_id"])
+        return ""
 
     def complete(
         self, prompt: str, schema: dict[str, Any], schema_name: str
     ) -> StructuredResult:
+        if self.agent_cli == "CLAUDE":
+            return self._complete_claude(prompt, schema, schema_name)
+        return self._complete_codex(prompt, schema, schema_name)
+
+    def _complete_codex(
+        self, prompt: str, schema: dict[str, Any], schema_name: str
+    ) -> StructuredResult:
         token = secrets.token_urlsafe(32)
+        selected_catalog = self._selected_codex_catalog()
         bridge = _BridgeServer(
             token,
             self.api_key,
@@ -511,27 +958,67 @@ class OpenRouterBackend:
             self.opener,
             self.timeout,
             self.max_output_tokens,
-            self.chat_url,
+            self.responses_url,
+            self.messages_url,
+            selected_catalog,
+            self._selected_model_parameters(),
         )
         thread = threading.Thread(target=bridge.serve_forever, daemon=True)
         thread.start()
+        active_root = getattr(self._sessions, "root", None)
+        temporary = (
+            None
+            if active_root is not None
+            else tempfile.TemporaryDirectory(prefix="prediction-openrouter-")
+        )
         try:
-            with tempfile.TemporaryDirectory(prefix="prediction-openrouter-") as directory:
-                root = Path(directory)
-                home = root / "home"
-                codex_home = home / ".codex"
-                codex_home.mkdir(parents=True)
-                schema_path = root / f"{schema_name}.schema.json"
-                output_path = root / f"{schema_name}.json"
-                schema_path.write_text(json.dumps(schema), encoding="utf-8")
+            root = active_root or Path(temporary.name)
+            schema_path = root / f"{schema_name}.schema.json"
+            output_path = root / f"{schema_name}.json"
+            schema_path.write_text(json.dumps(schema), encoding="utf-8")
+            output_path.unlink(missing_ok=True)
+            thread_id = str(getattr(self._sessions, "thread_id", "") or "")
+            provider_options = [
+                "-c",
+                'model_provider="openrouter_bridge"',
+                "-c",
+                'model_providers.openrouter_bridge.name="OpenRouter"',
+                "-c",
+                f'model_providers.openrouter_bridge.base_url="http://127.0.0.1:{bridge.server_port}/v1"',
+                "-c",
+                'model_providers.openrouter_bridge.env_key="OPENROUTER_BRIDGE_TOKEN"',
+                "-c",
+                'model_providers.openrouter_bridge.wire_api="responses"',
+                "-c",
+                "model_providers.openrouter_bridge.request_max_retries=0",
+            ]
+            if active_root is not None and thread_id:
                 command = [
                     self.executable,
+                    "--search",
                     "exec",
-                    "--ephemeral",
+                    "resume",
+                    thread_id,
                     "--skip-git-repo-check",
-                    "--ignore-rules",
+                    "--output-schema",
+                    str(schema_path),
+                    "--output-last-message",
+                    str(output_path),
+                    "--json",
+                    "-m",
+                    self.model,
+                    *provider_options,
+                    "-",
+                ]
+            else:
+                command = [
+                    self.executable,
+                    "--search",
+                    "exec",
+                    *([] if active_root is not None else ["--ephemeral"]),
+                    "--skip-git-repo-check",
                     "--sandbox",
-                    "read-only",
+                    "workspace-write",
                     "--color",
                     "never",
                     "--output-schema",
@@ -540,78 +1027,202 @@ class OpenRouterBackend:
                     str(output_path),
                     "-C",
                     str(root),
+                    *(["--json"] if active_root is not None else []),
                     "-m",
                     self.model,
-                    "-c",
-                    'model_provider="openrouter_bridge"',
-                    "-c",
-                    'model_providers.openrouter_bridge.name="OpenRouter"',
-                    "-c",
-                    f'model_providers.openrouter_bridge.base_url="http://127.0.0.1:{bridge.server_port}/v1"',
-                    "-c",
-                    'model_providers.openrouter_bridge.env_key="OPENROUTER_BRIDGE_TOKEN"',
-                    "-c",
-                    'model_providers.openrouter_bridge.wire_api="responses"',
-                    "-c",
-                    "model_providers.openrouter_bridge.request_max_retries=0",
+                    *provider_options,
                     "-",
                 ]
-                env = subprocess_environment("", self.proxy_settings["no_proxy"])
-                env.update(
-                    HOME=str(home),
-                    CODEX_HOME=str(codex_home),
-                    OPENROUTER_BRIDGE_TOKEN=token,
-                    NO_COLOR="1",
+            env = client_subprocess_environment(
+                "CODEX", self.client_homes["CODEX"], "",
+                self.proxy_settings["no_proxy"],
+            )
+            env.update(
+                OPENROUTER_BRIDGE_TOKEN=token,
+                NO_COLOR="1",
+            )
+            try:
+                completed = subprocess.run(
+                    command,
+                    input=self._with_history(prompt),
+                    text=True,
+                    capture_output=True,
+                    timeout=self.timeout + 15,
+                    env=env,
+                    check=False,
                 )
-                try:
-                    completed = subprocess.run(
-                        command,
-                        input=prompt,
-                        text=True,
-                        capture_output=True,
-                        timeout=self.timeout + 15,
-                        env=env,
-                        check=False,
-                    )
-                except subprocess.TimeoutExpired as error:
-                    raw = json.dumps(
-                        {
-                            "timeout": True,
-                            "stdout": error.stdout or "",
-                            "stderr": error.stderr or "",
-                        },
-                        ensure_ascii=False,
-                    )
-                    raise DecisionProviderError(
-                        f"OpenRouter timed out after {self.timeout}s", raw
-                    ) from error
+            except subprocess.TimeoutExpired as error:
                 raw = json.dumps(
                     {
-                        "returncode": completed.returncode,
-                        "stdout": completed.stdout,
-                        "stderr": completed.stderr,
-                        "final": output_path.read_text(encoding="utf-8")
-                        if output_path.exists()
-                        else "",
+                        "timeout": True,
+                        "stdout": subprocess_output_text(error.stdout),
+                        "stderr": subprocess_output_text(error.stderr),
                     },
                     ensure_ascii=False,
                 )
-                if completed.returncode != 0 or not output_path.exists():
+                raise DecisionProviderError(
+                    f"OpenRouter timed out after {self.timeout}s", raw
+                ) from error
+            raw = json.dumps(
+                {
+                    "returncode": completed.returncode,
+                    "stdout": completed.stdout,
+                    "stderr": completed.stderr,
+                    "final": output_path.read_text(encoding="utf-8")
+                    if output_path.exists()
+                    else "",
+                },
+                ensure_ascii=False,
+            )
+            if completed.returncode != 0 or not output_path.exists():
+                raise DecisionProviderError(
+                    f"OpenRouter runtime failed: {completed.stderr[-1000:]}", raw
+                )
+            if active_root is not None and not thread_id:
+                started = self._thread_id(completed.stdout)
+                if not started:
                     raise DecisionProviderError(
-                        f"OpenRouter runtime failed: {completed.stderr[-1000:]}", raw
+                        "Codex did not report the new OpenRouter round session id", raw
                     )
-                try:
-                    value = json.loads(output_path.read_text(encoding="utf-8"))
-                except json.JSONDecodeError as error:
-                    raise DecisionProviderError(
-                        "OpenRouter returned invalid JSON", raw
-                    ) from error
-                if not isinstance(value, dict):
-                    raise DecisionProviderError(
-                        "OpenRouter returned non-object JSON", raw
-                    )
-                return StructuredResult(value, raw)
+                self._sessions.thread_id = started
+            try:
+                value = json.loads(output_path.read_text(encoding="utf-8"))
+            except json.JSONDecodeError as error:
+                raise DecisionProviderError(
+                    "OpenRouter returned invalid JSON", raw
+                ) from error
+            if not isinstance(value, dict):
+                raise DecisionProviderError(
+                    "OpenRouter returned non-object JSON", raw
+                )
+            return StructuredResult(value, raw)
         finally:
+            if temporary is not None:
+                temporary.cleanup()
+            bridge.shutdown()
+            bridge.server_close()
+            thread.join(timeout=2)
+
+    def _complete_claude(
+        self, prompt: str, schema: dict[str, Any], schema_name: str
+    ) -> StructuredResult:
+        del schema_name
+        token = secrets.token_urlsafe(32)
+        model_parameters = self._selected_model_parameters()
+        bridge = _BridgeServer(
+            token,
+            self.api_key,
+            self.model,
+            self.opener,
+            self.timeout,
+            self.max_output_tokens,
+            self.responses_url,
+            self.messages_url,
+            None,
+            model_parameters,
+        )
+        thread = threading.Thread(target=bridge.serve_forever, daemon=True)
+        thread.start()
+        active_root = getattr(self._sessions, "root", None)
+        temporary = (
+            None
+            if active_root is not None
+            else tempfile.TemporaryDirectory(prefix="prediction-openrouter-claude-")
+        )
+        try:
+            root = active_root or Path(temporary.name)
+            started = bool(getattr(self._sessions, "started", False))
+            session_id = str(getattr(self._sessions, "session_id", "") or "")
+            command = [
+                self.executable,
+                "-p",
+            ]
+            if active_root is None:
+                command.append("--no-session-persistence")
+            elif started:
+                command.extend(["--resume", session_id])
+            else:
+                command.extend(["--session-id", session_id])
+            command.extend(
+                [
+                    "--permission-mode",
+                    "acceptEdits",
+                    "--max-turns",
+                    "6",
+                    "--output-format",
+                    "json",
+                    "--json-schema",
+                    json.dumps(schema, separators=(",", ":")),
+                    "--model",
+                    self.model,
+                ]
+            )
+            env = client_subprocess_environment(
+                "CLAUDE", self.client_homes["CLAUDE"], "",
+                self.proxy_settings["no_proxy"],
+            )
+            env.update(
+                ANTHROPIC_BASE_URL=f"http://127.0.0.1:{bridge.server_port}/api",
+                ANTHROPIC_AUTH_TOKEN=token,
+                ANTHROPIC_API_KEY="",
+                ANTHROPIC_DEFAULT_OPUS_MODEL=self.model,
+                ANTHROPIC_DEFAULT_SONNET_MODEL=self.model,
+                ANTHROPIC_DEFAULT_HAIKU_MODEL=self.model,
+                CLAUDE_CODE_SUBAGENT_MODEL=self.model,
+                NO_COLOR="1",
+            )
+            try:
+                completed = subprocess.run(
+                    command,
+                    input=self._with_history(prompt),
+                    text=True,
+                    capture_output=True,
+                    timeout=self.timeout + 15,
+                    env=env,
+                    cwd=root,
+                    check=False,
+                )
+            except subprocess.TimeoutExpired as error:
+                raw = json.dumps(
+                    {
+                        "timeout": True,
+                        "stdout": subprocess_output_text(error.stdout),
+                        "stderr": subprocess_output_text(error.stderr),
+                    },
+                    ensure_ascii=False,
+                )
+                raise DecisionProviderError(
+                    f"OpenRouter through Claude timed out after {self.timeout}s", raw
+                ) from error
+            raw = json.dumps(
+                {
+                    "returncode": completed.returncode,
+                    "stdout": completed.stdout,
+                    "stderr": completed.stderr,
+                },
+                ensure_ascii=False,
+            )
+            if completed.returncode != 0:
+                raise DecisionProviderError(
+                    f"OpenRouter Claude Agent failed: {completed.stderr[-1000:]}", raw
+                )
+            try:
+                envelope = json.loads(completed.stdout)
+                value = envelope["structured_output"]
+            except (json.JSONDecodeError, KeyError, TypeError) as error:
+                raise DecisionProviderError(
+                    "OpenRouter Claude Agent returned invalid structured output", raw
+                ) from error
+            if not isinstance(value, dict):
+                raise DecisionProviderError(
+                    "OpenRouter Claude Agent returned non-object structured output", raw
+                )
+            if active_root is not None:
+                self._sessions.started = True
+            return StructuredResult(value, raw)
+        finally:
+            if temporary is not None:
+                temporary.cleanup()
             bridge.shutdown()
             bridge.server_close()
             thread.join(timeout=2)
@@ -629,7 +1240,7 @@ def initialize_openrouter_plugin(context: PluginInitializationContext) -> Plugin
                 "OPENROUTER_API_KEY",
                 "OpenRouter API Key",
                 "secret",
-                "用于模型目录、推理和查询当前 Key 用量；仅发送给 OpenRouter，保存值不会在界面回显。",
+                "用于模型目录、推理和查询当前 Key 用量；openrouter_* 配置留空时默认复用主 openrouter 配置的 Key，填写后单独覆盖。",
             ),
             PluginConfigField(
                 "OPENROUTER_MANAGEMENT_API_KEY",
@@ -641,9 +1252,19 @@ def initialize_openrouter_plugin(context: PluginInitializationContext) -> Plugin
                 "OPENROUTER_MODEL",
                 "OpenRouter 模型",
                 "string",
-                "只列出 OpenRouter 当前声明支持结构化输出的模型；仍会在每次请求时要求具体供应端点支持该参数。",
+                "只列出同时支持 tools 与 structured_outputs 的模型。OpenRouter 插件私有守卫会把 Codex/Claude 的版本化 Web Search/Fetch 声明转为等价 OpenRouter server tool，但仍保持各自的 Responses/Messages 输入输出协议和用户选定模型。",
                 default="",
                 selection_only=True,
+                choices_depend_on=("OPENROUTER_AGENT_CLI",),
+            ),
+            PluginConfigField(
+                "OPENROUTER_AGENT_CLI",
+                "Agent CLI",
+                "enum",
+                "OpenRouter 只提供背后的 LLM。AUTO 优先使用可用的 Codex CLI、否则使用 Claude CLI；也可固定选择其中一个。两个 CLI 都不可用时本 Provider 不会启动。CLI 保留自己的 Agent 工具、配置、规则与已安装 skills，模型请求和计费仍只走本 OpenRouter Key。",
+                required=True,
+                default="AUTO",
+                options=AGENT_CLI_OPTIONS,
             ),
             PluginConfigField(
                 "OPENROUTER_HTTP_PROXY",
@@ -675,7 +1296,7 @@ def initialize_openrouter_plugin(context: PluginInitializationContext) -> Plugin
         delete_callback=delete,
         storage=storage,
         choices_callback=lambda field: model_choices(
-            configuration.load(),
+            choice_values(),
             proxy_settings=context.proxy_settings(
                 configuration.load()["OPENROUTER_HTTP_PROXY"],
                 field_name="OPENROUTER_HTTP_PROXY",
@@ -684,18 +1305,65 @@ def initialize_openrouter_plugin(context: PluginInitializationContext) -> Plugin
         choice_fields=("OPENROUTER_MODEL",),
     )
 
-    def factory(config):
-        del config
+    def effective_values() -> dict[str, Any]:
         values = configuration.load()
+        if name == "openrouter" or str(values.get("OPENROUTER_API_KEY", "")).strip():
+            return values
+        shared_load, _save, _delete, _storage = json_file_callbacks(
+            context.working_directory / "config" / "plugins" / "openrouter.json"
+        )
+        shared_key = str(shared_load().get("OPENROUTER_API_KEY", "")).strip()
+        return {**values, "OPENROUTER_API_KEY": shared_key}
+
+    def choice_values() -> dict[str, Any]:
+        values = effective_values()
+        requested = str(values.get("OPENROUTER_AGENT_CLI", "AUTO") or "AUTO").upper()
+        available: list[str] = []
+        for cli_name, field_name, default in (
+            ("CODEX", "CODEX_CLI_PATH", "codex"),
+            ("CLAUDE", "CLAUDE_CLI_PATH", "claude"),
+        ):
+            cli_load, _save, _delete, _storage = json_file_callbacks(
+                context.working_directory
+                / "config"
+                / "plugins"
+                / f"{cli_name.lower()}.json"
+            )
+            try:
+                resolve_executable(
+                    str(cli_load().get(field_name, default) or default).strip()
+                )
+                available.append(cli_name)
+            except DecisionProviderError:
+                pass
+        resolved = (
+            next((item for item in ("CODEX", "CLAUDE") if item in available), "CODEX")
+            if requested == "AUTO"
+            else requested
+        )
+        return {**values, "_RESOLVED_AGENT_CLI": resolved}
+
+    def factory(config):
+        history_database = getattr(config, "session_db", None)
+        values = effective_values()
         timeout = int(values["OPENROUTER_TIMEOUT_SECONDS"])
         max_output_tokens = int(values["OPENROUTER_MAX_OUTPUT_TOKENS"])
         if timeout < 10:
             raise ValueError("OPENROUTER_TIMEOUT_SECONDS must be at least 10")
         if max_output_tokens < 512:
             raise ValueError("OPENROUTER_MAX_OUTPUT_TOKENS must be at least 512")
+        cli_paths: dict[str, str] = {}
+        for cli_name, field_name, default in (
+            ("CODEX", "CODEX_CLI_PATH", "codex"),
+            ("CLAUDE", "CLAUDE_CLI_PATH", "claude"),
+        ):
+            cli_load, _save, _delete, _storage = json_file_callbacks(
+                context.working_directory / "config" / "plugins" / f"{cli_name.lower()}.json"
+            )
+            cli_paths[cli_name] = str(cli_load().get(field_name, default) or default).strip()
         return OpenRouterBackend(
             name,
-            "codex",
+            cli_paths["CODEX"],
             values.get("OPENROUTER_API_KEY", "").strip(),
             values["OPENROUTER_MODEL"].strip(),
             context.proxy_settings(
@@ -704,6 +1372,10 @@ def initialize_openrouter_plugin(context: PluginInitializationContext) -> Plugin
             ),
             timeout,
             max_output_tokens,
+            agent_cli=values["OPENROUTER_AGENT_CLI"],
+            cli_paths=cli_paths,
+            history_database=history_database,
+            client_homes=configured_client_homes(context.working_directory),
         )
 
     def readiness():
@@ -713,12 +1385,14 @@ def initialize_openrouter_plugin(context: PluginInitializationContext) -> Plugin
         except (ValueError, KeyError, DecisionProviderError) as error:
             return PluginReadiness(False, (str(error),))
 
-    account_control = OpenRouterAccountControl(configuration, context)
+    account_control = OpenRouterAccountControl(
+        configuration, context, values_loader=effective_values
+    )
 
     return PluginSpec(
         "decision_provider",
         name,
-        "通过插件私有的本机 schema 桥调用 OpenRouter 严格结构化输出。每个插件文件保存一份独立配置。",
+        "用 Codex 或 Claude CLI 提供 Agent 能力，背后的 LLM 通过 OpenRouter 严格结构化接口调用；Key 默认复用主 OpenRouter 配置并可单独覆盖。",
         str(context.module_path),
         factory,
         configuration,

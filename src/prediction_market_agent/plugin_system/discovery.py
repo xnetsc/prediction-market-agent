@@ -405,11 +405,36 @@ def validated_notices(items: Any) -> list[dict[str, Any]]:
             for field in fields:
                 if not isinstance(field, dict) or not str(field.get("name", "")):
                     raise ValueError(f"Notice {key}: every {verb} entry needs a name")
+                field_type = str(field.get("type", "text"))
+                if field_type not in {"text", "select"}:
+                    raise ValueError(
+                        f"Notice {key}: field {field['name']} has unsupported type {field_type}"
+                    )
+                raw_options = field.get("options") or []
+                options: list[dict[str, str]] = []
+                for option in raw_options:
+                    if isinstance(option, dict):
+                        value = str(option.get("value", ""))
+                        label = str(option.get("label", value))
+                    else:
+                        value = label = str(option)
+                    if not value:
+                        raise ValueError(
+                            f"Notice {key}: field {field['name']} has an empty option"
+                        )
+                    options.append({"value": value, "label": label})
+                if field_type == "select" and not options:
+                    raise ValueError(
+                        f"Notice {key}: select field {field['name']} requires options"
+                    )
                 checked_fields.append({
                     "name": str(field["name"]),
                     "label": str(field.get("label", field["name"])),
                     "placeholder": str(field.get("placeholder", "")),
                     "multiline": bool(field.get("multiline", False)),
+                    "type": field_type,
+                    "value": str(field.get("value", "")),
+                    "options": options,
                     # A marker the page draws. Whether an empty answer is acceptable
                     # is the plugin's rule, enforced in its own handler: the framework
                     # has no idea what the field is for.
@@ -709,6 +734,9 @@ def load_plugin_catalog(config: Any) -> PluginCatalog:
         "api": managed.selected("api", config.market_api_plugins),
         "decision_provider": managed.selected(
             "decision_provider", config.decision_providers
+        ),
+        "decision_evaluator": managed.selected(
+            "decision_evaluator", getattr(config, "decision_evaluators", ())
         ),
         "decision_strategy": (
             (managed.decision_strategy,) if managed.decision_strategy else ()

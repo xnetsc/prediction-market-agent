@@ -14,6 +14,9 @@ from typing import Any
 class BinancePredictionReadClient:
     """Binance-specific signed and public read transport."""
 
+    SIGNED_RECV_WINDOW_MS = 20_000
+    """Accept the configured proxy's round trip while staying below the request timeout."""
+
     def __init__(self, api_key: str, api_secret: str, base_url: str, http_proxy: str = ""):
         self.api_key = api_key
         self._api_secret = api_secret.encode("utf-8")
@@ -26,6 +29,12 @@ class BinancePredictionReadClient:
         query_params = [(key, str(value)) for key, value in params.items() if value is not None]
         headers = {"User-Agent": "prediction-market-agent-binance/1"}
         if signed:
+            # Binance defaults to five seconds. The configured inherited proxy can legitimately
+            # take slightly longer even after the clock is synchronized, so a correct timestamp
+            # was reaching the server just outside its default window. This remains bounded and
+            # is signed as part of the query; it does not hide authentication or clock failures.
+            if not any(key == "recvWindow" for key, _ in query_params):
+                query_params.append(("recvWindow", str(self.SIGNED_RECV_WINDOW_MS)))
             query_params.append(("timestamp", str(int(time.time() * 1000) + self._time_offset_ms)))
             query = urllib.parse.urlencode(query_params)
             signature = hmac.new(self._api_secret, query.encode("utf-8"), hashlib.sha256).hexdigest()

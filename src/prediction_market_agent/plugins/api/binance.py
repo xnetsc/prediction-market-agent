@@ -35,15 +35,16 @@ def initialize_plugin(context: PluginInitializationContext) -> PluginSpec:
             PluginConfigField("BINANCE_SCAN_INTERVAL_SECONDS", "扫描间隔（秒）", "integer", "Binance 完成一个市场扫描与决策周期后等待到下一周期的秒数。", default=60),
             PluginConfigField("BINANCE_ERROR_BACKOFF_SECONDS", "失败退避初值（秒）", "integer", "Binance 周期失败后的首次重试等待秒数；连续失败时指数增长。", default=30),
             PluginConfigField("BINANCE_ERROR_BACKOFF_MAX_SECONDS", "失败退避上限（秒）", "integer", "Binance 连续失败重试等待的最大秒数。", default=900),
-            PluginConfigField("BINANCE_MAX_TOPICS_PER_CYCLE", "每轮主题上限", "integer", "Binance 每轮允许框架发现后提交给业务队列的主题上限；发现范围和调用哪些读接口由发现策略决定。", default=10),
-            PluginConfigField("BINANCE_MAX_DECISIONS_PER_CYCLE", "每轮决策上限", "integer", "Binance 每次事件循环最多交给 Agent 的 outcome 决策数。", default=6),
             PluginConfigField("BINANCE_TOPIC_PAGE_SIZE", "主题分页大小", "integer", "框架发现标的时，Binance 每次主题列表网络请求加载的记录数。", default=100),
         ),
         load_callback=load,
         save_callback=save,
         delete_callback=delete,
         storage=storage,
-        retired_fields=("BINANCE_NETWORK_RULES_JSON",),
+        retired_fields=(
+            "BINANCE_NETWORK_RULES_JSON", "BINANCE_MAX_TOPICS_PER_CYCLE",
+            "BINANCE_MAX_DECISIONS_PER_CYCLE",
+        ),
     )
 
     instances = []
@@ -246,6 +247,13 @@ def initialize_plugin(context: PluginInitializationContext) -> PluginSpec:
         except Exception as error:
             return {"ok": False, "message": str(error)[:300]}
 
+    def notices() -> list[dict[str, Any]]:
+        items = [*deposit_notices(), *funding_notices()]
+        for item in items:
+            if item.get("key") == "deposit":
+                item["attention"] = False
+        return items
+
     return PluginSpec(
         kind="api",
         name="binance",
@@ -262,7 +270,7 @@ def initialize_plugin(context: PluginInitializationContext) -> PluginSpec:
             ),
         ),
         teardown=lambda: close_plugin_instances(instances),
-        notices_callback=lambda: [*deposit_notices(), *funding_notices()],
+        notices_callback=notices,
         notice_action_callback=lambda key, name, payload: (
             deposit_action(key, name, payload) if key == "deposit"
             else funding_action(key, name, payload)

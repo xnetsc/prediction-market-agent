@@ -197,11 +197,21 @@ class NoWorkWithoutAModelTests(unittest.TestCase):
             review=lambda: None,
         )
         engine.log = []
-        engine._evaluate_topic = lambda runtime, topic: engine.log.append(("decide", topic))
+        engine.config = SimpleNamespace(decision_max_attempts=100, decision_max_cycle_seconds=180)
+        engine._plan_outcomes = lambda runtime, topics: [
+            (topic, None, None, None, 1.0) for topic in topics
+        ]
+        engine._evaluate_outcome = lambda runtime, topic, *_args: (
+            setattr(engine, "_decisions_this_cycle", engine._decisions_this_cycle + 1),
+            engine.log.append(("decide", topic)),
+        )
         engine._settle_open_positions = lambda runtime: engine.log.append(("settle",))
         engine._resume_funded_decisions = lambda runtime: engine.log.append(("resume",))
         engine.decision_strategy = SimpleNamespace(select_topics=list)
         engine.provider = SimpleNamespace(name="claude")
+        engine.operator_instructions = SimpleNamespace()
+        engine._catch_up_on_notes = lambda runtime: None
+        engine._apply_operator_instructions = lambda runtime, moment: None
         engine.discovery = SimpleNamespace(
             review=lambda: None, discover=lambda **kw: engine.log.append(("discover",)) or ["t"]
         )
@@ -217,13 +227,13 @@ class NoWorkWithoutAModelTests(unittest.TestCase):
 
     def test_no_markets_are_pulled_and_no_round_is_started(self) -> None:
         engine = self._engine([False, False])
-        self.assertEqual(engine._collect_platform_topics(self._runtime(), 10), [])
-        engine._process_platform_topics(self._runtime(), ["t1", "t2"], 5)
+        self.assertEqual(engine._collect_platform_topics(self._runtime()), [])
+        engine._process_platform_topics(self._runtime(), ["t1", "t2"])
         self.assertEqual(engine.log, [("settle",)], "only what is already held is still settled")
 
     def test_a_limit_reached_mid_scan_stops_the_rest_of_it(self) -> None:
         engine = self._engine([True, True, False])
-        engine._process_platform_topics(self._runtime(), ["t1", "t2", "t3"], 5)
+        engine._process_platform_topics(self._runtime(), ["t1", "t2", "t3"])
         self.assertEqual(
             [entry for entry in engine.log if entry[0] == "decide"], [("decide", "t1")]
         )

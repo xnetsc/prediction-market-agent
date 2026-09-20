@@ -39,7 +39,7 @@ def initialize_plugin(context: PluginInitializationContext) -> PluginSpec:
     )
     configuration = PluginConfiguration(
         fields=(
-            PluginConfigField("REFUSED_OPERATIONS", "拒绝的工具或动作", "string", "此示例拒绝的工具名或交易动作，使用英文逗号分隔，例如 SEARCH_WEB,BUY。与白名单插件不同，这里是黑名单：没列出的一律放行。", default=""),
+            PluginConfigField("REFUSED_OPERATIONS", "拒绝的工具或动作", "string", "此示例拒绝的框架业务工具名或交易动作，使用英文逗号分隔，例如 GET_KLINES,BUY。与白名单插件不同，这里是黑名单：没列出的一律放行。", default=""),
         ),
         load_callback=load,
         save_callback=save,

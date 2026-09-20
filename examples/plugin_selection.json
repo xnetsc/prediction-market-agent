@@ -10,6 +10,9 @@
       "claude",
       "openrouter"
     ],
+    "decision_evaluator": [
+      "jev"
+    ],
     "decision_strategy": [
       "general_agent"
     ],

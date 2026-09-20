@@ -2,12 +2,13 @@
 
 ## 固定类别与自动扫描
 
-类别为 `api`、`decision_provider`、`decision_strategy`、`market_discovery`、`research_tool`、
-`agent_policy`、`risk`。`market_discovery` 决定每轮把决策名额给哪些标的；不安装插件时由框架内置策略工作，内置策略
+类别为 `api`、`decision_provider`、`decision_evaluator`、`decision_strategy`、`market_discovery`、
+`research_tool`、`agent_policy`、`risk`。`decision_evaluator` 提供发现阶段的 Choice/Score/Noul 类型化粗筛；
+它不是 Provider，不运行 Agent，也不进入交易决策。`market_discovery` 决定每轮把决策资源给哪些标的；不安装插件时由框架内置策略工作，内置策略
 没有配置面，但当前全文可在插件中心导出。
 
 应用配置的 `plugin_directories_file` 所指向 JSON，其 `categories` 必须包含 `api`、`decision_provider`、
-`decision_strategy`、`market_discovery`、`research_tool`、`agent_policy`、`risk` 七个目录列表。`${PACKAGE_ROOT}` 可展开为安装包
+`decision_evaluator`、`decision_strategy`、`market_discovery`、`research_tool`、`agent_policy`、`risk` 八个目录列表。`${PACKAGE_ROOT}` 可展开为安装包
 目录。`${WORKING_DIRECTORY}` 展开为机器人工作目录。默认每类先扫描工作目录下可写的 `plugins/<类别>`，
 再扫描安装包内置目录。每个目录顶层非下划线 `.py` 文件都是候选插件，插件名等于文件名的小写 stem。
 
@@ -22,7 +23,7 @@
 
 初始化必须返回 `PluginSpec`：类别、名称、描述、工厂、可选 `PluginConfiguration`、可选 readiness、
 可选 runtime、可选 `controls`、可选 `notices_callback` / `notice_action_callback`、可选
-`network_routes_callback`，以及必填 `teardown()`。API/Provider/策略/研究工具工厂接收通用 config；
+`network_routes_callback`，以及必填 `teardown()`。API/Provider/evaluator/策略/研究工具工厂接收通用 config；
 两类过滤插件还接收服务字典。每种插件的运行对象协议见内置实现和 `examples/` 对应目录。
 
 ## 插件向用户说话
@@ -87,8 +88,11 @@ Agent、风控和写动作。`stop` 必须中断等待并等线程结束；`tear
 
 初始化上下文提供 `context.proxy_settings(value, field_name=...)`。需要联网且希望跟随程序统一代理的插件，
 可把自己的代理字段默认设为 `INHERIT`，在真正创建网络客户端时调用该函数；插件也可完全不使用它。
-返回值含已解析的 `proxy`、`no_proxy` 和脱敏显示信息。OpenRouter 插件也使用这个入口；其本机桥接流量
-加入回环绕过名单，桥到远端的请求继续使用解析后的代理。
+返回值含已解析的 `proxy`、`no_proxy` 和脱敏显示信息。OpenRouter Provider 与 Jev evaluator 都分别使用
+这个入口；Jev 的 OpenRouter 方式默认只复用 OpenRouter API Key，不读取或覆盖 Provider 的代理。一个
+不依赖 Jev 的 evaluator 契约示例位于 `examples/decision_evaluator_plugins/static_evaluator.py`。
+宿主机代理快照同时保存宿主机原始地址和容器可达地址；`HOST`/`INHERIT` 在宿主机源码运行时选前者，
+在容器内选后者，插件无需也不得用 DIRECT 绕过统一代理。
 
 ## 动态选项、预置和管理动作
 
@@ -133,13 +137,13 @@ PluginConfigField("EFFORT", "推理强度", "string", "选择当前模型支持�
 然后注销。手动刷新先卸载所有已加载插件，再重新读取插件目录和管理名单。刷新后删除的文件、移除的
 目录或不再启用的插件均不会残留显示或实例。卸载失败会显式报错。
 
-插件中心按 `#plugins/类别` 提供 API、标的发现、策略、研究、Agent 行为风控和业务风控六个二级页面，
+插件中心按 `#plugins/类别` 提供 API、typed evaluator、标的发现、策略、研究、Agent 行为风控和业务风控七个二级页面，
 每类有用途、三步流程和
 用户操作提示。Decision Provider 在底层仍是同一种自动扫描插件，但启用、顺序、私有配置、客户端账号、
 OpenRouter、模型和新扩展安装只在 `#models` 管理，不在插件中心重复出现。
 技术来源、错误原因和私有配置默认折叠；禁用插件仍只依据文件信息显示。页面操作例子见 [Web UI](WEB_UI.md)。
 
-管理页面合计覆盖七类插件：安装新源码、启用/禁用、优先级、当前策略、刷新、动态配置表单、字段删除和整个
+管理页面合计覆盖八类插件：安装新源码、启用/禁用、优先级、当前策略、刷新、动态配置表单、字段删除和整个
 配置删除。安装接口先验证类别、名称、Python 语法及顶层 `initialize_plugin`，只允许写入该类别当前配置的
 目录且不覆盖现有文件；安装后保持禁用，所以不会立即导入不受信任代码。启用、私有配置保存、暂停和刷新
 都会停止旧 runtime、执行 teardown、重新扫描并按 readiness 自动决定是否启动。
@@ -157,6 +161,7 @@ OpenRouter、模型和新扩展安装只在 `#models` 管理，不在插件中�
 
 - `examples/api_plugins/static_demo.py`：标准化读取、私有 JSON、线上 HTTP 写传输和卸载。
 - `examples/decision_provider_plugins/static_provider.py`：严格 schema 的结构化 Provider。
+- `plugins/evaluators/jev.py` 与 `examples/plugin_configs/jev.json`：Jev 独立 evaluator、OpenRouter/自定义连接、共享/独立 Key 和独立代理配置。
 - `examples/decision_strategy_plugins/example_strategy.py`：策略文本和私有候选筛选。
 - `examples/market_discovery_plugins/example_discovery.py`：私有发现文本、读取预算和进化开关。
 - `examples/research_tool_plugins/static_evidence.py`：动态加入 Agent 控制 schema 的工具。

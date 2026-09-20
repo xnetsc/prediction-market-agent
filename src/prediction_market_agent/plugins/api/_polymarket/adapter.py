@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import re
+from concurrent.futures import ThreadPoolExecutor
 from collections.abc import Mapping
 from datetime import datetime, timezone
 from typing import Any
@@ -123,12 +124,6 @@ class PolymarketApiPlugin:
     def sync_time(self) -> None:
         self.client.sync_time()
 
-    def cycle_limits(self) -> tuple[int, int]:
-        return (
-            self.settings.max_topics_per_cycle,
-            self.settings.max_decisions_per_cycle,
-        )
-
     def account_funds(self) -> AccountFunds:
         """Ask the platform what the wallet's collateral actually is, and say when that failed.
 
@@ -202,10 +197,12 @@ class PolymarketApiPlugin:
         )
         try:
             target = self._write_transport.deposit_target()
+            preferred = target["supported_tokens"][0]
             where = (
                 f" Send at least {request['shortfall']:.6f} {funds.currency} of "
-                f"{target['collateral_token']} to {target['wallet_address']}, then confirm it in "
-                "this plugin's panel."
+                f"{preferred['symbol']} ({preferred['contract']}) on {target['source_chain']} to "
+                f"the verified Bridge address {target['deposit_address']}, then confirm it in this "
+                "plugin's panel."
             )
         except Exception as error:
             where = f" The deposit address could not be read: {str(error)[:200]}"
@@ -257,8 +254,10 @@ class PolymarketApiPlugin:
         if funds.available + 1e-9 < target:
             message = shortfall_message(request, funds.available)
             if funds.available > float(request["available_when_asked"]) + 1e-9:
-                # Something arrived, just not all of it. Say so rather than calling it a failure:
-                # the caller may be able to work with what is there.
+                # Something arrived, just not all of it. This is a terminal answer to this ask so
+                # the decision logic is consulted exactly once. It may use the amount that really
+                # arrived, or file a new target for the remaining need and wait again. Leaving this
+                # request pending would never wake that choice; calling it satisfied would lie.
                 self.funding_requests.settle(
                     operator_note=str((values or {}).get('note', '')),
                     state="partial", available=funds.available, detail=message
@@ -297,27 +296,37 @@ class PolymarketApiPlugin:
         )
         return {"ok": True, "message": "The funding request was dismissed"}
 
-    def deposit_panel(self) -> dict[str, Any]:
+    def deposit_panel(self, funds: AccountFunds | None = None) -> dict[str, Any]:
         """Where to send money, in what, on which chain - and what the account holds right now.
 
         Offered whenever the plugin is loaded rather than only when the robot has asked for money:
         an operator who decides to top up should not have to wait to be asked.
         """
-        funds = self.account_funds()
+        # A Future is accepted internally so the notices view can read the balance at the same
+        # time as this independent Bridge route. Public callers may continue passing AccountFunds
+        # or nothing.
+        instructions = None
+        instructions_error = None
+        try:
+            instructions = self._write_transport.deposit_instructions()
+        except Exception as error:
+            instructions_error = error
+        funds = self._resolved_funds(funds)
         panel: dict[str, Any] = {
             "当前可用": f"{funds.available:.6f} {funds.currency}",
             "余额来源": funds.source,
         }
-        try:
-            instructions = self._write_transport.deposit_instructions()
-        except Exception as error:
-            panel["读取充值地址失败"] = str(error)[:300]
+        if instructions_error is not None:
+            panel["读取充值地址失败"] = str(instructions_error)[:300]
             return panel
+        assert instructions is not None
         panel.update({
             "链": f"{instructions['chain']}（chain id {instructions['chain_id']}）",
-            "收款地址": instructions["address"],
+            "Polymarket Bridge 充值地址": instructions["address"],
             "转什么币": instructions["deposit_currency"],
-            "账户里的记账币": f"{instructions['account_token_symbol']}（{instructions['account_token_contract']}）",
+            "可入账币种（名称 / 缩写 / 网络 / 合约，实时读取）": instructions["supported_token_labels"],
+            "最终入账账户": instructions["destination_address"],
+            "账户抵押币": f"{instructions['account_token_symbol']}（{instructions['account_token_contract']}）",
             "到账需要确认数": instructions["minimum_confirmations"],
             "注意": instructions["warnings"],
         })
@@ -333,6 +342,105 @@ class PolymarketApiPlugin:
         except Exception as error:
             status["balance_error"] = str(error)[:200]
         return status
+
+    def withdrawal_panel(self, funds: AccountFunds | None = None) -> dict[str, Any]:
+        """Current spendable balance and exact default-chain withdrawal choices."""
+        choices = None
+        choices_error = None
+        try:
+            choices = self._write_transport.withdrawal_options(all_chains=True)
+        except Exception as error:
+            choices_error = error
+        funds = self._resolved_funds(funds)
+        panel: dict[str, Any] = {
+            "当前可转出": f"{funds.available:.6f} {funds.currency}",
+            "余额来源": funds.source,
+            "默认接收地址": self.settings.transfer_recipient or "未设置；本次操作可直接填写",
+        }
+        if choices_error is not None:
+            panel["读取提现币种失败"] = str(choices_error)[:300]
+            return panel
+        assert choices is not None
+        panel["可提网络（实时读取）"] = choices["chains"]
+        panel["可转出币种（名称 / 缩写 / 网络 / 合约，实时读取）"] = [
+            item["label"] for item in choices["options"]
+        ]
+        panel["默认网络和币种"] = choices["default"]["label"]
+        panel["_routes"] = [
+            {
+                "value": f"{item['chain_id']}:{item['contract']}",
+                "label": item["label"],
+            }
+            for item in choices["options"]
+        ]
+        return panel
+
+    def _resolved_funds(self, funds: Any | None) -> AccountFunds:
+        """Resolve the notices view's shared balance Future without exposing it as public API."""
+        if funds is None:
+            return self.account_funds()
+        result = getattr(funds, "result", None)
+        return result() if callable(result) else funds
+
+    def withdrawal_status(self, bridge_address: str) -> dict[str, Any]:
+        """Summarise the latest official state for a submitted withdrawal route."""
+        status = self._write_transport.bridge_status(bridge_address)
+        transactions = status["transactions"]
+        states = [str(item.get("status", "UNKNOWN")) for item in transactions if isinstance(item, dict)]
+        return {
+            "Bridge 地址": bridge_address,
+            "状态": " / ".join(states) if states else "尚未被 Bridge 检测到",
+            "路线记录数": len(transactions),
+        }
+
+    def withdraw(self, values: dict[str, Any] | None = None) -> dict[str, Any]:
+        """Execute an operator-requested bridge withdrawal with no hidden destination defaults."""
+        payload = values or {}
+        recipient = str(payload.get("recipient") or self.settings.transfer_recipient).strip()
+        amount = str(payload.get("amount", "")).strip()
+        if not amount:
+            return {"ok": False, "message": "请填写转出金额"}
+        if not recipient:
+            return {"ok": False, "message": "请填写交易所或钱包的接收地址"}
+        destination = str(payload.get("destination", "")).strip()
+        if destination:
+            raw_chain, separator, token_address = destination.partition(":")
+            if not separator:
+                return {"ok": False, "message": "目标币种选项格式无效，请刷新插件页面后重选"}
+        else:
+            # Backward compatibility for an already-open page from before the bound route selector.
+            raw_chain = str(payload.get("chain_id", "")).strip()
+            token_address = str(payload.get("token_contract", "")).strip()
+        try:
+            chain_id = int(raw_chain) if raw_chain else self.settings.chain_id
+            result = self._write_transport.withdraw(
+                amount,
+                recipient=recipient,
+                chain_id=chain_id,
+                token_address=token_address,
+            )
+        except Exception as error:
+            return {"ok": False, "message": str(error)[:500]}
+        destination = result["destination"]
+        quote = result.get("quote", {})
+        return {
+            "ok": True,
+            "message": (
+                f"已提交 {result['amount']:.6f} {self.account_funds().currency}，目标为 "
+                f"{destination['name']} / {destination['symbol']}（{destination['network']}）"
+            ),
+            "reveal": (
+                f"接收地址：{result['recipient']}\n"
+                f"目标币种：{destination['name']} / {destination['symbol']}\n"
+                f"目标网络：{destination['network']}（chain id {destination['chain_id']}）\n"
+                f"目标合约：{destination['contract']}\n"
+                f"转出金额：{result['amount']:.6f}\n"
+                f"预计到账价值：${float(quote.get('estOutputUsd', 0) or 0):.6f}\n"
+                f"Bridge 状态：{result['status']}\n"
+                f"交易：{result['transaction']}"
+            ),
+            **result,
+        }
 
     def confirm_deposit(self, values: dict[str, Any] | None = None) -> dict[str, Any]:
         """Check a deposit the operator says they made, and let a waiting request off if it covers it.
@@ -373,7 +481,10 @@ class PolymarketApiPlugin:
                     detail=f"deposit {txid} credited {status.get('amount', 0):.6f}",
                 )
                 settled = "satisfied"
-            else:
+            elif available > float(request["available_when_asked"]) + 1e-9:
+                # Partial credit has to wake the decision once: only it can decide whether the
+                # current amount is enough for a freshly justified trade or whether to ask for the
+                # target again and keep waiting. No increase means there is no new answer yet.
                 self.funding_requests.settle(
                     operator_note=str((values or {}).get("note", "")),
                     state="partial", available=available,
@@ -417,13 +528,20 @@ class PolymarketApiPlugin:
         """What this key turns out to be, and what is still missing before it can trade."""
         panel: dict[str, Any] = {}
         try:
-            panel.update(self._write_transport.wallet_facts())
+            self._write_transport.prepare_account_read()
         except Exception as error:
-            panel["error"] = str(error)[:300]
-        try:
-            panel["builder_api_keys"] = self._write_transport.builder_api_keys()
-        except Exception as error:
-            panel["builder_api_keys_error"] = str(error)[:300]
+            return {"error": str(error)[:300]}
+        with ThreadPoolExecutor(max_workers=2, thread_name_prefix="polymarket-wallet") as pool:
+            facts = pool.submit(self._write_transport.wallet_facts)
+            keys = pool.submit(self._write_transport.builder_api_keys)
+            try:
+                panel.update(facts.result())
+            except Exception as error:
+                panel["error"] = str(error)[:300]
+            try:
+                panel["builder_api_keys"] = keys.result()
+            except Exception as error:
+                panel["builder_api_keys_error"] = str(error)[:300]
         return panel
 
     def exportable_secrets(self) -> dict[str, str]:

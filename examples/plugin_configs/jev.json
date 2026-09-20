@@ -1,0 +1,11 @@
+{
+  "JEV_CONNECTION": "OPENROUTER",
+  "JEV_API_KEY": "",
+  "JEV_SHARED_PROVIDER": "openrouter",
+  "JEV_MODEL": "~typesafe/jev-latest",
+  "JEV_CUSTOM_BASE_URL": "",
+  "JEV_CUSTOM_MODEL": "",
+  "JEV_HTTP_PROXY": "INHERIT",
+  "JEV_TIMEOUT_SECONDS": 30,
+  "JEV_BATCH_SIZE": 32
+}

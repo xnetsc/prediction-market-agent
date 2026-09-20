@@ -26,7 +26,7 @@ from urllib.parse import urlsplit
 from prediction_market_agent.agent.provider_health import parse_reset_time
 from prediction_market_agent.plugin_system.discovery import PluginConfigField, PluginControls
 from prediction_market_agent.plugin_system.managed_config import atomic_write_text
-from ._shared import resolve_executable, subprocess_environment
+from ._shared import client_subprocess_environment, resolve_executable
 from ._login_relay import BrowserLoginRelay
 from ._host_proxy import client_proxy
 from prediction_market_agent.plugin_system.network_diagnostics import DiagnosticNetworkRoute
@@ -135,19 +135,11 @@ class ClientControl:
 
     def environment(self) -> dict[str, str]:
         proxy = self.proxy_settings()
-        env = subprocess_environment(proxy["proxy"], proxy["no_proxy"])
         home = self.directory("AUTH")
-        home.mkdir(parents=True, exist_ok=True, mode=0o700)
-        home.chmod(0o700)
-        env["HOME"] = str(home)
-        env.pop("CODEX_HOME", None)
-        env.pop("CLAUDE_CONFIG_DIR", None)
-        if self.name == "codex":
-            env["CODEX_HOME"] = str(home / ".codex")
-        else:
-            env["CLAUDE_CONFIG_DIR"] = str(home / ".claude")
-        Path(env["CODEX_HOME"] if self.name == "codex" else env["CLAUDE_CONFIG_DIR"]).mkdir(
-            parents=True, exist_ok=True, mode=0o700)
+        env = client_subprocess_environment(
+            self.name, home / (".codex" if self.name == "codex" else ".claude"),
+            proxy["proxy"], proxy["no_proxy"],
+        )
         # The browser runs on the user's device; only the authorization link crosses the UI.
         env["BROWSER"] = "true"
         env["NO_COLOR"] = "1"
@@ -903,6 +895,8 @@ def _codex_usage_reading(payload: dict[str, Any]) -> dict[str, Any]:
     available = payload.get("ordinaryUsageAllowed")
     if available is None and windows:
         available = all(_percent(window["used_percent"]) < 100 for window in windows)
+    if available is None and not windows:
+        raise ValueError("Codex 没有返回短窗口或周额度窗口")
     return {"available": available, "windows": windows,
             "source": "codex app-server · account/rateLimits/read"}
 

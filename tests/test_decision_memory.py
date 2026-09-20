@@ -1,6 +1,29 @@
 from ._support import *
 
 class DecisionAndMemoryTests(unittest.TestCase):
+    def test_round_history_handoff_names_current_and_previous_records(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            memory = SessionMemory(Path(directory) / "sessions.sqlite3")
+            first_context = {"history_handoff": {"previous_round": None}}
+            first = memory.begin_decision(
+                platform="venue", market_topic_id="topic", market_id="market",
+                token_id="token", strategy_name="s", strategy_sha256="x",
+                context=first_context,
+            )
+            memory.complete_decision(first, status="NO_ACTION")
+            previous = memory.latest_decision_reference(
+                platform="venue", market_topic_id="topic", token_id="token"
+            )
+            second_context = {"history_handoff": {"previous_round": previous}}
+            second = memory.begin_decision(
+                platform="venue", market_topic_id="topic", market_id="market",
+                token_id="token", strategy_name="s", strategy_sha256="x",
+                context=second_context,
+            )
+            self.assertEqual(first_context["history_handoff"]["current_round_id"], first)
+            self.assertEqual(previous["round_id"], first)
+            self.assertEqual(second_context["history_handoff"]["current_round_id"], second)
+
     def test_decision_validation(self) -> None:
         decision = Decision.from_mapping(
             {

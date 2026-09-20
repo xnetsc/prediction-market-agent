@@ -13,6 +13,7 @@ class PolymarketPluginConfig:
     clob_url: str
     data_url: str
     relayer_url: str
+    bridge_url: str
     rpc_url: str
     chain_id: int
     private_key: str
@@ -32,8 +33,6 @@ class PolymarketPluginConfig:
     scan_interval_seconds: int
     error_backoff_seconds: int
     error_backoff_max_seconds: int
-    max_topics_per_cycle: int
-    max_decisions_per_cycle: int
     topic_page_size: int
 
     @classmethod
@@ -44,6 +43,9 @@ class PolymarketPluginConfig:
             clob_url=get("POLYMARKET_CLOB_URL", "").strip(),
             data_url=get("POLYMARKET_DATA_URL", "").strip(),
             relayer_url=get("POLYMARKET_RELAYER_URL", "").strip(),
+            bridge_url=get(
+                "POLYMARKET_BRIDGE_URL", "https://bridge.polymarket.com"
+            ).strip(),
             rpc_url=get("POLYMARKET_RPC_URL", "").strip(),
             chain_id=int(get("POLYMARKET_CHAIN_ID", "0")),
             private_key=get("POLYMARKET_PRIVATE_KEY", "").strip(),
@@ -70,10 +72,6 @@ class PolymarketPluginConfig:
             error_backoff_max_seconds=int(
                 get("POLYMARKET_ERROR_BACKOFF_MAX_SECONDS", "900")
             ),
-            max_topics_per_cycle=int(get("POLYMARKET_MAX_TOPICS_PER_CYCLE", "10")),
-            max_decisions_per_cycle=int(
-                get("POLYMARKET_MAX_DECISIONS_PER_CYCLE", "6")
-            ),
             topic_page_size=int(get("POLYMARKET_TOPIC_PAGE_SIZE", "100")),
         )
         for name, url in {
@@ -81,6 +79,7 @@ class PolymarketPluginConfig:
             "POLYMARKET_CLOB_URL": value.clob_url,
             "POLYMARKET_DATA_URL": value.data_url,
             "POLYMARKET_RELAYER_URL": value.relayer_url,
+            "POLYMARKET_BRIDGE_URL": value.bridge_url,
             "POLYMARKET_RPC_URL": value.rpc_url,
         }.items():
             if not url.startswith("https://"):
@@ -91,12 +90,10 @@ class PolymarketPluginConfig:
             value.scan_interval_seconds,
             value.error_backoff_seconds,
             value.error_backoff_max_seconds,
-            value.max_topics_per_cycle,
-            value.max_decisions_per_cycle,
             value.topic_page_size,
         ) <= 0:
             raise ValueError(
-                "Polymarket runtime interval, backoff, and cycle limits must be positive"
+                "Polymarket runtime interval, backoff, and page size must be positive"
             )
         if value.error_backoff_max_seconds < value.error_backoff_seconds:
             raise ValueError(
@@ -111,6 +108,7 @@ class PolymarketPluginConfig:
             "clob_url": self.clob_url,
             "data_url": self.data_url,
             "relayer_url": self.relayer_url,
+            "bridge_url": self.bridge_url,
             "rpc_url": self.rpc_url,
             "chain_id": self.chain_id,
             "private_key_present": bool(self.private_key),
@@ -133,8 +131,6 @@ class PolymarketPluginConfig:
                 "scan_interval_seconds": self.scan_interval_seconds,
                 "error_backoff_seconds": self.error_backoff_seconds,
                 "error_backoff_max_seconds": self.error_backoff_max_seconds,
-                "max_topics_per_cycle": self.max_topics_per_cycle,
-                "max_decisions_per_cycle": self.max_decisions_per_cycle,
                 "topic_page_size": self.topic_page_size,
             },
         }

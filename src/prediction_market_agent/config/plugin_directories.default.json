@@ -9,6 +9,10 @@
       "${WORKING_DIRECTORY}/plugins/decision_provider",
       "${PACKAGE_ROOT}/plugins/providers"
     ],
+    "decision_evaluator": [
+      "${WORKING_DIRECTORY}/plugins/decision_evaluator",
+      "${PACKAGE_ROOT}/plugins/evaluators"
+    ],
     "decision_strategy": [
       "${WORKING_DIRECTORY}/plugins/decision_strategy",
       "${PACKAGE_ROOT}/plugins/strategies"

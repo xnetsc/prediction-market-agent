@@ -5,8 +5,11 @@
 代理字段默认 `INHERIT`，因此共用这一条路径；每个插件可改为 `DIRECT`、`HOST`、`ENVIRONMENT`、
 `SYSTEM`（仅原生 macOS）或明确的 HTTP/HTTPS URL，覆盖只影响该插件。界面显示的实际地址会去掉凭据。
 
-OpenRouter 的 `OPENROUTER_HTTP_PROXY` 同样默认 `INHERIT`。其插件私有桥只让内部运行时到本机回环服务
-绕过代理；桥到 OpenRouter 的模型目录和推理请求仍使用解析后的统一或独立代理。
+OpenRouter 的 `OPENROUTER_HTTP_PROXY` 同样默认 `INHERIT`。其插件私有透明守卫只让 CLI 到本机回环服务
+绕过代理；守卫到 OpenRouter 的模型目录和推理请求仍使用解析后的统一或独立代理。Responses/Messages
+协议保持不变；模型缺少 CLI 专有 Web Search/Fetch 或 namespace-tool 参数时，守卫只转换声明并复原工具名，
+仍由 OpenRouter server tool 与官方 CLI Agent 循环执行。它不替换 CLI 的文件、命令和 skills，也不改写
+任何现有网络代理层。
 
 ## 检测范围和顺序
 

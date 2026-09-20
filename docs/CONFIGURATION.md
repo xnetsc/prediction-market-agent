@@ -34,7 +34,7 @@
 |---|---|
 | `working_directory` | 所有相对配置和运行数据路径的基准目录 |
 | `management_file` | 插件启用、禁用、优先级和当前策略文件 |
-| `plugin_directories_file` | 七类插件扫描目录文件 |
+| `plugin_directories_file` | 八类插件扫描目录文件 |
 | `state_file` | 账户镜像基准路径；多平台及纸面交易会自动使用彼此独立的后缀 |
 | `session_db` | 会话、研究步骤、执行动作和决策台账 SQLite |
 | `auth_db` | admin Passkey、公钥计数器和登录会话 SQLite |
@@ -47,8 +47,11 @@
 | `strategy_max_trade_usdt` | 内置决策策略偏好的单笔金额；硬上限应由过滤插件实现 |
 | `agent_max_tool_steps` | 每次最终决策前最多研究工具步骤 |
 | `agent_tool_result_chars` | 单个工具结果进入上下文的字符预算 |
-| `context_window_chars` | Provider 输入窗口预算 |
-| `history_per_market` | 自动召回的同市场历史条数 |
+| `history_per_market` | 业务历史查询工具的默认返回条数；不会自动拼接上下文 |
+| `discovery_max_scan_seconds` | 单批发现硬时限；正常停止由当前状态判断，不是候选配额 |
+| `discovery_max_pages` | 单批发现硬分页保护；未处理状态可留到后续批次 |
+| `decision_max_attempts` | 单批 outcome 评估硬保护；盘口读取失败不消耗一次尝试 |
+| `decision_max_cycle_seconds` | 单批决策处理硬时限 |
 | `shared_http_proxy` | 统一代理；支持联网的内置插件默认继承 |
 | `shared_no_proxy` | 统一代理的绕过主机，回环地址始终自动加入 |
 | `host_proxy_file` | 一键启动器写入的宿主机代理检测/转发信息文件 |
@@ -67,7 +70,7 @@ Agent 动作策略或具体交易策略；这些只能由对应插件定义。�
 
 ## 插件扫描目录与启用状态
 
-`plugin_directories_file` 指向包含七个固定类别的 JSON。每个类别是有序目录列表；文件不存在时先使用
+`plugin_directories_file` 指向包含八个固定类别的 JSON。每个类别是有序目录列表；文件不存在时先使用
 `${WORKING_DIRECTORY}/plugins/<类别>` 的可写安装目录，再使用安装包内置目录。界面的“安装新插件”可选择
 其中一个当前配置目录写入新 `.py` 文件；不覆盖同名文件，安装后保持禁用。示例见
 `examples/plugin_directories.json`。
@@ -86,9 +89,14 @@ Agent 动作策略或具体交易策略；这些只能由对应插件定义。�
 
 - API 插件：端点、认证、钱包、代理、交易账户起始资金和平台参数；
 - Provider 插件：客户端路径、模型、凭证、代理和超时；OpenRouter 的远端端点固定在其插件实现内；
+- typed evaluator 插件：发现粗筛的类型协议、模型、直接请求/解析参数和独立代理；它不参与交易决策。
+  当前 `jev` 插件实例默认选 Jev；
+  OpenRouter 中的 Jev 型号走原生 Decisions，其它明确支持 structured output 的型号走 strict schema Chat
+  Completions，并默认只复用指定 Provider 的推理 Key；自定义方式填写 Chat Completions Base URL、模型名和
+  可选 Key，原生 strict schema 不可用或被忽略时回退到强制函数参数。各方式都不复用 Provider 的模型或代理；
 - 策略插件：策略文本路径和候选筛选字段；
 - 标的发现插件：发现文本、读取预算及其私有参数；
-- 研究插件：搜索端点、代理、网络约束及结果限制；
+- 研究插件：预测市场跨平台查询、行情、K 线和业务历史的结果限制；通用搜索/网页由官方 CLI 管理；
 - 业务风控插件：账户分配、损益规则和自定义 Python 规则文件；
 - Agent 行为风控插件：允许的工具名与交易动作白名单。
 
@@ -101,9 +109,13 @@ Agent 动作策略或具体交易策略；这些只能由对应插件定义。�
 控制、日志或文档。
 
 Binance 和 Polymarket 还分别在自己的同一 JSON 中提供 `*_SCAN_INTERVAL_SECONDS`、
-`*_ERROR_BACKOFF_SECONDS`、`*_ERROR_BACKOFF_MAX_SECONDS`、`*_MAX_TOPICS_PER_CYCLE`、
-`*_MAX_DECISIONS_PER_CYCLE` 和 `*_TOPIC_PAGE_SIZE`，均有默认值。它们不是第二套配置，也不进入应用
-Config；动态 UI 从 API 插件初始化返回的 schema 自动生成字段。
+`*_ERROR_BACKOFF_SECONDS`、`*_ERROR_BACKOFF_MAX_SECONDS` 和 `*_TOPIC_PAGE_SIZE`，均有默认值。旧的
+`*_MAX_TOPICS_PER_CYCLE` / `*_MAX_DECISIONS_PER_CYCLE` 已退役，不再显示或参与停止；资源保护统一由上面的
+发现页数/时限和决策尝试/时限承担。动态 UI 从 API 插件初始化返回的 schema 自动生成字段。
+
+Polymarket 的私有配置还包含 `POLYMARKET_BRIDGE_URL`，默认指向官方 Bridge。充值和提现资产不在配置中
+写死：插件运行时从 Bridge 读取完整名称、缩写、网络、chain id、合约、精度与最低金额。默认接收地址只
+是提现表单的便捷值；最终提交仍使用用户在绑定路线中选择的目标链/币种和本次接收地址。
 
 `bot_management.json` 增加 `strategy_evolution`（默认 `true`）。它只决定**用户自己的**发现或
 决策策略插件是否附加运行时学到的叠加层；关闭后这些插件只使用用户写的原文，策略文件本身任何时候都

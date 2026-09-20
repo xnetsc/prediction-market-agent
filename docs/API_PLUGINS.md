@@ -25,8 +25,8 @@ API 插件还提供两组互补能力：标准业务接口供通用框架随时�
 仍然可改（测试网、地区域名、自建 RPC）：
 
 - Binance：`BINANCE_API_BASE_URL` 默认官方地址，账户类型默认 `SPOT`，滑点默认 100 bps
-- Polymarket：Gamma / CLOB / Data / Relayer / RPC / ChainId **直接取自官方客户端的 `PRODUCTION`**，
-  不是抄进代码的字面量——平台哪天换地址，跟着客户端升级就跟上了
+- Polymarket：Gamma / CLOB / Data / Relayer / RPC / ChainId **直接取自官方客户端的 `PRODUCTION`**；
+  Bridge 默认 `https://bridge.polymarket.com`，可在插件私有配置中覆盖
 
 **装完之后需要手填的只剩凭据**，也就是只有你有的东西：
 
@@ -99,6 +99,12 @@ Key；而产生 Builder Key 的按钮本身也要先连线。所以建账用的 
 只有调用方知道还有没有人在等。`allow_pending=False` 时插件做不完就必须直说，不能挂起一个没人会回来
 看的请求。过了期限的请求算 `failed`：几小时后才批准的转账，喂的是一个早已不存在的意图。
 
+`partial` 不是“资金已就绪”。只有平台可用余额相对提出请求时确实增加、但仍低于目标，插件才把旧请求
+结为 `partial`；只有链上回执而平台可用余额未增加时，请求继续保持 `pending`。运行时只把这个部分到账
+结果交回决策逻辑一次，并重新读取当前行情和已有持仓。决策逻辑必须明确选择三种结果之一：使用现有资金
+继续且不再补；不执行并新建目标余额请求继续等待；或先建立明确标注的分阶段仓位，同时新建补足请求。
+余款后来到账时仍要再做一次新决策，不能机械补单。
+
 只能有一个请求在等人批。第二个请求到达时，**留哪一个不是插件该猜的**——那是"我现在到底想干什么"的
 陈述，只有提出请求的那一方知道。写死"新的赢"大多数时候对，剩下的时候静默地错：第二笔可能是另一个标的
 上的小仓位，不该把一笔已经值得批准的划转撤掉。所以插件反问提问方，拿到答案再动手。
@@ -111,7 +117,7 @@ Key；而产生 Builder Key 的按钮本身也要先连线。所以建账用的 
 | 谁 | 负责什么 |
 | --- | --- |
 | **API 插件** | 问题文字、有哪些选项、每个选项各自要带什么数据、拿到答案后做什么 |
-| **框架** | 拼上下文、用 schema 锁死回答格式、校验、重试、失败兜底、写进 trace 与审计 |
+| **框架** | 把业务状态、问题、选项和 schema 输入同一 CLI 会话，校验、重试、失败兜底并写入 trace 与审计 |
 
 框架**不知道**选项是什么意思，也不该知道。它只保证一件事：`ask()` 的返回值要么是插件自己列过的某个
 选项，要么是一个说明了原因的失败，绝不会是第三种东西。而且它**从不抛异常**——调用方正做到一半，异常
@@ -184,8 +190,10 @@ merely because you once started it, is the specific mistake this input exists to
 
 ### 转不转得进去，是插件自己的事
 
-框架不管平台能不能自动划转。能自动的就自动，不能的就让用户自己处理——两个内置插件正好各占一边，
-见下文。
+框架不管平台的充值或提现协议。`ENSURE_FUNDS` 只表达目标可用余额，具体是账户内划转、生成 Bridge
+充值地址、校验源链交易，还是构造提现路线，都由平台插件实现。管理控制台的“资金管理”页只集中承载
+插件返回的钱包、余额、充值、请求和转出操作，不把平台协议搬进通用界面层。钱包、充值和转出是常驻操作，
+插件将它们标为不进入全局待处理横幅；只有真正悬而未决的资金请求仍作为事件提醒。
 
 ## Binance
 
@@ -208,9 +216,10 @@ wallet address/id 齐全；直接集成测试不走该 readiness 门，因此仍
 - 限价/市价 BUY、SELL；
 - authenticated cancel；
 - 从可赎回持仓映射 token 到 condition 后提交赎回；
-- pUSD OUTBOUND 转账。
+- 通过官方 Bridge 生成充值地址并验证源链合约、确认数与 Bridge 完成状态；
+- 通过官方 Bridge quote/withdraw 路线把 pUSD 转成所选目标链的受支持 USDC 类资产并转出。
 
-私有 JSON 拥有所有端点、链、钱包私钥、可选 CLOB L2/funder、用户/Builder Relayer、Builder Code、
+私有 JSON 拥有所有端点（含 Bridge）、链、钱包私钥、可选 CLOB L2/funder、用户/Builder Relayer、Builder Code、
 转出地址和代理。当前适配器把 `settlement_status` 声明为 true，但只在 outcome 价格达到结算阈值时返回
 胜负；仍在交易区间的市场返回未结算，不会把暂时领先当成 winner。
 
@@ -220,8 +229,20 @@ Polymarket 的同一私有 JSON 提供与 Binance 等价的六个 runtime 字段
 private key 标为运行必需；CLOB L2 三件套可由私钥派生，funder 地址可由钱包推导。可选 Builder/Relayer
 凭证与转出地址只影响相应工作流。
 
+充值路线不是仓库内写死的某一个 USDC 合约。插件先用当前账户向 Bridge 请求专属充值地址，再实时读取
+`/supported-assets`，只展示配置源链上 Bridge 当时接受的 USDC 类资产。每项同时显示完整名称、缩写、
+网络名、chain id、合约地址、精度和最低金额。确认时同时校验交易接收地址、精确代币合约、确认数以及
+Bridge 状态；只有 Bridge `COMPLETED` 且平台余额达到目标才是 `satisfied`。
+
+转出同样实时读取支持资产。界面把目标网络、chain id 与代币合约绑定成一个选项，不能独立拼出不一致
+路线；提交前检查当前可用余额和最低金额，然后先 quote、再取得 Bridge 提现地址，最后由账户把 pUSD
+转到该地址。接收地址可以是交易所或普通 EVM 钱包，但必须与所选目标网络相容；插件不会替用户把同一个
+地址解释成另一条链。交易提交后可按 Bridge 地址查询处理状态。
+
 官方参考：[Gasless 交易](https://docs.polymarket.com/trading/gasless)、
-[市场结算](https://docs.polymarket.com/concepts/resolution)。
+[市场结算](https://docs.polymarket.com/concepts/resolution)、
+[Bridge 接口](https://github.com/Polymarket/agent-skills/blob/main/bridge.md)、
+[官方 Bridge 示例](https://github.com/Polymarket/rs-clob-client/blob/main/examples/bridge.rs)。
 
 ## 多平台协同
 

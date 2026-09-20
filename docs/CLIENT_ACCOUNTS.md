@@ -5,11 +5,31 @@
 本机网页回调、设备码 / 验证码。账号状态和额度常驻显示在卡片上；登录方式、凭据和升级维护仍默认收起，
 主要按钮是“配置模型”。OpenRouter 卡片同样常驻显示 Key 用量和可选账户余额；“配置 OpenRouter”展示
 推理 Key、可选 Management Key、受限模型列表和代理，端点固定由插件实现，不提供任意 URL。
+OpenRouter 还必须选择实际承担 Agent 编排的 CLI：`AUTO` 优先 Codex、否则 Claude，也可固定选择。
+OpenRouter 只提供该 CLI 背后的 LLM；如果两种 CLI 都不可用，OpenRouter 也不可用。
 默认自动：手机/平板或非回环访问地址选择远程码流程，桌面 localhost/127.0.0.1/::1 选择本地回调。
 这是可覆盖的环境提示，不是服务器同机证明；任何本地回调仍必须通过逐流程映射验证。
 手动选择对各客户端独立生效，当前页面保留选择，重新加载后恢复自动；登录向导里也能切换，
 切换会取消旧客户端登录流程再开始新的流程。此选择与 Web UI 管理员 Passkey 验证完全无关。
 本站不接收官网密码；远程模式允许输入本次验证码，只有客户端确认登录后才显示成功。
+
+## 每轮会话与跨 CLI 历史
+
+每个顶层发现、分析或决策任务新建一个官方 CLI 会话，同一轮中的业务工具往返和插件反问通过官方 resume
+机制续接；下一轮重新创建。原生 Codex/Claude 使用各自账号和模型，OpenRouter 模式只把模型请求改走
+OpenRouter，Agent 会话仍由选中的官方 CLI 维护。
+
+新会话首条输入会给出三类只读历史位置：统一 `session_db` SQLite 账本、Codex 私有数据根（含 `sessions`、
+可选归档和索引/状态数据库）、Claude 私有数据根（含 `projects`、`sessions` 与可选 `history.jsonl`）。路径从
+两份插件保存的 `CODEX_AUTH_DIRECTORY` / `CLAUDE_AUTH_DIRECTORY` 解析为绝对路径，不使用服务进程默认
+HOME 猜测；旧默认 HOME 中确有历史时也作为兼容位置列出。还会给出当前轮次 ID、同市场上一轮 ID，以及
+资金到账等显式续接场景的原轮次 ID。两种 CLI 因而能互读对方的私有记录；框架不预先摘要、裁切或选择
+历史，只负责提供准确位置和不能靠猜得到的续接指针。CLI 用自身文件、命令、搜索、skills/插件决定如何
+处理这些前置信息。统一账本仍是交易审计依据，CLI 私有缓存不能替代它。
+
+原生 Provider 与 OpenRouter Provider 都为所选 CLI 设置同一套私有 `HOME`，以及对应的 `CODEX_HOME` 或
+`CLAUDE_CONFIG_DIR`。因此切到 OpenRouter 只替换模型通道，不会切换账号配置、rules、skills 或会话落盘
+位置；另一种 CLI 的私有根仍通过首条历史指针只读可见。
 
 ## 账号额度窗口
 
@@ -188,15 +208,19 @@ AES-256-CBC + HMAC-SHA256 Encrypt-then-MAC，独立加密/认证子密钥，校�
 
 ## 模型、代理和升级
 
-三个 Provider 各自设置模型与代理使用方式。CLI 模型留空使用客户端默认；OpenRouter 要选择模型 ID。
+三个 Provider 各自设置模型与代理使用方式。CLI 模型留空使用客户端默认；OpenRouter 要选择模型 ID。一旦保存，
+调用会原样传入用户选项，不根据可用性暗中换模型。Provider 间的故障转移也只使用各自已保存的选择。
 Codex/Claude 默认 `INHERIT`，跟随程序设置中的统一代理；手动 DIRECT/URL 优先。统一代理默认 HOST，
 跟随一键启动器捕获的宿主机代理；不可达时由宿主机
 Bash/Python 或 PowerShell 转发脚本处理。模型服务卡片显示脱敏地址和来源，详细检测范围、限制及配置见
 [宿主机代理说明](HOST_PROXY.md)。OpenRouter 默认 `INHERIT`，因此保留统一代理；也可以只为某一份
 `openrouter_*` 配置选择 DIRECT、HOST、ENVIRONMENT、SYSTEM 或独立 URL。这与登录回调助手是两条独立通道。
-打开配置会自动获取 OpenRouter 明确声明 `structured_outputs` 的模型列表；未声明该参数的模型不显示，也不能
-手动输入。实际请求同时强制具体供应端点接受 schema 参数。需要第二份 Key 或模型时，在模型服务页生成新的
-`openrouter_*` 插件文件，而不是把多账号逻辑放进通用框架。
+打开普通 Provider 配置会自动获取 OpenRouter 模型列表，只显示同时声明 `tools` 与 `structured_outputs`
+的型号，Codex 与 Claude 两条路径遵守同一用户选择。缺少厂商专有 Web Search/Fetch 参数不会让型号消失：
+模型原生支持时守卫直接透传，否则在 Provider 内改写成等价 OpenRouter server tool；Codex namespace tools
+也只在上游不原生支持时展平并在返回时复原。不满足结构化工具和输出要求的模型不显示，也不能手动输入。
+实际请求同时强制具体供应端点接受 schema 参数。需要第二个模型配置时，在模型服务页生成新的
+`openrouter_*` 插件文件；它默认复用主 OpenRouter Key，也可填写自己的 Key，而不是把多账号逻辑放进通用框架。
 
 客户端每六小时检查官方 npm 最新版，间隔可配置；升级必须点击确认。下载和检查使用对应插件代理。
 新版安装到 `clients/<名称>` 的独立版本目录，通过版本检查后才切换指针；安装失败保留旧版本。

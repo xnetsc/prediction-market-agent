@@ -12,9 +12,10 @@ PYTHONPATH=src .venv/bin/python -m compileall -q src tests examples
 PYTHONPATH=src .venv/bin/python -m pytest -q --ignore=tests/test_api_integration.py
 ```
 
-2026-09-19 本轮文档与 OpenRouter 校对后的结果为 `604 passed, 244 subtests passed`。其中覆盖：
+2026-09-20 本轮 typed evaluator、OpenRouter、自适应发现与资金连接优化后的最终结果为
+`659 passed, 246 subtests passed`，另有 2 条第三方弃用警告。其中覆盖：
 
-- 七类插件发现、禁用不导入、启停/刷新/teardown、动态配置和示例 schema 一致性；
+- 八类插件发现、禁用不导入、启停/刷新/teardown、动态配置和示例 schema 一致性；
 - 平台自有 runtime、立即首轮、可中断等待、失败退避和通用业务事件队列；
 - 内置/用户发现与决策策略、策略进化、Provider 健康与质量排序；
 - Codex、Claude、OpenRouter 的模型目录、结构化输出、代理、登录和凭据迁移；
@@ -41,30 +42,52 @@ PYTHONPATH=src .venv/bin/python -m pytest -q tests/test_api_integration.py
 写探针使用无效资源标识和极小金额，成功标准是请求确实到达服务器并收到预期拒绝；若本地配置检查、mock
 或纸面传输提前返回，测试失败。权限或远端行为改变时必须人工复核输入，不能把意外接受当作通过。
 
-2026-09-19 结果为 `2 passed, 2 failed, 9 subtests passed`：Polymarket 两项通过；Binance 两项都在最先
-访问官方公开时间接口时收到 HTTP 451，因此后续写矩阵没有执行。这个结果只说明当前运行网络受 Binance
-地域策略限制，不说明 Binance 适配器通过，也不允许在本地吞掉错误。
+2026-09-20 最终结果为 `4 passed, 9 subtests passed`。首次复跑暴露出当前继承代理单次往返约 5.3 秒，
+Binance 已同步的正确时间戳仍会刚好超过其默认 5 秒 `recvWindow`；签名读请求现显式携带 20 秒窗口，仍低于
+客户端 15 秒单次网络超时所需的有限缓冲，不吞掉鉴权或时钟错误。修正后 Binance、Polymarket 单平台和
+双平台注册矩阵全部通过。此前曾出现一次 Polymarket TLS EOF，单项立即复跑与最终完整矩阵均通过，因此
+保留为外部瞬态连接记录，未加入静默重试。
 
 ## OpenRouter 严格 schema 验收
 
 后端专项位于 `tests/test_model_catalog.py` 和 `tests/test_plugin_system.py`，验证：
 
-- 模型目录请求带 `supported_parameters=structured_outputs`，响应项再次逐个检查该能力；
+- 模型目录请求带 `supported_parameters=structured_outputs`；Codex 与 Claude 选项都要求模型明确声明
+  `tools` 和 `structured_outputs`，但不因缺少厂商专有 Web Search 参数隐藏模型；
 - `OPENROUTER_MODEL` 为只选字段，不能从 UI 手填绕过目录；
-- 插件私有回环桥把 Responses schema 转成 Chat Completions `response_format.json_schema`；
+- 三种 Provider 的 CLI/上游请求都携带用户选定的模型，OpenRouter 还会覆盖 CLI 试图传入的其他型号；
+- 插件私有回环守卫保持 Codex Responses 与 Claude Messages 协议、工具调用/结果和 continuation 字段；
+  模型原生支持时保留 Web Search/Fetch，缺失时转换成 OpenRouter server tools；Codex namespace tools
+  在缺少原生支持时展平，JSON 与 SSE 返回中的调用名都会复原；Claude 非 Anthropic 路由会移除不受支持的
+  默认 `output_config.effort`，但保留 structured format、thinking、context management 和普通工具；
 - 推理请求强制 `provider.require_parameters=true`；
 - 本机回环加入 `NO_PROXY`，桥到 OpenRouter 的远端请求仍经过该插件解析后的统一或独立代理；
-- 真实本地 HTTP 代理收到远端目录/推理请求，证明桥接没有屏蔽原有网络代理层；
+- 真实本地 HTTP 代理收到远端目录/推理请求，证明透明守卫没有屏蔽原有网络代理层；
 - 普通推理 Key 与可选 Management Key 分别查询 `/key` 用量和 `/credits` 账户余额，凭据不回显且查询沿用该插件代理；
-- `openrouter_*` 文件各自拥有独立配置，不把多 Key/模型逻辑放入通用框架。
+- `openrouter_*` 文件各自拥有独立模型与代理配置，Key 默认复用主配置并可单独覆盖，不把这段逻辑放入通用框架。
+- `AUTO/CODEX/CLAUDE` 选择、CLI 缺失判定、同一轮 session resume、下一轮新 session，以及给两种 CLI
+  同时提供统一账本和双方私有历史路径；路径从双方 AUTH_DIRECTORY 解析，OpenRouter 子进程也使用所选
+  CLI 的同一私有 HOME。
 
-另使用生产容器中已保存的 OpenRouter Key 做过单次 schema 探针，模型 `z-ai/glm-5.3` 返回严格对象
-`{"number": 7, "word": "ok"}`。探针没有输出、复制或写回 Key，测试前后 `robot_paused=true`。这一结果
-证明当时账号与路由可用，不保证未来额度、模型端点或供应商状态。
+evaluator 专项位于 `tests/test_typed_evaluator_pipeline.py`：验证 Jev 原生 OpenRouter Decisions 请求、其它
+OpenRouter 模型的 `structured_outputs` 过滤与 `require_parameters`、自定义普通聊天模型原生优先的 strict
+`state/questions → answers` JSON schema、拒绝/忽略 schema 时的强制函数回退、Choice/Score/Noul 完整解析、
+散文拒绝、共享 Key 但不共享代理，
+候选输入压缩、不会筛空的平方根质量抽样、0.90 起步且最低 0.80 的动态阈值，以及暂停游标跨批恢复。
+该测试使用本机 HTTP fixture，不声称真实账号当前可用。
+
+另使用已配置且未输出的 OpenRouter Key 做过合成状态探针：原生 `~typesafe/jev-latest` 的候选粗筛返回
+合法 Choice/Score/Noul；当前配置的 `qwen/qwen3.7-max` 分别经 Codex Responses 与 Claude Messages CLI
+路径返回合法 strict schema 对象。Claude 2.1 默认发送但该非 Anthropic 路由不接受的
+`output_config.effort` 由私有守卫移除，其它 Messages 字段保留。探针没有市场或交易写入，也没有输出、
+复制或写回 Key；继承的容器内代理主机名在宿主机
+不可解析的问题已在统一解析层修复：宿主机运行选快照中的原始回环代理，容器运行继续选容器地址。两个
+探针随后均以 `INHERIT` 通过，没有改为 DIRECT，也没有修改保存配置。这只证明当时账号与路由可用，不
+保证未来额度、模型端点或供应商状态。
 
 ## 浏览器验收
 
-`tests/dashboard_ui.cjs` 使用本机 Chrome，在 390、768、1440px 检查六区导航、插件中心六类二级页、
+`tests/dashboard_ui.cjs` 使用本机 Chrome，在 390、768、1440px 检查七区导航、插件中心七类二级页、
 模型服务、三种 Provider 常驻账号/额度信息、OpenRouter 受限模型选择与独立配置生成、未保存草稿、启用顺序、
 决策五步、网络折叠和远程登录弹窗。模型列表、账号读数和写请求由浏览器测试局部 fixture 拦截，不向运行
 部署提交测试 Key、配置、验证码或交易。
@@ -75,7 +98,7 @@ DASHBOARD_TEST_URL=http://127.0.0.1:18765 \
   DASHBOARD_SCREENSHOTS=runtime-data/ui-review node tests/dashboard_ui.cjs
 ```
 
-2026-09-19 三种宽度均通过，无 JavaScript 错误和整页横向溢出。目标必须是隔离的管理测试实例；这不替代
+2026-09-20 三种宽度均通过，无 JavaScript 错误和整页横向溢出。目标必须是隔离的管理测试实例；这不替代
 iOS Safari、Android 真机、Windows 原生浏览器或真实账号授权验收。
 
 登录、回调和代理的非浏览器专项分别位于：
@@ -90,9 +113,11 @@ iOS Safari、Android 真机、Windows 原生浏览器或真实账号授权验收
 .venv/bin/python -m build --wheel --outdir runtime-data/build-openrouter
 ```
 
-2026-09-19 wheel 为 397617 字节，SHA-256
-`c4c66dc6b7d06824c3ad4989b23c72e6c2361851a7c957a733a01060d2a50a95`。已检查包内包含
-`plugins/providers/openrouter.py` 和新版 dashboard 静态资源，不包含任何已退役的通用兼容 Provider 模块。
+2026-09-20 最终 wheel 为 436402 字节，SHA-256
+`3b480471b023eb2f51b1ac484062e592bae46270d3e50f0030ed06ac346aa0c8`。已检查包内包含
+`agent/decision_evaluator.py`、`plugin_system/config_io.py`、`plugins/evaluators/jev.py`、
+`plugins/providers/openrouter.py` 和新版 dashboard
+静态资源，不包含任何已退役的通用兼容 Provider 模块。
 
 `.github/workflows/container.yml` 的 `login-helpers` 作业在 macOS、Ubuntu 和 Windows 原生运行终端助手与
 宿主代理测试；`publish` 作业构建安装态镜像，执行 `deploy/check-container.sh`，再发布 amd64/arm64。

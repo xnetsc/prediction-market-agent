@@ -29,6 +29,7 @@ class PluginManagementService:
         return {
             "api": self.config.market_api_plugins,
             "decision_provider": self.config.decision_providers,
+            "decision_evaluator": self.config.decision_evaluators,
             "decision_strategy": (),
             "market_discovery": self.config.market_discovery_plugins,
             "research_tool": self.config.research_tool_plugins,

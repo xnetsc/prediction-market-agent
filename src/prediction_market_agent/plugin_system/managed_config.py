@@ -11,6 +11,7 @@ from typing import Any
 PLUGIN_KINDS = (
     "api",
     "decision_provider",
+    "decision_evaluator",
     "decision_strategy",
     "market_discovery",
     "research_tool",

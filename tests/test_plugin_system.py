@@ -53,6 +53,7 @@ class _PolymarketClient:
     def __init__(self):
         self.orders = []
         self.environment = SimpleNamespace(collateral_token="0x" + "1" * 40)
+        self.wallet = "0x" + "9" * 40
 
     def place_limit_order(self, **values):
         self.orders.append(("limit", values))
@@ -77,6 +78,10 @@ class _PolymarketClient:
     def transfer_erc20(self, **values):
         self.transfer_values = values
         return _Handle("transfer-1")
+
+    def get_balance_allowance(self, **values):
+        self.balance_filter = values
+        return _Model(balance=10_000_000)
 
     def close(self):
         self.closed = True
@@ -118,7 +123,7 @@ class PluginSystemTests(unittest.TestCase):
                 strategy = catalog.get("decision_strategy", "example_strategy").factory(runtime)
                 self.assertIn("evidence", strategy.instructions.lower())
                 discovery = catalog.get("market_discovery", "example_discovery").factory(runtime)
-                self.assertEqual(discovery.budget().survey_topics, 200)
+                self.assertEqual(discovery.budget().search_result_limit, 100)
                 self.assertIn("attention", discovery.instructions.lower())
                 research = catalog.get("research_tool", "static_evidence").factory(runtime)
                 self.assertIn("READ_STATIC_EVIDENCE", research.descriptions)
@@ -442,9 +447,36 @@ class PluginSystemTests(unittest.TestCase):
         self.assertEqual(transport.cancel_orders(["limit-1"])["canceled"], ["limit-1"])
         redeemed = transport.redeem(["token-1"])
         self.assertEqual(len(redeemed["transactions"]), 1)
+        bridge_address = "0x" + "5" * 40
+        destination_token = "0x" + "6" * 40
+
+        def bridge(method, path, *, payload=None):
+            if path == "/supported-assets":
+                return {"supportedAssets": [{
+                    "chainId": "137", "chainName": "Polygon",
+                    "token": {"name": "USD Coin", "symbol": "USDC",
+                              "address": destination_token, "decimals": 6},
+                    "minCheckoutUsd": 1,
+                }]}
+            if path == "/quote":
+                return {"quoteId": "quote-1", "estOutputUsd": 1.24}
+            if path == "/withdraw":
+                return {"address": {"evm": bridge_address}}
+            raise AssertionError((method, path, payload))
+
+        transport._bridge_json = bridge
         transferred = transport.transfer("OUTBOUND", "1.25")
         self.assertEqual(transferred["amountBaseUnits"], 1_250_000)
         self.assertEqual(client.transfer_values["amount"], 1_250_000)
+        self.assertEqual(client.transfer_values["recipient_address"], bridge_address)
+        self.assertEqual(transferred["destination"]["name"], "USD Coin")
+        with self.assertRaisesRegex(ValueError, "目标代币合约不在"):
+            transport.withdraw(
+                "1.25",
+                recipient="0x" + "4" * 40,
+                chain_id=137,
+                token_address="0x" + "7" * 40,
+            )
         with self.assertRaisesRegex(ValueError, "OUTBOUND"):
             transport.transfer("INBOUND", str(10**18))
 
@@ -528,6 +560,7 @@ class CatalogCoverageTests(unittest.TestCase):
             {
                 "api",
                 "decision_provider",
+                "decision_evaluator",
                 "decision_strategy",
                 "market_discovery",
                 "research_tool",

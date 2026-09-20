@@ -371,6 +371,37 @@ class FundingContinuationTests(unittest.TestCase):
         )
         self.assertEqual(note["how_long_this_market_still_has"], "30 minutes")
 
+    def test_partial_funding_requires_one_explicit_continue_or_wait_choice(self) -> None:
+        import time as _time
+        from types import SimpleNamespace
+        from prediction_market_agent.runtime.engine import TradingEngine
+        from prediction_market_agent.plugin_system.contracts import FundingResult
+
+        answer = FundingResult(
+            request_id="r", state="partial", requested=100.0, currency="USDT",
+            available=35.0, action="partial",
+        )
+        detail = SimpleNamespace(topic=SimpleNamespace(
+            title="market", end_time_ms=int((_time.time() + 3600) * 1000)))
+        note = TradingEngine._funding_reminder(
+            TradingEngine,
+            {"asked_at": int(_time.time() * 1000), "asked_for": 100.0,
+             "currency": "USDT", "reason": "edge", "conclusion": {}},
+            answer, detail, None, SimpleNamespace(name="YES"),
+        )
+        self.assertIn("65.000000 remains unfunded", note["what_to_decide"])
+        self.assertIn("call ENSURE_FUNDS", note["what_to_decide"])
+        self.assertIn("staged amount now and also call ENSURE_FUNDS", note["what_to_decide"])
+        self.assertIn("must not mechanically fill the remainder", note["what_to_decide"])
+        self.assertIn("Partial funding is not permission", note["what_to_decide"])
+
+    def test_strategy_names_partial_as_a_question_not_ready_money(self) -> None:
+        text = BuiltInDecisionStrategy().instructions
+        self.assertIn("delayed_funding_answer.state` is `partial", text)
+        self.assertIn("three valid outcomes", text)
+        self.assertIn("execute a deliberately staged amount now", text)
+        self.assertIn("one explicit exception is the staged-partial branch", text)
+
 
 class WhatTheRobotIsForTests(unittest.TestCase):
     """Both mistakes cost: a bad trade taken, and a good one not taken."""

@@ -85,8 +85,8 @@ class PolymarketEventLoop:
                 with self._lock:
                     self._status["last_started_at"] = int(time.time())
                 try:
-                    topics = discover(settings.max_topics_per_cycle)
-                    callback(topics, settings.max_decisions_per_cycle)
+                    topics = discover()
+                    callback(topics)
                     consecutive_failures = 0
                     # The configured interval is how often this plugin is willing to be asked, not
                     # how often there is anything worth looking at. How fast this venue actually

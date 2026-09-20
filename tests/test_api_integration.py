@@ -110,7 +110,7 @@ class ProductionApiIntegrationTests(unittest.TestCase):
         engine.provider = HoldProvider()
         # Discovery itself needs an Agent; this test exercises the read and execution path,
         # so it stands in for the discovery Agent with the platform's first two topics.
-        engine.discovery.discover = lambda *, platform, plugin, maximum_topics: tuple(
+        engine.discovery.discover = lambda *, platform, plugin: tuple(
             plugin.list_topics(offset=0, limit=2).topics
         )
         status = engine.run_once()

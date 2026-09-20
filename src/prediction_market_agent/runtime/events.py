@@ -13,7 +13,6 @@ from ..plugin_system.contracts import Topic
 class PlatformScanEvent:
     platform: str
     topics: tuple[Topic, ...]
-    maximum_decisions: int
     created_at: int = field(default_factory=lambda: int(time.time()))
 
 
@@ -22,7 +21,6 @@ class PlatformDiscoveryEvent:
     """A platform runtime asking the framework to decide what this cycle should look at."""
 
     platform: str
-    maximum_topics: int
     created_at: int = field(default_factory=lambda: int(time.time()))
 
 

@@ -1,10 +1,16 @@
 from __future__ import annotations
 
 import logging
+import math
 import time
 from typing import Any, Callable
 
 from ..agent.decision import DecisionCancelled, DecisionProviderError
+from ..agent.decision_evaluator import (
+    DEFAULT_SCREENING_CONFIDENCE,
+    MIN_SCREENING_CONFIDENCE,
+    is_high_confidence,
+)
 from ..agent.evolution import (
     DISCOVERY_EVOLUTION_KEY,
     LESSON_DEVIATION,
@@ -30,7 +36,6 @@ DISCOVERY_SCHEMA: dict[str, Any] = {
     "properties": {
         "selections": {
             "type": "array",
-            "maxItems": 20,
             "items": {
                 "type": "object",
                 "additionalProperties": False,
@@ -73,6 +78,21 @@ DISCOVERY_MISSION = (
 DISCOVERY_CONTROL_MISSION = (
     "Choose one next action to sharpen the shortlist. Use DECIDE once the ordering is clear."
 )
+
+CONTINUATION_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "additionalProperties": False,
+    "properties": {
+        "action": {
+            "type": "string",
+            "enum": [
+                "CONTINUE_DISCOVERY", "PROCESS_FRONTIER", "PAUSE_AND_RESUME", "SOURCE_EXHAUSTED"
+            ],
+        },
+        "reason": {"type": "string", "minLength": 1, "maxLength": 400},
+    },
+    "required": ["action", "reason"],
+}
 
 REVIEW_SETTLE_MS = 30 * 60 * 1000
 """How long after a selection its downstream decisions are considered final."""
@@ -141,6 +161,9 @@ class DiscoveryEngine:
         memory: SessionMemory,
         strategy: Any,
         provider: Any,
+        evaluator: Any = None,
+        max_scan_seconds: int = 45,
+        max_scan_pages: int = 20,
         evolution_enabled: bool,
         cross_platform_search: Callable[[str, int], dict[str, Any]] | None = None,
         research_contributions: list[Any] | None = None,
@@ -149,6 +172,14 @@ class DiscoveryEngine:
         self.memory = memory
         self.strategy = strategy
         self.provider = provider
+        self.evaluator = evaluator
+        self.max_scan_seconds = max(1, int(max_scan_seconds))
+        self.max_scan_pages = max(1, int(max_scan_pages))
+        self._scan_audit: list[dict[str, Any]] = []
+        self._evaluator_assessments: dict[str, Any] = {}
+        self._evaluator_candidate_errors: dict[str, str] = {}
+        self._screening_threshold = DEFAULT_SCREENING_CONFIDENCE
+        self._selection_ids: dict[tuple[str, str], int] = {}
         self.evolution_enabled = evolution_enabled
         self.cross_platform_search = cross_platform_search
         # What the operator attached to their money, asked for per round: a slot spent on something
@@ -165,60 +196,279 @@ class DiscoveryEngine:
     operator_instructions: Any = None
     """Asked for the open instructions each round; the runtime sets it, tests may leave it out."""
 
-    def _survey_by_deadline(
-        self, plugin: PredictionMarketApiPlugin, budget: DiscoveryBudget, horizon_days: int
-    ) -> list[Topic]:
-        """What this venue has settling inside the window, when it can answer that question.
+    @staticmethod
+    def _evaluation_candidate(topic: Topic) -> dict[str, Any]:
+        return {
+            "candidate_id": topic.topic_id,
+            "topic_id": topic.topic_id,
+            "title": topic.title,
+            "question": topic.question,
+            "description": topic.description[:600],
+            "category": topic.category,
+            "status": topic.status,
+            "liquidity_usdt": topic.liquidity_usdt,
+            "volume_usdt": topic.volume_usdt,
+        }
 
-        The ordinary listing is by volume, and the busiest markets are the distant ones: on a live
-        venue, nine of the two hundred busiest events settled inside three days. A robot that only
-        trades what settles soon would spend every round reading markets it may not touch.
-        """
-        listing = getattr(plugin, "list_topics_by_deadline", None)
-        if horizon_days <= 0 or not callable(listing):
-            return []
+    def _llm_continuation(
+        self, *, platform: str, scan_state: dict[str, Any], frontier: list[dict[str, Any]],
+        last_page: dict[str, Any], evaluator_answer: Any,
+    ) -> dict[str, Any] | None:
+        try:
+            result = self.provider.run(
+                {
+                    "platform": platform,
+                    "scan_state": scan_state,
+                    "frontier": frontier[:40],
+                    "last_page": last_page,
+                    "typed_evaluator": (
+                        {
+                            "action": evaluator_answer.action,
+                            "marginal_value": evaluator_answer.marginal_value,
+                            "confidence": evaluator_answer.confidence,
+                            "provider": evaluator_answer.provider,
+                        }
+                        if evaluator_answer is not None else None
+                    ),
+                },
+                schema=CONTINUATION_SCHEMA,
+                schema_name="discovery_continuation",
+                mission=(
+                    "Choose whether to read another bounded page, process the current frontier, "
+                    "or yield and resume later. Base the answer on observed coverage and evidence "
+                    "gaps; do not guess the quality of unread markets."
+                ),
+                max_tool_steps=0,
+            )
+            return dict(result.value)
+        except (DecisionProviderError, AttributeError, KeyError, TypeError, ValueError) as error:
+            LOGGER.warning("discovery continuation provider unavailable on %s: %s", platform, error)
+            return None
+
+    @staticmethod
+    def _typed_continuation_is_decisive(
+        answer: Any, errors: dict[str, str], threshold: float
+    ) -> bool:
+        """Accept only strong, internally consistent typed routing without an Agent review."""
+
+        if answer is None or errors or not is_high_confidence(answer.confidence, threshold):
+            return False
+        if answer.action == "CONTINUE_DISCOVERY":
+            return answer.marginal_value >= 0.5
+        if answer.action in {"PROCESS_FRONTIER", "SOURCE_EXHAUSTED"}:
+            return answer.marginal_value <= 0.5
+        return answer.action == "PAUSE_AND_RESUME"
+
+    def _adaptive_survey(
+        self, plugin: PredictionMarketApiPlugin, budget: DiscoveryBudget
+    ) -> tuple[list[Topic], set[str]]:
+        started = time.monotonic()
+        horizon_days = int(getattr(self.strategy, "horizon_days", 0) or 0)
         now_ms = int(time.time() * 1000)
-        topics: list[Topic] = []
-        offset, page = 0, max(1, plugin.topic_page_size())
-        while len(topics) < budget.survey_topics:
-            try:
-                answer = listing(
-                    offset=offset, limit=page,
-                    after_ms=now_ms, before_ms=now_ms + horizon_days * 86400 * 1000,
+        deadline_listing = getattr(plugin, "list_topics_by_deadline", None)
+        sources: list[tuple[str, Any, dict[str, Any]]] = []
+        if horizon_days > 0 and callable(deadline_listing):
+            sources.append(("deadline", deadline_listing, {
+                "after_ms": now_ms, "before_ms": now_ms + horizon_days * 86400 * 1000
+            }))
+        sources.append(("catalog", plugin.list_topics, {}))
+        source_names = {name for name, _listing, _extra in sources}
+        stored_resume = self.memory.survey_plan(plugin.name).get("resume") or {}
+        stored_cursors = stored_resume.get("cursors") if isinstance(stored_resume, dict) else {}
+        stored_active = stored_resume.get("active") if isinstance(stored_resume, dict) else []
+        cursors = {
+            name: max(0, int((stored_cursors or {}).get(name, 0)))
+            for name in source_names
+        }
+        active = (
+            {str(name) for name in stored_active if str(name) in source_names}
+            if stored_active else set(source_names)
+        )
+        if not active:
+            active = set(source_names)
+        seen: dict[str, Topic] = {}
+        near_dated: set[str] = set()
+        assessments: dict[str, Any] = {}
+        self._evaluator_candidate_errors = {}
+        self._scan_audit = []
+        page_number = 0
+        disagreement_probe_used = False
+        resume_saved = False
+
+        def save_resume(reason: str) -> None:
+            nonlocal resume_saved
+            if not active:
+                self.memory.clear_survey_resume(plugin.name)
+                resume_saved = True
+                return
+            self.memory.save_survey_resume(plugin.name, {
+                "cursors": dict(cursors),
+                "active": sorted(active),
+                "reason": reason,
+                "saved_at": int(time.time() * 1000),
+            })
+            resume_saved = True
+
+        while active and page_number < self.max_scan_pages:
+            if time.monotonic() - started >= self.max_scan_seconds:
+                self._scan_audit.append({"stop": "resource_time_limit"})
+                save_resume("resource_time_limit")
+                break
+            progressed = False
+            for source, listing, extra in sources:
+                if source not in active or page_number >= self.max_scan_pages:
+                    continue
+                try:
+                    page = listing(
+                        offset=cursors[source], limit=max(1, int(plugin.topic_page_size())), **extra
+                    )
+                except Exception as error:
+                    LOGGER.warning("%s adaptive %s listing failed: %s", plugin.name, source, error)
+                    active.discard(source)
+                    self._scan_audit.append({"source": source, "stop": "source_error", "error": str(error)[:200]})
+                    continue
+                progressed = True
+                page_number += 1
+                fresh = [topic for topic in page.topics if topic.topic_id not in seen]
+                for topic in fresh:
+                    seen[topic.topic_id] = topic
+                    if source == "deadline":
+                        near_dated.add(topic.topic_id)
+                if not page.has_more or not page.topics:
+                    active.discard(source)
+                else:
+                    cursors[source] = page.next_offset
+                candidates = [self._evaluation_candidate(topic) for topic in fresh]
+                answers = (
+                    self.evaluator.evaluate_candidates(
+                        {
+                            "platform": plugin.name,
+                            "pages_scanned": page_number,
+                            "topics_seen": len(seen),
+                            "source": source,
+                        },
+                        candidates,
+                    )
+                    if self.evaluator is not None and self.evaluator.available
+                    else []
                 )
-            except Exception as error:
-                # The venue may not really support it whatever its capabilities say; the ordinary
-                # listing still runs, so a round is never lost over this.
-                LOGGER.warning("%s could not list by deadline: %s", plugin.name, error)
+                if self.evaluator is not None and self.evaluator.available:
+                    self._evaluator_candidate_errors.update(self.evaluator.errors)
+                assessments.update({answer.candidate_id: answer for answer in answers})
+                frontier = sorted(
+                    [
+                        {**self._evaluation_candidate(topic),
+                         "typed_quality": assessments.get(topic.topic_id).quality if topic.topic_id in assessments else None,
+                         "typed_action": assessments.get(topic.topic_id).action if topic.topic_id in assessments else None}
+                        for topic in seen.values()
+                    ],
+                    key=lambda item: (
+                        item.get("typed_action") != "PRIORITIZE",
+                        -(item.get("typed_quality") or 0.0),
+                        -float(item.get("liquidity_usdt") or 0.0),
+                    ),
+                )
+                page_summary = {
+                    "source": source,
+                    "items": len(page.topics),
+                    "new_items": len(fresh),
+                    "has_more": bool(page.has_more),
+                    "next_offset": page.next_offset,
+                }
+                scan_state = {
+                    "pages_scanned": page_number,
+                    "topics_seen": len(seen),
+                    "sources_remaining": sorted(active),
+                    "elapsed_ms": int((time.monotonic() - started) * 1000),
+                    "resource_page_limit": self.max_scan_pages,
+                    "resource_time_limit_seconds": self.max_scan_seconds,
+                }
+                typed = (
+                    self.evaluator.assess_continuation(scan_state, frontier[:40], page_summary)
+                    if self.evaluator is not None and self.evaluator.available
+                    else None
+                )
+                evaluator_errors = (
+                    dict(self.evaluator.errors)
+                    if self.evaluator is not None and self.evaluator.available else {}
+                )
+                typed_is_decisive = self._typed_continuation_is_decisive(
+                    typed, evaluator_errors, self._screening_threshold
+                )
+                llm = (
+                    self._llm_continuation(
+                        platform=plugin.name, scan_state=scan_state, frontier=frontier,
+                        last_page=page_summary, evaluator_answer=typed,
+                    )
+                    if self.evaluator is not None and self.evaluator.available
+                    and not typed_is_decisive
+                    else None
+                )
+                audit = {
+                    **page_summary,
+                    "typed": (
+                        {"action": typed.action, "marginal_value": typed.marginal_value,
+                         "confidence": typed.confidence, "provider": typed.provider}
+                        if typed else None
+                    ),
+                    "llm": llm,
+                    "llm_skipped": "decisive_typed_evaluation" if typed_is_decisive else None,
+                    "evaluator_errors": evaluator_errors,
+                }
+                self._scan_audit.append(audit)
+                typed_stop = typed is not None and typed.action in {
+                    "PROCESS_FRONTIER", "PAUSE_AND_RESUME", "SOURCE_EXHAUSTED"
+                }
+                llm_stop = llm is not None and llm.get("action") in {
+                    "PROCESS_FRONTIER", "PAUSE_AND_RESUME", "SOURCE_EXHAUSTED"
+                }
+                if typed is not None and llm is not None:
+                    if typed_stop and llm_stop:
+                        actions = {typed.action, str(llm.get("action", ""))}
+                        if "PAUSE_AND_RESUME" in actions:
+                            save_resume("joint_pause")
+                        else:
+                            self.memory.clear_survey_resume(plugin.name)
+                        active.clear()
+                        break
+                    if typed_stop != llm_stop:
+                        if disagreement_probe_used:
+                            save_resume("bounded_disagreement_probe_complete")
+                            active.clear()
+                            audit["stop"] = "bounded_disagreement_probe_complete"
+                            break
+                        disagreement_probe_used = True
+                        audit["probe"] = "one_more_page"
+                elif typed_stop or llm_stop:
+                    action = typed.action if typed_stop else str(llm.get("action", ""))
+                    if action == "PAUSE_AND_RESUME":
+                        save_resume("evaluator_pause")
+                    else:
+                        self.memory.clear_survey_resume(plugin.name)
+                    active.clear()
+                    break
+            if not progressed:
                 break
-            topics.extend(answer.topics)
-            if not answer.has_more or not answer.topics:
-                break
-            offset = answer.next_offset
-        return topics[: budget.survey_topics]
+        if active and not resume_saved and page_number >= self.max_scan_pages:
+            self._scan_audit.append({"stop": "resource_page_limit"})
+            save_resume("resource_page_limit")
+        elif not active and not resume_saved:
+            self.memory.clear_survey_resume(plugin.name)
+        self._evaluator_assessments = assessments
+        ordered = sorted(
+            seen.values(),
+            key=lambda topic: (
+                topic.topic_id not in near_dated,
+                assessments.get(topic.topic_id).action != "PRIORITIZE" if topic.topic_id in assessments else True,
+                -(assessments.get(topic.topic_id).quality if topic.topic_id in assessments else 0.0),
+            ),
+        )
+        return self._with_requested(plugin, ordered, budget), near_dated
 
     def _survey(
         self, plugin: PredictionMarketApiPlugin, budget: DiscoveryBudget
     ) -> tuple[list[Topic], set[str]]:
-        # What settles inside the window first, because the listing below will not offer it, then
-        # the venue's own order for the rest - the crowd's favourites still have to be seen for the
-        # gates and the priors to mean anything.
-        horizon_days = int(getattr(self.strategy, "horizon_days", 0) or 0)
-        near_dated: list[Topic] = self._survey_by_deadline(plugin, budget, horizon_days)
-        topics: list[Topic] = list(near_dated)
-        seen = {topic.topic_id for topic in topics}
-        page_size = max(1, int(plugin.topic_page_size()))
-        offset = 0
-        while len(topics) < budget.survey_topics:
-            page = plugin.list_topics(
-                offset=offset, limit=min(page_size, budget.survey_topics - len(topics))
-            )
-            topics.extend(topic for topic in page.topics if topic.topic_id not in seen)
-            seen.update(topic.topic_id for topic in page.topics)
-            if not page.has_more or not page.topics:
-                break
-            offset = page.next_offset
-        return self._with_requested(plugin, topics, budget), {topic.topic_id for topic in topics[:len(near_dated)]}
+        return self._adaptive_survey(plugin, budget)
 
     def _with_requested(
         self,
@@ -241,10 +491,8 @@ class DiscoveryEngine:
             return topics
         seen = {topic.topic_id for topic in topics}
         for query in queries:
-            if len(topics) >= budget.survey_topics:
-                break
             try:
-                found = plugin.search_market_candidates(query, budget.shortlist_topics)
+                found = plugin.search_market_candidates(query, budget.search_result_limit)
             except Exception as error:
                 LOGGER.warning("requested survey %r failed on %s: %s", query, plugin.name, error)
                 continue
@@ -254,8 +502,6 @@ class DiscoveryEngine:
                     continue
                 seen.add(topic.topic_id)
                 topics.append(topic)
-                if len(topics) >= budget.survey_topics:
-                    break
         return topics
 
     def _prior_weights(self) -> dict[str, float]:
@@ -327,10 +573,11 @@ class DiscoveryEngine:
     # ------------------------------------------------------------- discovery
 
     def discover(
-        self, *, platform: str, plugin: PredictionMarketApiPlugin, maximum_topics: int
+        self, *, platform: str, plugin: PredictionMarketApiPlugin
     ) -> tuple[Topic, ...]:
         budget = self.strategy.budget()
         now_ms = int(time.time() * 1000)
+        self._screening_threshold = self._adaptive_screening_threshold()
         surveyed, near_dated = self._survey(plugin, budget)
         if not surveyed:
             return ()
@@ -348,6 +595,14 @@ class DiscoveryEngine:
                 attention=attention.get(topic.topic_id),
                 now_ms=now_ms,
             )
+            typed = self._evaluator_assessments.get(topic.topic_id)
+            if typed is not None:
+                features["typed_evaluation"] = {
+                    "action": typed.action,
+                    "quality": typed.quality,
+                    "confidence": typed.confidence,
+                    "provider": typed.provider,
+                }
             features_by_topic[topic.topic_id] = features
             observations.append(
                 {
@@ -375,6 +630,7 @@ class DiscoveryEngine:
         )
         by_id = {topic.topic_id: topic for topic in surveyed}
 
+        selection_capacity = len(surveyed)
         selections, mode, skipped_reason, fetched = self._select(
             platform=platform,
             plugin=plugin,
@@ -382,7 +638,7 @@ class DiscoveryEngine:
             near_dated=near_dated,
             features_by_topic=features_by_topic,
             budget=budget,
-            maximum_topics=maximum_topics,
+            selection_capacity=selection_capacity,
             now_ms=now_ms,
         )
         strategy_name = self.strategy.name if mode == "agent" else f"{self.strategy.name}:{mode}"
@@ -394,7 +650,7 @@ class DiscoveryEngine:
             topic = by_id.get(str(item.get("topic_id", "")))
             if topic is None or topic in chosen:
                 continue
-            self.memory.record_discovery_selection(
+            selection_id = self.memory.record_discovery_selection(
                 platform=platform,
                 strategy=strategy_name,
                 market_topic_id=topic.topic_id,
@@ -403,8 +659,9 @@ class DiscoveryEngine:
                 priors=[str(name) for name in item.get("priors", [])][:4],
                 features=features_by_topic.get(topic.topic_id, {}),
             )
+            self._selection_ids[(platform, str(topic.topic_id))] = selection_id
             chosen.append(topic)
-            if len(chosen) >= maximum_topics:
+            if len(chosen) >= selection_capacity:
                 break
         if not chosen:
             # The model is asked for this and was handing it back all along; dropping it turned a
@@ -427,6 +684,36 @@ class DiscoveryEngine:
         )
         return tuple(chosen)
 
+    def selection_id(self, platform: str, topic_id: str) -> int | None:
+        return self._selection_ids.get((platform, str(topic_id)))
+
+    def _adaptive_screening_threshold(self) -> float:
+        """Calibrate coarse screening from safety-sample false negatives.
+
+        The prior starts at 0.90. Candidates that screening wanted to defer/reject but the
+        quality guard retained form an observable audit sample: if those later prove useful the
+        threshold rises, while repeated harmless exclusions let it fall gradually. The evaluator
+        never gets a lower threshold than 0.80.
+        """
+
+        false_negatives = 3.0
+        observations = 6.0
+        for row in self.memory.reviewed_selection_outcomes():
+            features = row.get("features") or {}
+            typed = features.get("typed_evaluation") if isinstance(features, dict) else None
+            if not isinstance(typed, dict) or typed.get("action") not in {"DEFER", "REJECT"}:
+                continue
+            confidence = typed.get("confidence")
+            if confidence is None or float(confidence) < MIN_SCREENING_CONFIDENCE:
+                continue
+            observations += 1.0
+            false_negatives += float(bool((row.get("outcome") or {}).get("useful")))
+        posterior_false_negative_rate = false_negatives / observations
+        return round(
+            max(MIN_SCREENING_CONFIDENCE, min(0.99, 0.80 + 0.20 * posterior_false_negative_rate)),
+            4,
+        )
+
     def _select(
         self,
         *,
@@ -436,7 +723,7 @@ class DiscoveryEngine:
         near_dated: set[str],
         features_by_topic: dict[str, dict[str, Any]],
         budget: DiscoveryBudget,
-        maximum_topics: int,
+        selection_capacity: int,
         now_ms: int,
     ) -> tuple[list[dict[str, Any]], str, str, dict[str, Topic]]:
         payload = compose_discovery_payload(
@@ -457,6 +744,65 @@ class DiscoveryEngine:
             research=self.research_contributions,
         )
         horizon_days = int(getattr(self.strategy, "horizon_days", 0) or 0)
+        excluded_topics: list[tuple[Topic, Any]] = []
+        eligible_pool: list[Topic] = []
+        for topic in pool:
+            assessment = self._evaluator_assessments.get(topic.topic_id)
+            if (
+                assessment is not None
+                and not self._evaluator_candidate_errors
+                and assessment.action in {"DEFER", "REJECT"}
+                and is_high_confidence(assessment.confidence, self._screening_threshold)
+            ):
+                excluded_topics.append((topic, assessment))
+            else:
+                eligible_pool.append(topic)
+        minimum_frontier = max(1, math.ceil(math.sqrt(len(pool))))
+        restore_count = min(
+            len(excluded_topics), max(0, minimum_frontier - len(eligible_pool))
+        )
+        restored_ids = {
+            topic.topic_id
+            for topic, _assessment in sorted(
+                excluded_topics,
+                key=lambda item: (
+                    float(item[1].confidence or 0.0),
+                    -float(item[1].quality),
+                ),
+            )[:restore_count]
+        }
+        eligible_pool.extend(
+            topic for topic, _assessment in excluded_topics if topic.topic_id in restored_ids
+        )
+        order = {topic.topic_id: index for index, topic in enumerate(pool)}
+        eligible_pool.sort(key=lambda topic: order[topic.topic_id])
+        excluded = [
+            {
+                "topic_id": topic.topic_id,
+                "action": assessment.action,
+                "confidence": assessment.confidence,
+                "quality": assessment.quality,
+                "provider": assessment.provider,
+            }
+            for topic, assessment in excluded_topics
+            if topic.topic_id not in restored_ids
+        ]
+        pool = eligible_pool
+        selection_capacity = len(pool)
+        filter_summary = {
+            "excluded_count": len(excluded),
+            "retained_count": len(pool),
+            "restored_for_quality_audit_count": len(restored_ids),
+            "confidence_threshold": self._screening_threshold,
+            "minimum_threshold": MIN_SCREENING_CONFIDENCE,
+            "evaluator_errors": dict(self._evaluator_candidate_errors),
+            "policy": "coarse token-saving filter only; adaptive safety sample cannot be filtered",
+        }
+        filter_audit = {
+            **filter_summary,
+            "excluded": excluded,
+            "restored_for_quality_audit": sorted(restored_ids),
+        }
         # Everything surveyed, described with what a listing already tells you and nothing that
         # costs a read: the round decides which of these are worth reading, in what order, and how
         # many. `suggested_rank` is where the framework would start, offered as an opinion - what
@@ -486,9 +832,13 @@ class DiscoveryEngine:
         request = {
             "platform": platform,
             "platform_capabilities": plugin.capabilities.to_dict(),
-            "maximum_selections": maximum_topics,
+            "available_selection_count": selection_capacity,
             "discovery_strategy": prompt_json_payload(payload),
             "candidates": candidates,
+            "scan_audit": list(self._scan_audit),
+            # Only the compact summary reaches the model; excluded candidate details stay in the
+            # ledger, otherwise the audit data would erase the token saving from coarse screening.
+            "typed_frontier_filter": filter_summary,
             # Preferences, not gates. The operator's are about how the money is made, and the
             # round may go outside them when it can say what makes that worth doing.
             "operator_preferences": {
@@ -500,6 +850,18 @@ class DiscoveryEngine:
             # Conditions the operator attached to their money. A slot spent on something they ruled
             # out is a slot spent against them, so the round that picks the slates sees them too.
             **({"operator_instructions": instructions} if instructions.get("count") else {}),
+        }
+        request["history_handoff"] = {
+            "storage": "shared SQLite history exposed to the active CLI",
+            "previous_round": self.memory.latest_decision_reference(
+                platform=platform,
+                market_topic_id="",
+                token_id="",
+            ),
+            "instruction": (
+                "This is a new discovery round. The previous round is only a retrieval pointer, "
+                "not a conclusion to copy. Query any additional history with the CLI's own tools."
+            ),
         }
         # Every call to a model leaves a row, this one included. It used to leave none: a discovery
         # round that failed, or that judged nothing worth a slot, produced no ledger entry at all,
@@ -514,9 +876,17 @@ class DiscoveryEngine:
             strategy_sha256=self.strategy.sha256,
             # What the round was working from. What it went on to read about these is merged in
             # when the round ends, so the record shows the same picture the round had.
-            context={"stage": "discovery", "candidates": candidates,
-                     "maximum_selections": maximum_topics,
-                     "preferred_window_days": horizon_days},
+            context={
+                "stage": "discovery",
+                "candidates": candidates,
+                "available_selection_count": selection_capacity,
+                "preferred_window_days": horizon_days,
+                "scan_audit": list(self._scan_audit),
+                "typed_frontier_filter": filter_audit,
+                # Share the same object so begin_decision's exact current_round_id also reaches
+                # the first CLI input without the framework reading or summarising old records.
+                "history_handoff": request["history_handoff"],
+            },
         )
         try:
             result = self.provider.run(
@@ -560,7 +930,7 @@ class DiscoveryEngine:
                         "reason": f"prescore order; discovery agent unavailable: {error}"[:400],
                         "priors": [],
                     }
-                    for topic in pool[:maximum_topics]
+                    for topic in pool
                 ],
                 "mechanical",
                 "",
@@ -615,25 +985,60 @@ class DiscoveryEngine:
 
     def measurements(self) -> dict[str, Any]:
         """Per-bucket outcome rates measured from this runtime's own completed decisions."""
-        rows = self.memory.reviewed_selection_outcomes()
+        rows = [
+            row for row in self.memory.reviewed_selection_outcomes()
+            if "decisions" not in row["outcome"] or int(row["outcome"].get("decisions", 0)) > 0
+        ]
         if not rows:
-            return {"samples": 0, "baseline_useful_rate": 0.0, "buckets": {}}
+            return {"samples": 0, "baseline_effective_activity_rate": 0.0,
+                    "per_platform": {}, "buckets": {}}
         useful_total = sum(1 for row in rows if row["outcome"].get("useful"))
         baseline = useful_total / len(rows)
+        per_platform: dict[str, dict[str, float]] = {}
         buckets: dict[str, dict[str, float]] = {}
         for row in rows:
+            platform = row["platform"]
+            platform_entry = per_platform.setdefault(
+                platform, {"evaluated": 0, "effective_activity": 0, "resolved": 0, "net_pnl": 0.0}
+            )
+            platform_entry["evaluated"] += 1
+            platform_entry["effective_activity"] += int(bool(row["outcome"].get("useful")))
+            if row["outcome"].get("net_pnl_known"):
+                platform_entry["resolved"] += 1
+                platform_entry["net_pnl"] += float(row["outcome"].get("realized_pnl", 0.0))
             for bucket in row["features"].get("buckets", ()):
-                entry = buckets.setdefault(str(bucket), {"selections": 0, "useful": 0})
+                entry = buckets.setdefault(
+                    str(bucket), {"selections": 0, "useful": 0, "resolved": 0, "net_pnl": 0.0}
+                )
                 entry["selections"] += 1
                 if row["outcome"].get("useful"):
                     entry["useful"] += 1
+                if row["outcome"].get("net_pnl_known"):
+                    entry["resolved"] += 1
+                    entry["net_pnl"] += float(row["outcome"].get("realized_pnl", 0.0))
         return {
             "samples": len(rows),
+            "baseline_effective_activity_rate": round(baseline, 4),
             "baseline_useful_rate": round(baseline, 4),
+            "per_platform": {
+                name: {
+                    **entry,
+                    "effective_activity_rate": round(entry["effective_activity"] / entry["evaluated"], 4),
+                    "net_profit_per_evaluated_selection": round(entry["net_pnl"] / entry["evaluated"], 6),
+                    "net_profit_per_resolved_selection": (
+                        round(entry["net_pnl"] / entry["resolved"], 6) if entry["resolved"] else None
+                    ),
+                }
+                for name, entry in per_platform.items()
+            },
             "buckets": {
                 name: {
                     "selections": int(entry["selections"]),
+                    "effective_activity_rate": round(entry["useful"] / entry["selections"], 4),
                     "useful_rate": round(entry["useful"] / entry["selections"], 4),
+                    "resolved": int(entry["resolved"]),
+                    "net_pnl": round(entry["net_pnl"], 6),
+                    "net_profit_per_selection": round(entry["net_pnl"] / entry["selections"], 6),
                 }
                 for name, entry in sorted(buckets.items())
                 if entry["selections"] > 0
@@ -654,9 +1059,12 @@ class DiscoveryEngine:
                 platform=item["platform"],
                 market_topic_id=item["market_topic_id"],
                 since_ms=item["selected_at"],
-                until_ms=item["selected_at"] + REVIEW_SETTLE_MS,
+                until_ms=now,
+                selection_id=item["id"],
             )
-            self.memory.mark_selection_reviewed(item["id"], outcome)
+            self.memory.mark_selection_reviewed(
+                item["id"], outcome, final=bool(outcome.get("outcome_complete"))
+            )
         rows = self.memory.reviewed_selection_outcomes()
         if not rows:
             return {"reviewed": len(pending), "priors": 0, "lessons": 0, "retired": 0}
@@ -672,29 +1080,62 @@ class DiscoveryEngine:
 
     def _reweight_priors(self, rows: list[dict[str, Any]], baseline: float) -> int:
         """Measure each prior by what happened to the selections that cited it."""
-        tally: dict[str, dict[str, int]] = {}
+        known_pnl = [
+            abs(float(row["outcome"].get("realized_pnl", 0.0)))
+            for row in rows if row["outcome"].get("net_pnl_known")
+        ]
+        pnl_scale = max(1e-9, sorted(known_pnl)[len(known_pnl) // 2]) if known_pnl else 1.0
+        row_values: list[float] = []
         for row in rows:
+            if "decisions" in row["outcome"] and int(row["outcome"].get("decisions", 0)) <= 0:
+                continue
+            activity = 1.0 if row["outcome"].get("useful") else 0.0
+            value = activity
+            if row["outcome"].get("net_pnl_known"):
+                value = 0.5 * activity + 0.5 * (
+                    0.5 + 0.5 * math.tanh(
+                        float(row["outcome"].get("realized_pnl", 0.0)) / pnl_scale
+                    )
+                )
+            row_values.append(value)
+        dual_baseline = sum(row_values) / len(row_values) if row_values else baseline
+        tally: dict[str, dict[str, float]] = {}
+        for row in rows:
+            if "decisions" in row["outcome"] and int(row["outcome"].get("decisions", 0)) <= 0:
+                continue
+            activity = 1.0 if row["outcome"].get("useful") else 0.0
+            value = activity
+            if row["outcome"].get("net_pnl_known"):
+                pnl = float(row["outcome"].get("realized_pnl", 0.0))
+                profit_score = 0.5 + 0.5 * math.tanh(pnl / pnl_scale)
+                value = 0.5 * activity + 0.5 * profit_score
             for prior_id in row.get("priors", ()):
-                entry = tally.setdefault(str(prior_id), {"selections": 0, "useful": 0})
+                entry = tally.setdefault(str(prior_id), {"selections": 0.0, "value": 0.0,
+                                                         "useful": 0.0, "net_pnl": 0.0})
                 entry["selections"] += 1
+                entry["value"] += value
                 if row["outcome"].get("useful"):
                     entry["useful"] += 1
+                if row["outcome"].get("net_pnl_known"):
+                    entry["net_pnl"] += float(row["outcome"].get("realized_pnl", 0.0))
         seeds = getattr(self.strategy, "seed_priors", None)
         texts = {prior.prior_id: prior.text for prior in (seeds() if callable(seeds) else ())}
         written = 0
         for prior_id, entry in tally.items():
-            rate = entry["useful"] / entry["selections"]
-            weight = shrunk_weight(rate, baseline, entry["selections"])
+            rate = entry["value"] / entry["selections"]
+            weight = shrunk_weight(rate, dual_baseline, int(entry["selections"]))
             self.memory.save_discovery_prior(
                 strategy=DISCOVERY_EVOLUTION_KEY,
                 prior_id=prior_id,
                 text=texts.get(prior_id, ""),
                 weight=weight,
-                sample_size=entry["selections"],
+                sample_size=int(entry["selections"]),
                 support={
-                    "useful_rate": round(rate, 4),
-                    "baseline_useful_rate": round(baseline, 4),
-                    "useful": entry["useful"],
+                    "dual_objective_value": round(rate, 4),
+                    "effective_activity_rate": round(entry["useful"] / entry["selections"], 4),
+                    "net_pnl": round(entry["net_pnl"], 6),
+                    "baseline_dual_objective_value": round(dual_baseline, 4),
+                    "useful": int(entry["useful"]),
                 },
             )
             written += 1
@@ -775,8 +1216,15 @@ class _DiscoveryToolbox:
         self.verified: dict[str, dict[str, Any]] = {}
         self.descriptions: dict[str, Any] = {
             "TOPIC_DETAIL": {
-                "purpose": "Read one topic's markets, outcomes, resolution data and end time.",
-                "arguments": {"topic_id": "required string from the candidate list"},
+                "purpose": (
+                    "Read one page of a topic's markets, outcomes, resolution data and end time. "
+                    "Use next_offset until has_more is false when later submarkets matter."
+                ),
+                "arguments": {
+                    "topic_id": "required string from the candidate list",
+                    "offset": "optional non-negative market offset",
+                    "limit": "optional page size from 1 to 50",
+                },
             },
             "OUTCOME_BOOK": {
                 "purpose": "Read the order book for one outcome to check the real spread.",
@@ -894,7 +1342,7 @@ class _DiscoveryToolbox:
         query = str(arguments.get("query", "")).strip()
         if not query:
             raise ValueError("FIND_TOPICS needs a query")
-        limit = max(1, min(int(arguments.get("limit", 10) or 10), self.budget.shortlist_topics))
+        limit = max(1, min(int(arguments.get("limit", 10) or 10), self.budget.search_result_limit))
         try:
             candidates = self.plugin.search_market_candidates(query, limit)
         except Exception as error:
@@ -910,7 +1358,7 @@ class _DiscoveryToolbox:
         hours = float(arguments.get("within_hours", 0) or 0)
         if hours <= 0:
             raise ValueError("TOPICS_BY_DEADLINE needs within_hours above zero")
-        limit = max(1, min(int(arguments.get("limit", 20) or 20), self.budget.shortlist_topics))
+        limit = max(1, min(int(arguments.get("limit", 20) or 20), self.budget.search_result_limit))
         now_ms = int(time.time() * 1000)
         try:
             page = listing(offset=0, limit=limit, after_ms=now_ms,
@@ -929,7 +1377,7 @@ class _DiscoveryToolbox:
         many, is the round's own call - this only does as it is told, within the read allowance.
         """
         verified: dict[str, dict[str, Any]] = {}
-        topic_ids = [str(item) for item in topic_ids][: self.budget.detail_lookups]
+        topic_ids = [str(item) for item in topic_ids][: self.budget.detail_read_safety_limit]
         now_ms = int(time.time() * 1000)
         for topic_id in topic_ids:
             # A candidate the venue will not describe is one candidate the agent has to judge
@@ -1003,7 +1451,7 @@ class _DiscoveryToolbox:
         return verified
 
     def _topic_detail(self, arguments: dict[str, Any]) -> dict[str, Any]:
-        if self._detail_calls >= self.budget.detail_lookups:
+        if self._detail_calls >= self.budget.detail_read_safety_limit:
             return {"ok": False, "error": "detail lookup budget exhausted for this cycle"}
         self._detail_calls += 1
         detail = self.plugin.get_topic(str(arguments["topic_id"]))
@@ -1018,6 +1466,9 @@ class _DiscoveryToolbox:
                 -float(market.liquidity_usdt or 0.0),
             ),
         )
+        offset = max(0, int(arguments.get("offset", 0) or 0))
+        limit = max(1, min(50, int(arguments.get("limit", 8) or 8)))
+        market_page = markets[offset:offset + limit]
         return {
             "ok": True,
             "end_time_ms": detail.end_time_ms,
@@ -1026,6 +1477,9 @@ class _DiscoveryToolbox:
             "reference_symbol": detail.reference_symbol,
             "markets_total": len(detail.markets),
             "markets_open": sum(1 for market in detail.markets if str(market.status).upper() == "OPEN"),
+            "market_offset": offset,
+            "has_more": offset + len(market_page) < len(markets),
+            "next_offset": offset + len(market_page),
             "markets": [
                 {
                     "market_id": market.market_id,
@@ -1041,12 +1495,12 @@ class _DiscoveryToolbox:
                         for outcome in market.outcomes
                     ],
                 }
-                for market in markets[:8]
+                for market in market_page
             ],
         }
 
     def _outcome_book(self, arguments: dict[str, Any]) -> dict[str, Any]:
-        if self._book_calls >= self.budget.book_lookups:
+        if self._book_calls >= self.budget.book_read_safety_limit:
             return {"ok": False, "error": "order book budget exhausted for this cycle"}
         self._book_calls += 1
         book = self.plugin.get_order_book(

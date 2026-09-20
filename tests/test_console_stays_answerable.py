@@ -57,7 +57,6 @@ class StoppingDoesNotWaitOutAModelCallTests(unittest.TestCase):
     def _loop(self) -> PolymarketEventLoop:
         return PolymarketEventLoop(lambda: SimpleNamespace(
             scan_interval_seconds=60, error_backoff_seconds=30, error_backoff_max_seconds=900,
-            max_topics_per_cycle=10, max_decisions_per_cycle=6,
         ))
 
     def test_stop_returns_while_the_worker_is_still_finishing(self) -> None:

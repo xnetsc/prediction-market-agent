@@ -100,6 +100,43 @@ class MarketEvaluationMixin:
                     runtime, topic, detail, market, outcome, seconds_remaining
                 )
 
+    def _plan_outcomes(
+        self, runtime: PlatformRuntime, topics: list[Topic]
+    ) -> list[tuple[Topic, TopicDetail, Market, Outcome, float]]:
+        """Build a cross-topic queue so one event cannot consume the whole cycle by position."""
+        by_topic: list[list[tuple[Topic, TopicDetail, Market, Outcome, float]]] = []
+        for topic in topics:
+            try:
+                detail = runtime.plugin.get_topic(topic.topic_id)
+            except Exception as error:
+                LOGGER.warning("could not expand topic %s: %s", topic.topic_id, error)
+                continue
+            if detail.end_time_ms is None:
+                continue
+            seconds_remaining = max(
+                (detail.end_time_ms - int(time.time() * 1000)) / 1000.0, 0.0
+            )
+            if seconds_remaining <= 0:
+                self._settle_if_possible(runtime, detail)
+                continue
+            entries = [
+                (topic, detail, market, outcome, seconds_remaining)
+                for market in self.decision_strategy.select_markets(detail.markets)
+                for outcome in self.decision_strategy.select_outcomes(market.outcomes)
+            ]
+            if entries:
+                by_topic.append(entries)
+        queue: list[tuple[Topic, TopicDetail, Market, Outcome, float]] = []
+        # Round-robin is the neutral core schedule. A strategy may order topics, markets and
+        # outcomes, while the core prevents one large topic winning merely by being first.
+        index = 0
+        while any(index < len(entries) for entries in by_topic):
+            for entries in by_topic:
+                if index < len(entries):
+                    queue.append(entries[index])
+            index += 1
+        return queue
+
     def _evaluate_outcome(
         self,
         runtime: PlatformRuntime,
@@ -112,12 +149,13 @@ class MarketEvaluationMixin:
     ) -> None:
         if self._decisions_this_cycle >= self._max_decisions_this_cycle:
             return
-        self._decisions_this_cycle += 1
         platform = runtime.plugin.name
         market_topic_id = detail.topic.topic_id
         market_id = market.market_id
         token_id = outcome.outcome_id
         book = runtime.plugin.get_order_book(market_id, token_id)
+        # An order-book failure is a platform read failure, not a completed decision attempt.
+        self._decisions_this_cycle += 1
         bid, ask = best_prices(book)
         runtime.gateway.mark(token_id, (bid + ask) / 2.0)
         position = runtime.state.positions.get(token_id)
@@ -164,14 +202,26 @@ class MarketEvaluationMixin:
             "decision_strategy_plugin": prompt_json_payload(strategy_payload),
             "risk_rule_engines": self.risk.manifests(),
         }
-        current_chars = len(json.dumps(current, ensure_ascii=False))
-        current["recalled_history"] = self.memory.recalled_context(
+        previous_round = self.memory.latest_decision_reference(
             market_topic_id=market_topic_id,
             token_id=token_id,
-            history_limit=self.config.history_per_market,
-            char_budget=max(1000, self.config.context_window_chars - current_chars),
             platform=platform,
         )
+        continuation_id = (
+            funding_followup.get("continuation_of_decision_id")
+            if isinstance(funding_followup, dict)
+            else None
+        )
+        current["history_handoff"] = {
+            "storage": "shared SQLite history exposed to the active CLI",
+            "previous_round": previous_round,
+            "continue_round_id": continuation_id,
+            "instruction": (
+                "Use the exact continue_round_id when present; otherwise previous_round is only "
+                "the most relevant prior round, not a conclusion to copy. Query any additional "
+                "history with the CLI's own tools."
+            ),
+        }
         decision_id = self.memory.begin_decision(
             platform=platform,
             market_topic_id=market_topic_id,
@@ -185,6 +235,10 @@ class MarketEvaluationMixin:
             ),
             strategy_sha256=self.decision_strategy.sha256,
             context=current,
+            discovery_selection_id=(
+                self.discovery.selection_id(platform, str(market_topic_id))
+                if hasattr(self, "discovery") else None
+            ),
         )
 
         # One handle for this round, given to the tools now and bound to a backend by the provider
