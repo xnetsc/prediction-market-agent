@@ -219,11 +219,11 @@ function renderDiscoveryActivity(data){
     const blocks=[];
     if(data.legacy_deletion_detected)blocks.push('<div class="info-banner danger"><strong>检测到旧版删除留下的证据缺口</strong><p>有 '+data.orphaned_action_decisions+' 个执行动作仍引用已经不存在的决策记录。旧版没有记录删除操作，因此无法从现有数据确认删除时间或操作者；市场采集与候选记录仍在。</p></div>');
     if((data.decision_deletions||[]).length)blocks.push('<details class="diagnostic-detail"><summary>决策记录删除审计 · '+data.decision_deletions.length+' 条</summary>'+(data.decision_deletions||[]).map(row=>'<p><strong>'+esc(new Date(row.deleted_at).toLocaleString())+'</strong> · '+esc(row.source)+'<br><span class="muted">范围 '+esc(JSON.stringify(row.scope))+'；结果 '+esc(JSON.stringify(row.result))+'</span></p>').join('')+'</details>');
-    if((data.incidents||[]).length)blocks.push('<div class="discovery-incidents"><h4>采集与分析异常</h4>'+(data.incidents||[]).map(row=>'<details class="runtime-incident '+(row.severity==='error'?'danger':'pending')+'"><summary><span><strong>'+esc(DISCOVERY_STAGE_LABELS[row.stage]||row.stage)+'</strong> · '+esc(row.platform)+'</span><span>'+esc(new Date(row.created_at).toLocaleString())+'</span></summary><p>'+esc(row.message)+'</p><p><strong>降级处理：</strong>'+esc(row.fallback||'未执行降级')+'</p>'+(row.details?.raw_output?'<details class="diagnostic-detail"><summary>模型 / CLI 原始诊断</summary><pre>'+esc(row.details.raw_output)+'</pre></details>':'')+'</details>').join('')+'</div>');
+    if((data.incidents||[]).length)blocks.push('<details class="discovery-incidents"><summary>采集与分析异常 '+data.incidents.length+' 条 <button class="danger" onclick="forgetIncidents(event,'+data.incidents[0].id+')">清除已读</button></summary>'+(data.incidents||[]).map(row=>'<details class="runtime-incident '+(row.severity==='error'?'danger':'pending')+'"><summary><span><strong>'+esc(DISCOVERY_STAGE_LABELS[row.stage]||row.stage)+'</strong> · '+esc(row.platform)+'</span><span>'+esc(new Date(row.created_at).toLocaleString())+'</span></summary><p>'+esc(row.message)+'</p><p><strong>降级处理：</strong>'+esc(row.fallback||'未执行降级')+'</p>'+(row.details?.raw_output?'<details class="diagnostic-detail"><summary>模型 / CLI 原始诊断</summary><pre>'+esc(row.details.raw_output)+'</pre></details>':'')+'</details>').join('')+'</details>');
     for(const platform of data.platforms||[]){
         const evaluator=Object.entries(platform.evaluator_counts||{}).map(([name,count])=>esc(DISCOVERY_ACTION_LABELS[name]||name)+' '+count).join(' · ')||'本批没有评估器结果';
         const plan=platform.plan||{};
-        blocks.push('<article class="discovery-platform"><div class="section-heading"><div><h4>'+esc(platform.platform)+'</h4><p class="muted">最近采集 '+esc(new Date(platform.latest_observed_at).toLocaleString())+' · 本批 '+platform.latest_batch_count+' 个 · 累计 '+platform.batches+' 批 / '+platform.observations+' 条观察</p></div><span class="badge ready">已采集</span></div><div class="summary-line"><strong>粗筛：</strong>'+evaluator+(platform.evaluator_providers?.length?' · 服务 '+esc(platform.evaluator_providers.join(', ')):'')+'</div>'+(plan.reason?'<p><strong>续扫计划：</strong>'+esc(plan.reason)+'；'+(plan.next_scan_seconds?'约 '+plan.next_scan_seconds+' 秒后':'按平台最短间隔')+'</p>':'')+(plan.queries?.length?'<p class="muted">下轮检索：'+esc(plan.queries.join('；'))+'</p>':'')+table(platform.top_candidates||[],[['最近候选',row=>'<strong>'+esc(row.title)+'</strong><br><span class="muted">'+esc(row.market_topic_id)+'</span>'],['流动性 / 成交量',row=>pnlNumber(row.liquidity_usdt)+' / '+pnlNumber(row.volume_usdt)],['评估器',row=>row.typed_evaluation?esc(DISCOVERY_ACTION_LABELS[row.typed_evaluation.action]||row.typed_evaluation.action)+' · 置信度 '+esc(row.typed_evaluation.confidence??'未知'):'未粗筛']])+'</article>');
+        blocks.push('<article class="discovery-platform"><div class="section-heading"><div><h4>'+esc(platform.platform)+'</h4><p class="muted">最近采集 '+esc(new Date(platform.latest_observed_at).toLocaleString())+' · 本批 '+platform.latest_batch_count+' 个 · 累计 '+platform.batches+' 批 / '+platform.observations+' 条观察</p></div><span class="badge ready">已采集</span></div><div class="summary-line"><strong>粗筛：</strong>'+evaluator+(platform.evaluator_providers?.length?' · 服务 '+esc(platform.evaluator_providers.join(', ')):'')+'</div>'+((plan.reason||plan.queries?.length)?'<details class="discovery-detail"><summary>续扫计划与下轮检索</summary>'+(plan.reason?'<p><strong>续扫计划：</strong>'+esc(plan.reason)+'；'+(plan.next_scan_seconds?'约 '+plan.next_scan_seconds+' 秒后':'按平台最短间隔')+'</p>':'')+(plan.queries?.length?'<p class="muted">下轮检索：'+esc(plan.queries.join('；'))+'</p>':'')+'</details>':'')+(platform.top_candidates?.length?'<details class="discovery-detail"><summary>最近候选 '+platform.top_candidates.length+' 个</summary>'+table(platform.top_candidates,[['最近候选',row=>'<strong>'+esc(row.title)+'</strong><br><span class="muted">'+esc(row.market_topic_id)+'</span>'],['流动性 / 成交量',row=>pnlNumber(row.liquidity_usdt)+' / '+pnlNumber(row.volume_usdt)],['评估器',row=>row.typed_evaluation?esc(DISCOVERY_ACTION_LABELS[row.typed_evaluation.action]||row.typed_evaluation.action)+' · 置信度 '+esc(row.typed_evaluation.confidence??'未知'):'未粗筛']])+'</details>':'')+'</article>');
     }
     if((data.recent_selections||[]).length)blocks.push('<details class="diagnostic-detail" open><summary>最近进入深度决策的候选 · '+data.recent_selections.length+' 条</summary>'+table(data.recent_selections,[['时间 / 平台',row=>esc(new Date(row.selected_at).toLocaleString())+'<br>'+esc(row.platform)],['候选',row=>'<strong>'+esc(row.title)+'</strong><br><span class="muted">'+esc(row.market_topic_id)+'</span>'],['入选原因',row=>esc(row.reason)],['策略 / 顺位',row=>esc(row.strategy)+' / '+row.position]])+'</details>');
     host.innerHTML=blocks.length?blocks.join(''):'<div class="empty-state"><strong>还没有市场采集记录</strong><p>平台完成第一次扫描后，这里会显示采集批次、评估器粗筛和候选选择；这不等同于交易决策。</p></div>';
@@ -1898,5 +1898,19 @@ async function forgetInstruction(id){
         await post('/api/instructions/forget',{id:id});
         showOperationFeedback('已删除，后续决策不再受它影响');
         await refreshInstructions();
+    }catch(e){showOperationFeedback(e.message,'danger')}
+}
+
+
+// 异常是证据，不是待办：它们只会累积，读完就该能收起来、也能清掉。清除以屏幕上最新一条的 id 为界，
+// 这样读的时候新记下的一条不会被这次点击一并抹掉。
+async function forgetIncidents(event,untilId){
+    event.preventDefault();
+    event.stopPropagation();
+    if(!confirm('清除这些已经读过的采集与分析异常？之后新发生的仍会出现。'))return;
+    try{
+        const result=await post('/api/incidents/forget',{until_id:untilId});
+        showOperationFeedback('已清除 '+(result.deleted||0)+' 条异常记录');
+        await refreshAudit();
     }catch(e){showOperationFeedback(e.message,'danger')}
 }

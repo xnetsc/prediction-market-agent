@@ -678,3 +678,89 @@ class DeletingManyAtOnceTests(unittest.TestCase):
             self.assertIn(fragment, shell)
         self.assertIn("{match,dry_run:true}", views)
         self.assertIn("{match,until_id:preview.until_id}", views)
+
+
+class TheLedgerStaysReadableTests(unittest.TestCase):
+    """Evidence that only ever grows, shown open, is evidence nobody can read past.
+
+    The survey plan, the candidate table and the incident stream all belong in the ledger and none
+    of them belong in front of the decisions: one round's候选 fills a screen, and incidents
+    accumulate for as long as the robot has ever run. They are collapsed, and the incidents can be
+    cleared up to what was on screen.
+    """
+
+    def _views(self) -> str:
+        return Path("src/prediction_market_agent/runtime/static/dashboard-views.js").read_text()
+
+    def test_the_survey_plan_and_the_candidate_table_start_collapsed(self) -> None:
+        views = self._views()
+        self.assertIn('<details class="discovery-detail"><summary>续扫计划与下轮检索', views)
+        self.assertIn('<details class="discovery-detail"><summary>最近候选', views)
+        for marker in ('<details class="discovery-detail"',):
+            self.assertNotIn(marker + " open", views, "collapsed means collapsed by default")
+
+    def test_the_incident_stream_is_collapsed_and_can_be_cleared(self) -> None:
+        views = self._views()
+        self.assertIn('<details class="discovery-incidents"><summary>采集与分析异常', views)
+        self.assertIn("forgetIncidents(event,", views)
+        self.assertIn("'/api/incidents/forget'", views)
+
+    def test_clearing_is_bounded_by_what_was_on_screen(self) -> None:
+        """An incident recorded while the operator reads must survive their click."""
+        source = Path("src/prediction_market_agent/runtime/dashboard.py").read_text()
+        body = source[source.index("def forget_incidents("):source.index("def forget_instruction(")]
+        self.assertIn("WHERE id <= ?", body)
+        self.assertIn('"/api/incidents/forget"', source)
+
+    def test_clearing_removes_only_up_to_that_point(self) -> None:
+        from prediction_market_agent.runtime.dashboard import AuditData
+
+        root = Path(tempfile.mkdtemp())
+        config = Config(
+            working_directory=root, session_db=root / "s.sqlite3", auth_db=root / "a.sqlite3",
+            management_file=root / "m.json", plugin_directories_file=root / "d.json",
+            application_config_file=root / "app.json",
+        )
+        memory = SessionMemory(config.session_db)
+        ids = [
+            memory.record_runtime_incident(
+                platform="polymarket", stage="discovery_continuation", severity="warning",
+                message=f"第 {index} 条", fallback="继续",
+            )
+            for index in range(3)
+        ]
+        memory.connection.close()
+        data = AuditData(config)
+        self.addCleanup(data.management.shutdown)
+        self.assertEqual(data.forget_incidents(ids[1]), {"deleted": 2, "until_id": ids[1]})
+        remaining = SessionMemory(config.session_db)
+        self.addCleanup(remaining.connection.close)
+        left = remaining.connection.execute("SELECT id FROM runtime_incidents").fetchall()
+        self.assertEqual([row[0] for row in left], [ids[2]], "the newest one survived the click")
+
+
+class TheCoreComesFirstTests(unittest.TestCase):
+    """The page is for reading decisions; everything else on it is evidence about them.
+
+    The decisions used to be third, under a paragraph explaining how to read the page, a five-step
+    diagram, and a full survey-and-candidate section - so the thing the page exists for started
+    below the fold while the trivia had the whole screen.
+    """
+
+    def _shell(self) -> str:
+        return Path("src/prediction_market_agent/runtime/dashboard.py").read_text()
+
+    def test_the_decision_list_comes_before_the_survey_evidence(self) -> None:
+        shell = self._shell()
+        self.assertLess(
+            shell.index('<h3>决策记录</h3>'),
+            shell.index('<h3>市场采集与候选分析</h3>'),
+            "decisions first, evidence after",
+        )
+
+    def test_how_to_read_the_page_does_not_occupy_the_page(self) -> None:
+        shell = self._shell()
+        guide = shell[shell.index('<details class="page-guide">'):]
+        self.assertIn("这个页面怎么看", guide[:80])
+        self.assertIn("process-strip", guide[:900], "the five-step diagram is inside it")
+        self.assertNotIn('<details class="page-guide" open', shell)

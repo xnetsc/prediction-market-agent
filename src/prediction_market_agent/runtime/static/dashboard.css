@@ -165,3 +165,14 @@ dialog{background:var(--surface)!important;color:var(--ink)!important;border:1px
 .instruction-facts{display:grid;grid-template-columns:auto 1fr;gap:2px 10px;margin:8px 0 0;font-size:.9em;color:var(--muted)}
 .instruction-facts dt{font-weight:600}
 .instruction-facts dd{margin:0;word-break:break-all}
+
+/* 采集详情与异常默认收起：几十行候选和成百条异常把决策账本挤没了，展开是查看的动作，不是常态。 */
+.discovery-detail,.discovery-incidents{margin:8px 0;border:1px solid var(--line);border-radius:8px;padding:6px 10px}
+.discovery-detail>summary,.discovery-incidents>summary{cursor:pointer;font-weight:600;display:flex;align-items:center;gap:10px}
+.discovery-incidents>summary button{margin-left:auto}
+.discovery-detail[open]>summary,.discovery-incidents[open]>summary{margin-bottom:8px}
+
+/* 页面说明默认收起：读账本的人要先看到决策，而不是先读一遍怎么读。 */
+.page-guide{margin:6px 0 10px}
+.page-guide>summary{cursor:pointer;color:var(--muted)}
+.page-guide[open]>summary{margin-bottom:8px}
