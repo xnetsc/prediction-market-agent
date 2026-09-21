@@ -109,7 +109,7 @@ DASHBOARD_TEST_URL=http://127.0.0.1:18765 \
   DASHBOARD_SCREENSHOTS=runtime-data/ui-review node tests/dashboard_ui.cjs
 ```
 
-2026-09-20 三种宽度均通过，无 JavaScript 错误和整页横向溢出。目标必须是隔离的管理测试实例；这不替代
+2026-09-21 三种宽度均通过（决策记录置顶、采集与异常折叠、资金页并行读取后复跑），无 JavaScript 错误和整页横向溢出。目标必须是隔离的管理测试实例；这不替代
 iOS Safari、Android 真机、Windows 原生浏览器或真实账号授权验收。
 
 登录、回调和代理的非浏览器专项分别位于：
