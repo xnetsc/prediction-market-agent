@@ -217,19 +217,26 @@ class DiscoveryTests(unittest.TestCase):
         self.assertTrue(any("spread" in item for item in verified.values()),
                         "the cost gate is about the round trip, which this has to supply")
 
-    def test_missing_agent_degrades_to_prescore_and_is_recorded_as_such(self) -> None:
+    def test_a_round_that_cannot_ask_a_model_selects_nothing(self) -> None:
+        """No formula stands in for the judgement. It used to order the pool by prescore and trade
+        it, so rounds nobody reasoned about were recorded under a strategy that had not run - and
+        that happened exactly when something was already wrong with the models."""
         plugin = FakePlugin(20)
-        selected = self._engine(LegacyProvider()).discover(
-            platform="fake", plugin=plugin
-        )
+        selected = self._engine(LegacyProvider()).discover(platform="fake", plugin=plugin)
+        self.assertEqual(list(selected), [], "nothing is selected without a model choosing it")
         strategies = {
             row[0]
             for row in self.memory.connection.execute(
                 "SELECT DISTINCT strategy FROM discovery_selections"
             )
         }
-        self.assertEqual(len(selected), 20, "a failing Agent must not stop or silently truncate the platform")
-        self.assertEqual(strategies, {"built_in:mechanical"})
+        self.assertNotIn("built_in:mechanical", strategies)
+        incident = self.memory.connection.execute(
+            "SELECT stage, severity, fallback FROM runtime_incidents ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+        self.assertEqual(incident[0], "market_selection")
+        self.assertEqual(incident[1], "error")
+        self.assertIn("不按公式代替模型判断", incident[2])
 
     def test_budget_refuses_reads_beyond_the_configured_allowance(self) -> None:
         plugin = FakePlugin(30)

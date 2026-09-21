@@ -419,3 +419,59 @@ client.chmod(0o700)
         self.assertEqual([item["label"] for item in usage["windows"]],
                          ["5 小时窗口", "周额度"])
         self.assertNotIn("fixture-private-token", json.dumps(usage))
+
+
+class WhichLimitActuallyStopsWorkTests(unittest.TestCase):
+    """`is_active` says which window is being metered, not that the account has been cut off.
+
+    Claude's usage service marks the session window active the moment anything is spent in it, and
+    reading that as a block made the client unusable whenever it had been used at all: 90 per cent
+    of the five-hour window, ten per cent left, nothing locked, reported as "no usable quota" -
+    and rounds went elsewhere or nowhere while a working account sat idle.
+    """
+
+    LIVE = {
+        "five_hour": {"utilization": 90.0, "resets_at": "2099-09-21T18:40:00+00:00",
+                      "locked_reason": None},
+        "seven_day": {"utilization": 12.0, "resets_at": "2099-09-28T13:00:00+00:00",
+                      "locked_reason": None},
+        "limits": [
+            {"kind": "session", "group": "session", "percent": 90, "severity": "critical",
+             "resets_at": "2099-09-21T18:40:00+00:00", "is_active": True},
+            {"kind": "weekly_all", "group": "weekly", "percent": 12, "severity": "normal",
+             "resets_at": "2099-09-28T13:00:00+00:00", "is_active": False},
+        ],
+    }
+
+    def test_the_metered_window_being_active_is_not_an_exhausted_account(self):
+        reading = _claude_usage_reading(self.LIVE, source="fixture")
+        self.assertTrue(reading["available"], "ten per cent left is quota")
+        self.assertEqual(
+            [(item["label"], item["used_percent"]) for item in reading["windows"]],
+            [("5 小时窗口", 90.0), ("周额度", 12.0)],
+        )
+
+    def test_a_full_window_still_stops_it(self):
+        spent = {
+            **self.LIVE,
+            "five_hour": {"utilization": 100.0, "resets_at": "2099-09-21T18:40:00+00:00"},
+        }
+        self.assertFalse(_claude_usage_reading(spent, source="fixture")["available"])
+
+    def test_a_limit_the_service_reports_as_spent_stops_it(self):
+        spent = {
+            **self.LIVE,
+            "limits": [{"kind": "session", "percent": 100, "severity": "critical",
+                        "resets_at": "2099-09-21T18:40:00+00:00", "is_active": True}],
+        }
+        self.assertFalse(_claude_usage_reading(spent, source="fixture")["available"])
+
+    def test_a_locked_window_stops_it_and_says_why(self):
+        locked = {
+            **self.LIVE,
+            "five_hour": {"utilization": 40.0, "resets_at": "2099-09-21T18:40:00+00:00",
+                          "locked_reason": "payment_required"},
+        }
+        reading = _claude_usage_reading(locked, source="fixture")
+        self.assertFalse(reading["available"])
+        self.assertEqual(reading["locked_reason"], "payment_required")

@@ -961,23 +961,23 @@ class DiscoveryEngine:
             LOGGER.info("discovery round %s on %s was deleted; stopped", decision_id, platform)
             return [], "cancelled", "deleted while running", dict(toolbox.found)
         except (DecisionProviderError, AttributeError, TypeError) as error:
-            # Losing the Agent must not stop the platform from trading. Fall back to the
-            # deterministic prescore order and mark the cycle so the audit trail shows which
-            # selections were never actually reasoned about.
-            LOGGER.error(
-                "market discovery agent unavailable on %s; falling back to prescore order: %s",
-                platform,
-                error,
-            )
+            # Nothing is selected without a model having chosen it. Ordering the pool by a formula
+            # and trading it anyway produced rounds whose selections were never reasoned about,
+            # attributed to a strategy that had not run - and it did that precisely when something
+            # was already wrong. A round that cannot ask a model selects nothing and says why; the
+            # candidates keep, and the next round asks again.
+            LOGGER.error("market discovery agent unavailable on %s; selecting nothing: %s",
+                         platform, error)
             self.memory.record_runtime_incident(
                 platform=platform,
                 stage="market_selection",
                 severity="error",
                 message=str(error),
-                fallback="按 prescore 顺序机械选择候选",
+                fallback="本轮不选任何标的；不按公式代替模型判断",
                 details={
                     **_provider_incident_details(error),
                     "decision_id": decision_id,
+                    "candidates_held": len(pool),
                 },
             )
             self.memory.complete_decision(
@@ -987,19 +987,7 @@ class DiscoveryEngine:
                 status="PROVIDER_ERROR",
                 error=str(error),
             )
-            return (
-                [
-                    {
-                        "topic_id": topic.topic_id,
-                        "reason": f"prescore order; discovery agent unavailable: {error}"[:400],
-                        "priors": [],
-                    }
-                    for topic in pool
-                ],
-                "mechanical",
-                "",
-                dict(toolbox.found),
-            )
+            return [], "unavailable", str(error)[:400], dict(toolbox.found)
         if self.memory.is_cancelled(decision_id):
             LOGGER.info("discovery round %s on %s was deleted after answering", decision_id, platform)
             return [], "cancelled", "deleted while running", dict(toolbox.found)

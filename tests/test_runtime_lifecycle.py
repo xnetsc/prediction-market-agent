@@ -406,3 +406,41 @@ class RuntimeManagerTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ThePauseSwitchesAgreeTests(unittest.TestCase):
+    """The global switch and the per-platform ones describe different things, and must not fight.
+
+    "Pause everything" holds whatever the platforms say, including platforms added later, so while
+    it is on the per-platform boxes cannot mean anything - they are shown checked and locked. What
+    they must not do is lose the operator's own setting: turning the global switch on and off again
+    used to save every platform as paused, so the individual choices never came back.
+    """
+
+    def _views(self) -> str:
+        return Path("src/prediction_market_agent/runtime/static/dashboard-views.js").read_text()
+
+    def test_the_global_switch_locks_and_checks_the_platforms(self) -> None:
+        body = self._views()
+        block = body[body.index("function applyPauseAll()"):]
+        self.assertIn("box.checked=true", block[:900])
+        self.assertIn("box.disabled=true", block[:900])
+        self.assertIn("dataset.own", block[:900], "each platform's own setting is remembered")
+
+    def test_turning_it_off_restores_what_the_operator_had_set(self) -> None:
+        body = self._views()
+        block = body[body.index("function applyPauseAll()"):]
+        self.assertIn("box.checked=box.dataset.own==='1'", block[:1200])
+
+    def test_saving_writes_the_platforms_own_choices(self) -> None:
+        views = self._views()
+        shell = Path("src/prediction_market_agent/runtime/dashboard.py").read_text()
+        self.assertIn("paused_platforms:ownPausedPlatforms()", shell)
+        block = views[views.index("function ownPausedPlatforms()"):]
+        self.assertIn("box.dataset.own!==undefined?box.dataset.own==='1':box.checked", block[:600])
+
+    def test_checking_every_platform_does_not_flip_the_global_switch(self) -> None:
+        """Pausing the platforms that exist is not the same statement as pausing everything."""
+        views = self._views()
+        block = views[views.index("function applyPauseAll()"):]
+        self.assertNotIn("all.checked=true", block[:1200])

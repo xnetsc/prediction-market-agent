@@ -914,14 +914,24 @@ def _claude_usage_reading(
     if not windows:
         raise ValueError("Claude Code 没有返回 5 小时或周额度窗口")
     now = time.time()
-    active_limits = [item for item in payload.get("limits") or []
-                     if isinstance(item, dict) and item.get("is_active") is True
-                     and (_iso_timestamp(item.get("resets_at")) <= 0
-                          or _iso_timestamp(item.get("resets_at")) > now)]
+    # `is_active` marks which window is currently being metered, not that the account has been cut
+    # off - the service sets it on the session window the moment anything is spent in it. Reading it
+    # as a block made Claude unusable whenever it had been used at all: 90% of the five-hour window
+    # with 10% left and nothing locked was reported as "no usable quota", and the round went to
+    # another provider or to nothing. What actually blocks is a window that is full, or one the
+    # service has locked and said why.
+    locked = [window for window in payload.values()
+              if isinstance(window, dict) and str(window.get("locked_reason") or "").strip()]
+    spent = [item for item in payload.get("limits") or []
+             if isinstance(item, dict) and _percent(item.get("percent")) >= 100
+             and (_iso_timestamp(item.get("resets_at")) <= 0
+                  or _iso_timestamp(item.get("resets_at")) > now)]
     exhausted = [window for window in windows if _percent(window["used_percent"]) >= 100
                  and (not window["resets_at"] or window["resets_at"] > now)]
-    reading = {"available": not bool(active_limits or exhausted),
+    reading = {"available": not bool(locked or spent or exhausted),
                "windows": windows, "source": source}
+    if locked:
+        reading["locked_reason"] = str(locked[0].get("locked_reason"))
     if observed_at > 0:
         reading["observed_at"] = observed_at
     return reading

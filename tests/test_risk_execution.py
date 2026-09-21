@@ -229,6 +229,25 @@ class RiskAndExecutionTests(unittest.TestCase):
             available_names = ("buy-test",)
             unavailable = {}
 
+            def run(self, payload, **options):
+                # Discovery asks a model which candidates to take. Nothing stands in for that any
+                # more, so a fixture that wants a round to reach execution has to answer it.
+                from prediction_market_agent.agent.decision import AgentRunResult
+
+                del options
+                return AgentRunResult(
+                    value={
+                        "selections": [
+                            {"topic_id": item["topic_id"], "reason": "fixture", "priors": []}
+                            for item in (payload.get("candidates") or [])
+                        ],
+                        "skipped_reason": "",
+                    },
+                    raw_output="{}",
+                    provider=self.name,
+                    research_trace=[],
+                )
+
             def decide(self, context, *, tool_executor=None, step_recorder=None, tool_descriptions=None, instructions=None, consultation=None, should_stop=None):
                 del context, tool_executor, step_recorder, tool_descriptions, instructions, consultation, should_stop
                 from prediction_market_agent.agent.decision import ProviderResult

@@ -485,7 +485,12 @@ function renderRuntime(r){
     if(root.dataset.pending&&!r.settling&&!r.reconcile_pending)delete root.dataset.pending;
     if(!root.dataset.dirty&&!root.dataset.pending){
         root.innerHTML='<label class="pause-switch"><input id="pauseAll" type="checkbox" '+(r.robot_paused?'checked':'')+'> 暂停全部平台</label><div class="config-grid">'+Object.entries(r.platforms||{}).map(([name,p])=>'<article class="plugin"><div class="section-heading"><h4>'+esc(name)+'</h4><span class="badge '+(p.running?'ready':'')+'">'+(p.running?(p.runtime&&p.runtime.holding?'已暂停：AI 不可用':'运行中'):p.paused?'已暂停':p.ready?'可启动但未运行':'插件报告未就绪')+'</span></div><label><input class="pausePlatform" type="checkbox" value="'+esc(name)+'" '+(p.paused?'checked':'')+'> 暂停此平台</label>'+(!p.ready?'<p><a href="'+configLink('api',name)+'">打开平台插件 →</a></p>':'')+(p.startup_reasons?.length?'<details class="diagnostic-detail"><summary>查看插件报告</summary><p>'+esc(p.startup_reasons.join('；'))+'</p></details>':'')+'</article>').join('')+'</div><p class="status '+(r.global_ready?'good':'muted')+'">'+(r.global_ready?'AI 服务和至少一个平台已报告可启动；是否正常运行以平台的“运行中”为准。':'机器人主链尚未满足：需要至少一个可用 AI 服务和一个可启动平台。')+'</p>'+(!r.global_ready?'<details><summary>查看具体原因</summary><p>'+esc((r.global_reasons||[]).join('；'))+'</p></details>':'');
-        root.onchange=()=>{root.dataset.dirty='true';document.getElementById('runtimeStatus').textContent='暂停选项尚未保存'};
+        applyPauseAll();
+        root.onchange=event=>{
+            root.dataset.dirty='true';
+            if(event.target&&event.target.id==='pauseAll')applyPauseAll();
+            document.getElementById('runtimeStatus').textContent='暂停选项尚未保存';
+        };
     }
 }
 
@@ -1913,4 +1918,34 @@ async function forgetIncidents(event,untilId){
         showOperationFeedback('已清除 '+(result.deleted||0)+' 条异常记录');
         await refreshAudit();
     }catch(e){showOperationFeedback(e.message,'danger')}
+}
+
+
+// 「暂停全部平台」是总开关：开着的时候每个平台都停，各自的勾选既改不了也不代表什么，所以显示为
+// 勾上且置灰，并保留各自原本的选择——关掉总开关时它们要回到操作员自己设过的状态，而不是被总开关
+// 顺手改写。不做反向联动：把每个平台都勾上，和「连以后新增的平台也一起停」不是同一件事。
+function applyPauseAll(){
+    const all=document.getElementById('pauseAll');
+    if(!all)return;
+    for(const box of document.querySelectorAll('.pausePlatform')){
+        if(all.checked){
+            if(box.dataset.own===undefined)box.dataset.own=box.checked?'1':'0';
+            box.checked=true;
+            box.disabled=true;
+            box.title='已按“暂停全部平台”停止；取消上面的勾选后可单独设置';
+        }else{
+            if(box.dataset.own!==undefined){box.checked=box.dataset.own==='1';delete box.dataset.own}
+            box.disabled=false;
+            box.title='';
+        }
+    }
+}
+
+
+// 保存时写回平台自己的选择，而不是总开关强制勾上的样子：否则勾一次「暂停全部」就把每个平台的
+// 单独设置改写成了“暂停”，取消总开关后它们再也回不到原样。
+function ownPausedPlatforms(){
+    return [...document.querySelectorAll('.pausePlatform')]
+        .filter(box=>box.dataset.own!==undefined?box.dataset.own==='1':box.checked)
+        .map(box=>box.value);
 }
