@@ -17,7 +17,9 @@ from prediction_market_agent.plugins.providers.openrouter import (
     _adapt_claude_parameters,
     _adapt_server_tools,
     _opener,
+    _openrouter_schema_prompt,
     _restore_namespace_calls,
+    _strict_schema_object,
     OpenRouterBackend,
     OpenRouterAccountControl,
     initialize_openrouter_plugin,
@@ -448,6 +450,47 @@ class ModelCatalogTests(unittest.TestCase):
         self.assertEqual(backend.agent_cli, "CLAUDE")
         self.assertEqual(backend.model, "vendor/model-a")
 
+    def test_openrouter_codex_contract_names_the_complete_schema(self):
+        schema = {
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {"answer": {"type": "string"}},
+            "required": ["answer"],
+        }
+        prompt = _openrouter_schema_prompt("Decide.", schema)
+        self.assertIn("FINAL RESPONSE CONTRACT", prompt)
+        self.assertIn('"required":["answer"]', prompt)
+
+    def test_openrouter_accepts_only_plain_or_single_fenced_schema_json(self):
+        schema = {
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {
+                "action": {"type": "string", "enum": ["KEEP", "DROP"]},
+                "score": {"type": "number", "minimum": 0, "maximum": 1},
+            },
+            "required": ["action", "score"],
+        }
+        expected = {"action": "KEEP", "score": 0.8}
+        self.assertEqual(
+            _strict_schema_object(json.dumps(expected), schema), expected
+        )
+        self.assertEqual(
+            _strict_schema_object(
+                "```json\n" + json.dumps(expected) + "\n```", schema
+            ),
+            expected,
+        )
+        for invalid in (
+            'Here is the answer: {"action":"KEEP","score":0.8}',
+            '{"action":"KEEP","score":2}',
+            '{"action":"KEEP","score":0.8,"extra":true}',
+        ):
+            with self.subTest(invalid=invalid), self.assertRaises(
+                (json.JSONDecodeError, ValueError)
+            ):
+                _strict_schema_object(invalid, schema)
+
     def test_private_bridge_preserves_complete_responses_tool_protocol(self):
         bridge = _BridgeServer(
             "local-token",
@@ -816,3 +859,110 @@ class ModelCatalogTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class RoutingRefusalTests(unittest.TestCase):
+    """OpenRouter refusing to route is not the model answering badly, and must not end the round.
+
+    `require_parameters` asks for an endpoint that supports everything in the request at once. When
+    none does, OpenRouter answers 404 "No endpoints found" and the round used to die there, with a
+    ledger row reading `[]` and a message about a schema nobody had violated. The schema guarantee
+    never came from that flag - the returned object is checked here either way - so the request is
+    sent once more without it before anything is called a failure.
+    """
+
+    def _upstream(self, refusals: int):
+        state = {"calls": []}
+
+        class Handler(BaseHTTPRequestHandler):
+            def log_message(self, *args):
+                pass
+
+            def do_POST(self):
+                body = json.loads(self.rfile.read(int(self.headers.get("Content-Length", "0"))))
+                state["calls"].append(body)
+                if len(state["calls"]) <= refusals:
+                    payload = json.dumps({"error": {
+                        "message": "No endpoints found that can handle the requested parameters. "
+                                   "To learn more about provider routing, visit: "
+                                   "https://openrouter.ai/docs/guides/",
+                        "code": 404,
+                    }}).encode()
+                    self.send_response(404)
+                else:
+                    payload = json.dumps({"upstream": "ok"}).encode()
+                    self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(payload)))
+                self.end_headers()
+                self.wfile.write(payload)
+
+        server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        self.addCleanup(thread.join, 2)
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        return server, state
+
+    def _bridge(self, upstream_port: int):
+        bridge = _BridgeServer(
+            "local-token", "fixture-key", "vendor/model-a", _opener(""), 10, 4096,
+            f"http://127.0.0.1:{upstream_port}/responses",
+            f"http://127.0.0.1:{upstream_port}/messages",
+        )
+        thread = threading.Thread(target=bridge.serve_forever, daemon=True)
+        thread.start()
+        self.addCleanup(thread.join, 2)
+        self.addCleanup(bridge.server_close)
+        self.addCleanup(bridge.shutdown)
+        return bridge
+
+    REQUEST = {
+        "model": "ignored/model",
+        "input": [{"type": "message", "role": "user",
+                   "content": [{"type": "input_text", "text": "Return ok"}]}],
+        "text": {"format": {"type": "json_schema", "name": "probe", "strict": True,
+                            "schema": {"type": "object", "properties": {"word": {"type": "string"}},
+                                       "required": ["word"], "additionalProperties": False}}},
+    }
+
+    def _send(self, bridge) -> tuple[int, dict]:
+        request = urllib.request.Request(
+            f"http://127.0.0.1:{bridge.server_port}/v1/responses",
+            data=json.dumps(self.REQUEST).encode(),
+            headers={"Content-Type": "application/json", "Authorization": "Bearer local-token"},
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=10) as response:
+                return response.status, json.loads(response.read())
+        except urllib.error.HTTPError as error:
+            return error.code, json.loads(error.read() or b"{}")
+
+    def test_a_refused_route_is_retried_without_the_requirement(self):
+        server, state = self._upstream(refusals=1)
+        status, body = self._send(self._bridge(server.server_port))
+        self.assertEqual(status, 200, body)
+        self.assertEqual(len(state["calls"]), 2, "refused once, sent again")
+        self.assertTrue(state["calls"][0]["provider"]["require_parameters"])
+        self.assertNotIn("require_parameters", state["calls"][1].get("provider", {}))
+        self.assertEqual(
+            state["calls"][1]["text"]["format"]["type"], "json_schema",
+            "the schema is still requested; only the routing ultimatum was dropped",
+        )
+
+    def test_a_refusal_that_survives_the_retry_is_reported_as_itself(self):
+        server, state = self._upstream(refusals=2)
+        status, body = self._send(self._bridge(server.server_port))
+        self.assertEqual(status, 404)
+        self.assertEqual(len(state["calls"]), 2, "tried twice, then stopped")
+        self.assertIn("No endpoints found", json.dumps(body))
+
+    def test_an_empty_answer_is_not_called_a_schema_violation(self):
+        from prediction_market_agent.plugins.providers.openrouter import _routing_refusal
+
+        self.assertIn("没有端点", _routing_refusal("", "No endpoints found that can handle the requested parameters"))
+        self.assertEqual(_routing_refusal("", "some other trouble"), "")
+        source = Path("src/prediction_market_agent/plugins/providers/openrouter.py").read_text()
+        self.assertIn("OpenRouter returned no content at all", source)

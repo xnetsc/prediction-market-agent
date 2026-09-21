@@ -449,6 +449,58 @@ class SchemaDecisionEvaluator:
                 )
         return results
 
+    def screen_outliers(
+        self, state: dict[str, Any], assessments: list[dict[str, Any]]
+    ) -> dict[str, bool]:
+        """Read this round's own answers back and say which confidences stand apart from the rest.
+
+        Only the ones that did not clear the absolute floor are worth asking about - anything above
+        it is already trusted - but every answer in the round is supplied, because "stands apart"
+        is a statement about the batch and cannot be made from one number.
+        """
+        under_review = [item for item in assessments if item.get("under_review")]
+        if not under_review:
+            return {}
+        confidences = [item.get("confidence") for item in assessments]
+        verdicts: dict[str, bool] = {}
+        for start in range(0, len(under_review), self.batch_size):
+            batch = under_review[start:start + self.batch_size]
+            questions: dict[str, Any] = {}
+            indexed: list[dict[str, Any]] = []
+            for index, item in enumerate(batch):
+                key = f"o{index}"
+                indexed.append({"key": key, **item})
+                questions[f"stands_apart_{key}"] = {
+                    "type": "noul",
+                    "instructions": (
+                        f"Answer {key} scored {item.get('confidence')} while this round's answers "
+                        "are listed in `all_confidences`. Judged against that distribution rather "
+                        "than against any fixed number, is this one clearly separated above the "
+                        "rest - so that its verdict should be acted on even though it is below the "
+                        "absolute confidence floor?"
+                    ),
+                    "criteria": {
+                        "true": "Clearly above the body of this round's answers, not part of it.",
+                        "false": "Within the ordinary spread of this round, however that spread sits.",
+                    },
+                }
+            response = self._evaluate(
+                {
+                    "workflow": "confidence_separation_review",
+                    "run_state": state,
+                    "all_confidences": confidences,
+                    "under_review": indexed,
+                },
+                questions,
+            )
+            answers = response["answers"]
+            for item in indexed:
+                answer = answers.get(f"stands_apart_{item['key']}") or {}
+                verdicts[str(item.get("candidate_id"))] = (
+                    max(0.0, min(1.0, float(answer.get("noul", 0.0)))) >= 0.5
+                )
+        return verdicts
+
     def assess_continuation(
         self, state: dict[str, Any], frontier: list[dict[str, Any]], page: dict[str, Any]
     ) -> ContinuationAssessment:

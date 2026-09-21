@@ -35,6 +35,24 @@
 可按 platform、provider、status、action 筛选，便于比较 Provider、策略文件哈希、风控调整和后续市场表现，
 持续优化策略插件。原始完整记录仍可单独查询，不会只保留页面摘要。
 
+决策页顶部的“市场采集与候选分析”不是决策行。它从 `topic_observations`、
+`discovery_selections`、`survey_plans` 和 `runtime_incidents` 独立读取，显示最近采集批次、typed evaluator
+粗筛、续扫计划、入选候选，以及模型失败时实际采用的降级路径。删除决策不会删除这些证据；新版删除操作
+另写入 `decision_deletions`。旧版曾删除决策但留下关联动作时，页面明确标出历史证据缺口，不猜删除人或时间。
+
+## 盈亏账本
+
+`pnl_events` 是追加式会计事实流，记录账户起点、买入/卖出成交、赎回、无法匹配成本的赎回和充提。页面
+`#pnl` 提供总览、开放仓位和逐笔详情，对应接口为 `/api/pnl/summary`、`/api/pnl/positions` 和
+`/api/pnl/events`。
+
+- 平台、实盘/纸面账户和币种分别列示，绝不把不同币种或模拟与实盘金额相加；
+- 充值与提现只进入 `external_flow_delta`，不进入已实现盈亏；
+- 手续费、现金变化、成本变化、数量变化和已实现盈亏分别保存；
+- 没有可核对成本的卖出/赎回以及没有真实标记时间的旧仓位显示“未知”，不会按零利润或零亏损处理；
+- 旧状态首次升级时建立 `ACCOUNT_BASELINE`。此前的余额可以继续对账，但无法伪造逐笔历史，页面会标注
+  “旧数据只有余额快照”。
+
 浏览器中的逻辑操作仍使用 `/api/summary`、`/api/decisions`、`/api/records`、`/api/manifest`、
 `/api/plugins/manage`、`/api/runtime` 和 `/api/settings` 等稳定名称，但不会直接发这些明文 URL 请求。登录后页面把逻辑 URL、
 参数和正文一起放进 AES-GCM 信封，统一提交到 `POST /api/secure`，服务端解密分派后再加密响应。

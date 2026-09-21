@@ -47,7 +47,7 @@ class LocalAccessTests(unittest.TestCase):
                     self.assertEqual(response.status_code, 200)
                     self.assertIn("fields", response.json())
                     saved = client.post("/api/local", json={"url": "/api/settings",
-                        "body": {"values": {"dashboard_refresh_seconds": 9}}})
+                        "body": {"values": {"environment_probe_timeout": 9}}})
                     self.assertEqual(saved.status_code, 200)
                     self.assertEqual(len(client.cookies), 0)
             self.assertFalse(AdminAuthStore(config.auth_db, 72, 168).has_admin())

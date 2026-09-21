@@ -16,6 +16,7 @@ class Position:
     average_price: float
     mark_price: float
     opened_at: int
+    marked_at: int = 0
 
     @property
     def market_value(self) -> float:

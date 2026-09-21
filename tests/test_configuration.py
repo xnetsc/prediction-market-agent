@@ -152,6 +152,37 @@ class SavingOneSettingKeepsTheRestTests(unittest.TestCase):
         self.assertEqual(values["paper_trading"], "off")
         self.assertEqual(values["agent_language"], "en")
 
+    def test_retired_browser_poll_interval_is_ignored_and_removed_on_next_save(self) -> None:
+        store = self._store()
+        store.path.write_text(
+            json.dumps(
+                {
+                    "version": 1,
+                    "values": {
+                        "dashboard_refresh_seconds": 5,
+                        "agent_language": "zh",
+                        "paper_trading": "on",
+                        "paper_trading_funds": 4321,
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+        self.assertNotIn("dashboard_refresh_seconds", store.values())
+        self.assertEqual(store.values()["agent_language"], "zh")
+        self.assertEqual(store.values()["paper_trading"], "on")
+        self.assertEqual(store.values()["paper_trading_funds"], 4321)
+        self.assertNotIn(
+            "dashboard_refresh_seconds",
+            {field["name"] for field in store.manifest()["fields"]},
+        )
+        store.save({"agent_language": "en"})
+        saved = json.loads(store.path.read_text(encoding="utf-8"))["values"]
+        self.assertNotIn("dashboard_refresh_seconds", saved)
+        self.assertEqual(saved["agent_language"], "en")
+        self.assertEqual(saved["paper_trading"], "on")
+        self.assertEqual(saved["paper_trading_funds"], 4321)
+
 
 class TradingStyleIsNotBuriedTests(unittest.TestCase):
     """The two numbers an operator actually tunes do not belong with database paths."""

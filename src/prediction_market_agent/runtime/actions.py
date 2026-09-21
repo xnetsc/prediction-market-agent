@@ -121,7 +121,9 @@ class ExecutionActionsMixin:
                 direction=position.direction,
                 order_type=decision.order_type,
             )
-        order = runtime.gateway.place_order(quote, reason=decision.rationale)
+        order = runtime.gateway.place_order(
+            quote, reason=decision.rationale, decision_id=decision_id
+        )
         self.memory.record_action(
             platform=platform,
             market_topic_id=market_topic_id,

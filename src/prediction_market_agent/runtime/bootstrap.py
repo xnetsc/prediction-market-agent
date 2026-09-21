@@ -31,6 +31,8 @@ class PlatformRuntime:
     store: StateStore
     state: AccountState
     gateway: ExecutionGateway
+    account_mode: str = "live"
+    currency: str = "USDT"
 
 
 @dataclass
@@ -47,17 +49,18 @@ class EngineComponents:
     strategy_evolution: bool
 
 
-def _reported_funds(plugin: Any) -> float | None:
+def _reported_account(plugin: Any) -> tuple[float | None, str]:
     """Open a new account's ledger at whatever the platform says it can spend.
 
     A plugin that cannot answer must not take the robot down over it - the ledger simply opens
     empty, which is honest and visible, rather than guessing a figure nobody stated.
     """
     try:
-        return float(plugin.account_funds().available)
+        funds = plugin.account_funds()
+        return float(funds.available), str(funds.currency or "UNKNOWN").upper()
     except Exception:
         LOGGER.exception("%s could not report its funds; opening the ledger empty", plugin.name)
-        return None
+        return None, "UNKNOWN"
 
 
 def bootstrap_engine(
@@ -128,14 +131,19 @@ def bootstrap_engine(
             state_path = platform_state_path(
                 config.state_file, plugin.name, multiple, paper=bool(config.paper_trading)
             )
-            store = StateStore(state_path, _reported_funds(plugin))
+            reported_funds, currency = _reported_account(plugin)
+            store = StateStore(state_path, reported_funds)
             state = store.load()
             gateway = plugin.create_write_gateway(state)
+            gateway.account_mode = "paper" if config.paper_trading else "live"
+            gateway.currency = currency
             platforms[plugin.name] = PlatformRuntime(
                 plugin=plugin,
                 store=store,
                 state=state,
                 gateway=gateway,
+                account_mode=gateway.account_mode,
+                currency=currency,
             )
 
         risk_services.update(

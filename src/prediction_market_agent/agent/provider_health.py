@@ -23,9 +23,6 @@ RATE_LIMIT_PATTERNS = (
     # unknown, so through a week-long lockout the provider came back every minute and each round
     # left another failed record in the ledger - 461 of them before anyone noticed.
     r"hit your [\w -]*limit",
-    r"capacity",
-    r"overloaded",
-    r"try again later",
 )
 AUTH_PATTERNS = (
     r"\b401\b",
@@ -46,6 +43,9 @@ TRANSIENT_PATTERNS = (
     r"temporarily",
     r"unavailable",
     r"reset by peer",
+    r"capacity",
+    r"overloaded",
+    r"try again later",
 )
 CONTRACT_PATTERNS = (
     r"schema",

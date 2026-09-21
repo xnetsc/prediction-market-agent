@@ -78,6 +78,87 @@ function configurationFieldsHtml(kind,name,fields){
 }
 
 const PLUGIN_FUNDS_NOTICE_KEYS=new Set(['wallet','wallet_backup','deposit','withdraw','funding']);
+
+const PNL_EVENT_LABELS={
+    ACCOUNT_BASELINE:'账本起点',BUY_FILL:'买入成交',SELL_FILL:'卖出成交',REDEEM:'结算赎回',
+    REDEEM_UNMATCHED:'无法匹配的赎回',TRANSFER_IN:'转入',TRANSFER_OUT:'转出'
+};
+let PNL_CATALOG=null,PNL_EVENTS=[],PNL_OFFSET=0,PNL_TOTAL=0;
+const pnlModeLabel=value=>value==='paper'?'纸面':value==='live'?'实盘':value||'未知';
+const pnlNumber=value=>value===null||value===undefined?'未知':Number(value).toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:6});
+const pnlSigned=value=>value===null||value===undefined?'未知':(Number(value)>0?'+':'')+pnlNumber(value);
+const pnlWhen=value=>value?new Date(value).toLocaleString():'未知';
+function pnlChoice(id,values,empty){
+    const select=document.getElementById(id),current=select.value;
+    select.innerHTML='<option value="">'+esc(empty)+'</option>'+values.map(value=>'<option value="'+esc(value)+'">'+esc(value)+'</option>').join('');
+    if([...select.options].some(option=>option.value===current))select.value=current;
+}
+function pnlQuery(){
+    const pairs=[['platform',document.getElementById('pnlPlatform').value],['account_mode',document.getElementById('pnlMode').value],['currency',document.getElementById('pnlCurrency').value],['event_type',document.getElementById('pnlEventType').value]];
+    return pairs.filter(([,value])=>value).map(([key,value])=>key+'='+encodeURIComponent(value)).join('&');
+}
+function pnlSummaryQuery(){
+    const pairs=[['platform',document.getElementById('pnlPlatform').value],['account_mode',document.getElementById('pnlMode').value],['currency',document.getElementById('pnlCurrency').value]];
+    return pairs.filter(([,value])=>value).map(([key,value])=>key+'='+encodeURIComponent(value)).join('&');
+}
+function renderPnlSummary(summary){
+    const totals=document.getElementById('pnlTotals');
+    totals.innerHTML=summary.totals.length?summary.totals.map(item=>'<article class="pnl-total-group"><div class="section-heading"><h4>'+esc(pnlModeLabel(item.account_mode)+' · '+item.currency)+'</h4><span class="badge '+(item.complete?'ready':'')+'">'+(item.complete?'口径完整':'含未知值')+'</span></div><div class="cards pnl-cards">'
+        +[['总盈亏',item.total_pnl],['已实现',item.realized_pnl],['浮动盈亏',item.unrealized_pnl],['权益',item.equity],['手续费',item.fees],['净入金',item.net_external_flow]].map(([label,value])=>'<div class="card"><div class="muted">'+label+'</div><h2 class="'+(Number(value)>0?'pnl-gain':Number(value)<0?'pnl-loss':'')+'">'+pnlSigned(value)+' <small>'+esc(item.currency)+'</small></h2></div>').join('')
+        +'</div></article>').join(''):'<div class="empty-state"><strong>还没有可汇总的账户</strong><p>账户启动后会建立账本起点；成交和结算发生后会出现盈亏。</p></div>';
+    document.getElementById('pnlAccounts').innerHTML=table(summary.accounts,[
+        ['账户',row=>'<strong>'+esc(row.platform)+'</strong><br><span class="badge '+(row.account_mode==='live'?'ready':'')+'">'+esc(pnlModeLabel(row.account_mode))+'</span> '+esc(row.currency)],
+        ['权益 / 现金',row=>pnlNumber(row.equity)+' / '+pnlNumber(row.cash)],
+        ['已实现 / 浮动',row=>'<span class="'+(Number(row.realized_pnl)>0?'pnl-gain':Number(row.realized_pnl)<0?'pnl-loss':'')+'">'+pnlSigned(row.realized_pnl)+'</span> / <span class="'+(Number(row.unrealized_pnl)>0?'pnl-gain':Number(row.unrealized_pnl)<0?'pnl-loss':'')+'">'+pnlSigned(row.unrealized_pnl)+'</span>'],
+        ['手续费 / 净入金',row=>pnlNumber(row.fees)+' / '+pnlSigned(row.net_external_flow)],
+        ['覆盖范围',row=>(row.uncertain_pnl_events?'<span class="pending">有 '+row.uncertain_pnl_events+' 条盈亏成本未知</span>':row.historical_breakdown_complete?'<span class="good">历史可逐笔核对</span>':'<span class="pending">旧数据只有余额快照</span>')+'<br><span class="muted">事件 '+row.event_count+' 条 · 起于 '+esc(pnlWhen(row.coverage_started_at))+'</span>'],
+    ]);
+}
+function renderPnlPositions(rows){
+    document.getElementById('pnlPositions').innerHTML=table(rows,[
+        ['平台 / 标的',row=>'<strong>'+esc(row.platform)+'</strong><br>'+esc(row.direction||row.symbol||row.token_id)],
+        ['数量 / 均价',row=>pnlNumber(row.quantity)+' / '+pnlNumber(row.average_price)],
+        ['成本 / 当前价值',row=>pnlNumber(row.cost_basis)+' / '+pnlNumber(row.market_value)],
+        ['标记价',row=>pnlNumber(row.mark_price)+'<br><span class="muted">'+esc(pnlWhen(row.marked_at))+'</span>'],
+        ['浮动盈亏',row=>'<strong class="'+(Number(row.unrealized_pnl)>0?'pnl-gain':Number(row.unrealized_pnl)<0?'pnl-loss':'')+'">'+pnlSigned(row.unrealized_pnl)+'</strong>'],
+    ]);
+}
+function pnlEventHtml(row){
+    const label=PNL_EVENT_LABELS[row.event_type]||row.event_type;
+    const subject=row.metadata?.direction||row.metadata?.symbol||row.token_id||'';
+    return '<details class="pnl-event"><summary><span><strong>'+esc(label)+'</strong>'+(subject?' · '+esc(subject):'')+'<small>'+esc(pnlWhen(row.created_at))+' · '+esc(row.platform)+' · '+esc(pnlModeLabel(row.account_mode))+' · '+esc(row.currency)+'</small></span><span class="'+(Number(row.realized_pnl_delta)>0?'pnl-gain':Number(row.realized_pnl_delta)<0?'pnl-loss':'')+'">盈亏 '+pnlSigned(row.realized_pnl_delta)+'</span></summary><dl class="pnl-event-facts"><dt>现金变化</dt><dd>'+pnlSigned(row.cash_delta)+'</dd><dt>成本变化</dt><dd>'+pnlSigned(row.cost_basis_delta)+'</dd><dt>数量变化</dt><dd>'+pnlSigned(row.position_quantity_delta)+'</dd><dt>手续费</dt><dd>'+pnlNumber(row.fee)+'</dd><dt>外部资金流</dt><dd>'+pnlSigned(row.external_flow_delta)+'</dd><dt>事后权益</dt><dd>'+pnlNumber(row.equity_after)+'</dd><dt>证据</dt><dd>'+(row.evidence_status==='complete'?'<span class="good">完整</span>':'<span class="pending">不完整，未知值未按零计算</span>')+'</dd></dl><p class="muted">订单 '+esc(row.order_id||'—')+' · 决策 '+esc(row.decision_id??'—')+' · outcome '+esc(row.token_id||'—')+'</p><details class="diagnostic-detail"><summary>原始证据</summary><pre>'+esc(JSON.stringify(row.metadata||{},null,2))+'</pre></details></details>';
+}
+function renderPnlEvents(){
+    document.getElementById('pnlEvents').innerHTML=PNL_EVENTS.length?PNL_EVENTS.map(pnlEventHtml).join(''):'<div class="empty-state"><strong>暂无逐笔记录</strong><p>账本起点、成交、结算或充提发生后会显示在这里。</p></div>';
+    const more=document.getElementById('pnlMore');more.hidden=PNL_EVENTS.length>=PNL_TOTAL;
+    more.textContent='加载更早记录（'+PNL_EVENTS.length+' / '+PNL_TOTAL+'）';
+}
+async function refreshPnl(reset=false){
+    const status=document.getElementById('pnlStatus');if(!status)return;
+    status.className='status pending';status.textContent='正在读取盈亏账本…';
+    if(reset){PNL_EVENTS=[];PNL_OFFSET=0;PNL_CATALOG=null}
+    try{
+        if(!PNL_CATALOG)PNL_CATALOG=await get('/api/pnl/summary');
+        pnlChoice('pnlPlatform',PNL_CATALOG.platforms,'全部平台');
+        pnlChoice('pnlCurrency',PNL_CATALOG.currencies,'全部币种（分列）');
+        pnlChoice('pnlEventType',Object.keys(PNL_EVENT_LABELS),'全部类型');
+        const query=pnlQuery(),summaryQuery=pnlSummaryQuery(),suffix=query?'&'+query:'';
+        const [summary,positions,events]=await Promise.all([
+            get('/api/pnl/summary'+(summaryQuery?'?'+summaryQuery:'')),
+            get('/api/pnl/positions?platform='+encodeURIComponent(document.getElementById('pnlPlatform').value)),
+            get('/api/pnl/events?limit=30&offset=0'+suffix),
+        ]);
+        renderPnlSummary(summary);
+        const mode=document.getElementById('pnlMode').value;
+        renderPnlPositions(positions.items.filter(row=>!mode||row.account_mode===mode));
+        PNL_EVENTS=events.items;PNL_OFFSET=events.items.length;PNL_TOTAL=events.count;renderPnlEvents();
+        status.className='status good';status.textContent='读取于 '+new Date().toLocaleTimeString()+'；充提未计入盈亏，未知值未按零计算。';
+    }catch(error){status.className='status danger';status.textContent=error.message;document.getElementById('pnlEvents').innerHTML='<div class="empty-state"><strong>没能读到盈亏账本</strong><p>'+esc(error.message)+'</p></div>'}
+}
+async function loadMorePnl(){
+    const button=document.getElementById('pnlMore');button.disabled=true;
+    try{const query=pnlQuery(),answer=await get('/api/pnl/events?limit=30&offset='+PNL_OFFSET+(query?'&'+query:''));PNL_EVENTS.push(...answer.items);PNL_OFFSET+=answer.items.length;PNL_TOTAL=answer.count;renderPnlEvents()}finally{button.disabled=false}
+}
 const PLUGIN_NOTICE_READS=new Map();
 function pluginNoticeRead(kind,name,{fresh=false}={}){
     const key=kind+':'+name;
@@ -131,6 +212,23 @@ async function refreshAttention(m){
     }
 }
 
+const DISCOVERY_STAGE_LABELS={discovery_continuation:'继续扫描判断',market_selection:'候选选择'};
+const DISCOVERY_ACTION_LABELS={CONTINUE:'继续深入',DEFER:'暂缓',DROP:'淘汰',UNKNOWN:'未知'};
+function renderDiscoveryActivity(data){
+    const host=document.getElementById('discoveryActivity');if(!host)return;
+    const blocks=[];
+    if(data.legacy_deletion_detected)blocks.push('<div class="info-banner danger"><strong>检测到旧版删除留下的证据缺口</strong><p>有 '+data.orphaned_action_decisions+' 个执行动作仍引用已经不存在的决策记录。旧版没有记录删除操作，因此无法从现有数据确认删除时间或操作者；市场采集与候选记录仍在。</p></div>');
+    if((data.decision_deletions||[]).length)blocks.push('<details class="diagnostic-detail"><summary>决策记录删除审计 · '+data.decision_deletions.length+' 条</summary>'+(data.decision_deletions||[]).map(row=>'<p><strong>'+esc(new Date(row.deleted_at).toLocaleString())+'</strong> · '+esc(row.source)+'<br><span class="muted">范围 '+esc(JSON.stringify(row.scope))+'；结果 '+esc(JSON.stringify(row.result))+'</span></p>').join('')+'</details>');
+    if((data.incidents||[]).length)blocks.push('<div class="discovery-incidents"><h4>采集与分析异常</h4>'+(data.incidents||[]).map(row=>'<details class="runtime-incident '+(row.severity==='error'?'danger':'pending')+'"><summary><span><strong>'+esc(DISCOVERY_STAGE_LABELS[row.stage]||row.stage)+'</strong> · '+esc(row.platform)+'</span><span>'+esc(new Date(row.created_at).toLocaleString())+'</span></summary><p>'+esc(row.message)+'</p><p><strong>降级处理：</strong>'+esc(row.fallback||'未执行降级')+'</p>'+(row.details?.raw_output?'<details class="diagnostic-detail"><summary>模型 / CLI 原始诊断</summary><pre>'+esc(row.details.raw_output)+'</pre></details>':'')+'</details>').join('')+'</div>');
+    for(const platform of data.platforms||[]){
+        const evaluator=Object.entries(platform.evaluator_counts||{}).map(([name,count])=>esc(DISCOVERY_ACTION_LABELS[name]||name)+' '+count).join(' · ')||'本批没有评估器结果';
+        const plan=platform.plan||{};
+        blocks.push('<article class="discovery-platform"><div class="section-heading"><div><h4>'+esc(platform.platform)+'</h4><p class="muted">最近采集 '+esc(new Date(platform.latest_observed_at).toLocaleString())+' · 本批 '+platform.latest_batch_count+' 个 · 累计 '+platform.batches+' 批 / '+platform.observations+' 条观察</p></div><span class="badge ready">已采集</span></div><div class="summary-line"><strong>粗筛：</strong>'+evaluator+(platform.evaluator_providers?.length?' · 服务 '+esc(platform.evaluator_providers.join(', ')):'')+'</div>'+(plan.reason?'<p><strong>续扫计划：</strong>'+esc(plan.reason)+'；'+(plan.next_scan_seconds?'约 '+plan.next_scan_seconds+' 秒后':'按平台最短间隔')+'</p>':'')+(plan.queries?.length?'<p class="muted">下轮检索：'+esc(plan.queries.join('；'))+'</p>':'')+table(platform.top_candidates||[],[['最近候选',row=>'<strong>'+esc(row.title)+'</strong><br><span class="muted">'+esc(row.market_topic_id)+'</span>'],['流动性 / 成交量',row=>pnlNumber(row.liquidity_usdt)+' / '+pnlNumber(row.volume_usdt)],['评估器',row=>row.typed_evaluation?esc(DISCOVERY_ACTION_LABELS[row.typed_evaluation.action]||row.typed_evaluation.action)+' · 置信度 '+esc(row.typed_evaluation.confidence??'未知'):'未粗筛']])+'</article>');
+    }
+    if((data.recent_selections||[]).length)blocks.push('<details class="diagnostic-detail" open><summary>最近进入深度决策的候选 · '+data.recent_selections.length+' 条</summary>'+table(data.recent_selections,[['时间 / 平台',row=>esc(new Date(row.selected_at).toLocaleString())+'<br>'+esc(row.platform)],['候选',row=>'<strong>'+esc(row.title)+'</strong><br><span class="muted">'+esc(row.market_topic_id)+'</span>'],['入选原因',row=>esc(row.reason)],['策略 / 顺位',row=>esc(row.strategy)+' / '+row.position]])+'</details>');
+    host.innerHTML=blocks.length?blocks.join(''):'<div class="empty-state"><strong>还没有市场采集记录</strong><p>平台完成第一次扫描后，这里会显示采集批次、评估器粗筛和候选选择；这不等同于交易决策。</p></div>';
+}
+
 function renderManager(m) {
     LAST_MANAGER=m;
     // The provider form has only one DOM instance, even when reached from two pages.
@@ -176,7 +274,7 @@ function renderManager(m) {
     document.getElementById('openRouterPluginTarget').innerHTML=(m.plugin_directories.categories.decision_provider||[]).map(d=>'<option value="'+esc(d)+'">'+esc(d)+'</option>').join('');
     manager.onchange=event=>{const input=event.target;if(input.matches('.enable,.priority,input[name="strategy"]'))markPluginSelectionDirty(input)};
     renderInstallTargets();renderConfigurationPresets(m);
-    window.showDashboardView?.();renderServiceConnections();
+    window.showDashboardView?.(false,false);renderServiceConnections();
 }
 
 const CONFIG_READS=new WeakMap();
@@ -384,7 +482,8 @@ function renderRuntime(r){
     if(r.setup)renderSetupGuide(r.setup);
     const root=document.getElementById('runtimeControl');
     // Periodic status refresh must not erase an unsaved pause choice.
-    if(!root.dataset.dirty){
+    if(root.dataset.pending&&!r.settling&&!r.reconcile_pending)delete root.dataset.pending;
+    if(!root.dataset.dirty&&!root.dataset.pending){
         root.innerHTML='<label class="pause-switch"><input id="pauseAll" type="checkbox" '+(r.robot_paused?'checked':'')+'> 暂停全部平台</label><div class="config-grid">'+Object.entries(r.platforms||{}).map(([name,p])=>'<article class="plugin"><div class="section-heading"><h4>'+esc(name)+'</h4><span class="badge '+(p.running?'ready':'')+'">'+(p.running?(p.runtime&&p.runtime.holding?'已暂停：AI 不可用':'运行中'):p.paused?'已暂停':p.ready?'可启动但未运行':'插件报告未就绪')+'</span></div><label><input class="pausePlatform" type="checkbox" value="'+esc(name)+'" '+(p.paused?'checked':'')+'> 暂停此平台</label>'+(!p.ready?'<p><a href="'+configLink('api',name)+'">打开平台插件 →</a></p>':'')+(p.startup_reasons?.length?'<details class="diagnostic-detail"><summary>查看插件报告</summary><p>'+esc(p.startup_reasons.join('；'))+'</p></details>':'')+'</article>').join('')+'</div><p class="status '+(r.global_ready?'good':'muted')+'">'+(r.global_ready?'AI 服务和至少一个平台已报告可启动；是否正常运行以平台的“运行中”为准。':'机器人主链尚未满足：需要至少一个可用 AI 服务和一个可启动平台。')+'</p>'+(!r.global_ready?'<details><summary>查看具体原因</summary><p>'+esc((r.global_reasons||[]).join('；'))+'</p></details>':'');
         root.onchange=()=>{root.dataset.dirty='true';document.getElementById('runtimeStatus').textContent='暂停选项尚未保存'};
     }
@@ -1698,15 +1797,27 @@ async function renderPluginNotices(card,kind,plugin,provided=null,filter={}){
 
 async function refreshFunds(fresh=false){
     const root=document.getElementById('fundsWorkspace');
-    if(!root||!LAST_MANAGER)return;
+    if(!root)return;
     root.innerHTML='<div class="empty-state"><strong>正在读取各平台资金状态…</strong></div>';
+    // Entering this page before the plugin list has been read used to return here in silence, and
+    // with the timer polling gone nothing ever came back to it: the page simply stayed blank.
+    if(!LAST_MANAGER){
+        try{await refreshManager()}catch(e){
+            root.innerHTML='<div class="empty-state"><strong>读不到插件列表</strong><p>'+esc(e.message)+'</p></div>';
+            return;
+        }
+    }
+    if(!LAST_MANAGER)return;
     const platforms=(LAST_MANAGER.plugins.api||[]).filter(plugin=>plugin.enabled&&plugin.has_notices);
-    root.replaceChildren();
     if(!platforms.length){
         root.innerHTML='<div class="empty-state"><strong>尚未启用交易平台</strong><p>先在插件中心启用并配置交易平台，资金管理页才会读取对应账户。</p></div>';
         return;
     }
-    for(const plugin of platforms){
+    root.replaceChildren();
+    // Each platform is asked in parallel and draws its own card straight away. A cold read here
+    // means connecting to the venue - around fifteen seconds on a slow link - and a page that
+    // shows nothing until the last one answers is one the operator reads as broken.
+    await Promise.all(platforms.map(async plugin=>{
         const card=controlNode('article','',root);card.className='plugin configuration-card funds-platform';
         const head=controlNode('div','',card);head.className='section-heading';
         controlNode('h4',plugin.name,head);
@@ -1714,13 +1825,24 @@ async function refreshFunds(fresh=false){
         if(!plugin.readiness?.ready){
             controlNode('p',(plugin.readiness?.reasons||[]).join('；')||'平台插件尚未就绪',card).className='danger';
             const link=controlNode('a','打开平台配置 →',card);link.href='#plugin_api_'+plugin.name;link.className='button-link';
-            continue;
+            return;
         }
-        controlNode('h5','可用操作',card);
-        controlNode('p','钱包、充值和转出是随时可用的账户操作，不会被当成待处理事件；只有真实的到账请求或错误才会出现在顶部提醒。',card).className='muted';
-        const count=await renderPluginNotices(card,'api',plugin,null,{only:PLUGIN_FUNDS_NOTICE_KEYS,fresh});
-        if(count===0)card.remove();
-    }
+        const pending=controlNode('p','正在读取这个平台的账户和资金路线…（首次读取要连接平台，可能十几秒）',card);
+        pending.className='muted';
+        let count=0;
+        try{
+            count=await renderPluginNotices(card,'api',plugin,null,{only:PLUGIN_FUNDS_NOTICE_KEYS,fresh});
+        }catch(e){
+            pending.className='danger';pending.textContent='读取失败：'+e.message;
+            return;
+        }
+        pending.remove();
+        if(count===0){card.remove();return}
+        const heading=controlNode('h5','可用操作',null);
+        const note=controlNode('p','钱包、充值和转出是随时可用的账户操作，不会被当成待处理事件；只有真实的到账请求或错误才会出现在顶部提醒。',null);
+        note.className='muted';
+        head.after(heading,note);
+    }));
     if(!root.children.length)root.innerHTML='<div class="empty-state"><strong>已启用的平台没有资金面板</strong><p>资金能力由各平台插件声明；请检查是否安装了提供余额、充值或转出 notice 的版本。</p></div>';
 }
 

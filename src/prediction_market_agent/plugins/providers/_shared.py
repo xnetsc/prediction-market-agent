@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 import os
 import shutil
 from pathlib import Path
@@ -47,6 +48,56 @@ def subprocess_output_text(value: str | bytes | None) -> str:
     if isinstance(value, bytes):
         return value.decode("utf-8", errors="replace")
     return value or ""
+
+
+SEVERITY = re.compile(
+    r"^(?:\[[^\]]*\]\s*)?(?:ERROR|Error|error|FATAL|fatal|panic|Traceback|thread '.*' panicked)\b"
+)
+"""What a command-line tool's own diagnosis looks like, as distinct from anything it echoed."""
+
+
+def cli_failure_detail(
+    *, returncode: int, stdout: str, stderr: str, output_exists: bool
+) -> str:
+    """Return a useful bounded CLI failure instead of an empty stderr suffix.
+
+    Taking the tail of stderr looks safe and is not: these clients echo the whole prompt into it
+    before they say anything about what went wrong, so the last thousand characters are usually the
+    middle of our own instructions. That produced an operator-facing message made of prompt text -
+    and worse, the quota classifier reads this same string, so "You've hit your usage limit"
+    arriving one line below the cut was recorded as an ordinary failure instead of an exhausted
+    account with a reset time. So the diagnosis is looked for where a CLI puts it: the last lines,
+    from the last severity marker on.
+    """
+    lines = [line.rstrip() for line in stderr.splitlines()]
+    for index in range(len(lines) - 1, -1, -1):
+        if SEVERITY.match(lines[index].strip()):
+            block = "\n".join(line for line in lines[index:] if line.strip())
+            return block[-1000:]
+    tail = [line for line in lines if line.strip()]
+    if tail:
+        # No marker: the last non-empty line is still where a CLI puts its last word, and it beats
+        # a slice that starts in the middle of a sentence nobody wrote for this purpose.
+        return tail[-1][-1000:] if len(tail[-1]) <= 500 else stderr.strip()[-1000:]
+    for line in reversed(stdout.splitlines()):
+        candidate = line.strip()
+        if not candidate:
+            continue
+        try:
+            event = json.loads(candidate)
+        except json.JSONDecodeError:
+            return candidate[-1000:]
+        for value in (
+            event.get("message"),
+            (event.get("error") or {}).get("message")
+            if isinstance(event.get("error"), dict) else None,
+            event.get("error") if isinstance(event.get("error"), str) else None,
+        ):
+            if value:
+                return str(value)[-1000:]
+    if returncode == 0 and not output_exists:
+        return "CLI exited successfully but did not write its final structured output"
+    return f"CLI exited with code {returncode} without diagnostics"
 
 
 def configured_client_homes(working_directory: Path) -> dict[str, Path]:

@@ -25,6 +25,9 @@ from ..plugin_system.management import PluginManagementService
 from ..plugin_system.contracts import platform_state_path
 from .provider_quality import ProviderQuality
 from .reporting import build_report
+from .pnl import pnl_events as build_pnl_events
+from .pnl import pnl_positions as build_pnl_positions
+from .pnl import pnl_summary as build_pnl_summary
 from .memory import SessionMemory
 from .auth import AdminAuthStore, AdminSession, SESSION_COOKIE
 from .controller import RobotRuntimeManager
@@ -40,6 +43,7 @@ HTML = r"""<!doctype html><html lang="zh-CN"><head><meta charset="utf-8">
 <aside class="sidebar" id="sidebar"><a class="brand" href="#overview"><span class="brand-mark">↗</span><span>Prediction Agent<small>OPERATIONS CONSOLE</small></span></a><p class="nav-label">工作空间</p><nav aria-label="主导航">
 <a class="nav-link" href="#overview" aria-current="page"><span class="nav-icon" aria-hidden="true">◫</span>运行概览</a>
 <a class="nav-link" href="#decisions"><span class="nav-icon" aria-hidden="true">≡</span>决策账本</a>
+<a class="nav-link" href="#pnl"><span class="nav-icon" aria-hidden="true">±</span>盈亏账本</a>
 <a class="nav-link" href="#funds"><span class="nav-icon" aria-hidden="true">⇄</span>资金管理</a>
 <a class="nav-link" href="#models"><span class="nav-icon" aria-hidden="true">◎</span>模型服务</a>
 <a class="nav-link" href="#plugins"><span class="nav-icon" aria-hidden="true">◇</span>插件中心</a>
@@ -52,12 +56,13 @@ HTML = r"""<!doctype html><html lang="zh-CN"><head><meta charset="utf-8">
 <div id="consoleUpdate" class="attention console-update" role="alert" hidden><div class="attention-head"><strong>控制台已经更新</strong><span class="muted">这个页面还在用打开时的旧代码，看到的内容可能和现在不一样。</span></div><button class="primary" onclick="location.reload()">刷新页面</button></div>
 <div id="attention" class="attention" role="status" aria-live="polite" hidden></div>
 <section data-view="overview" id="gettingStarted"><h3>开始使用</h3><p class="muted">按下面的顺序完成连接。先确认规则与暂停状态，再让机器人运行。</p><div id="setupSteps" class="setup-grid"></div></section><div id="cards" class="cards" data-view="overview"></div>
-<dialog id="loginWizard"><h3 id="loginWizardTitle">客户端网页登录</h3><p>请只在官方页面输入账号密码。机器人仅接收本次授权结果，登录凭据保存在服务器中。</p><label class="field">客户端验证方式<select id="wizardLoginMethod" onchange="switchLoginMethod(this.value)"><option value="auto">自动选择</option><option value="local">本地回调</option><option value="remote">设备码 / 验证码</option></select><small>切换会取消本次客户端登录等待并重新开始，不改变管理员 Passkey 鉴权。</small></label><div id="remoteLoginSteps" hidden><div class="info-banner">远程 / 手机登录不需要本地助手，也不需要向公网开放随机端口。</div><h4>1. 打开官方授权页面</h4><a id="remoteOfficialLink" target="_blank" rel="noopener noreferrer" hidden>打开官方登录页</a><div id="deviceCodeStep" hidden><h4>2. 在官方页面输入设备码</h4><pre id="remoteDeviceCode" aria-label="设备码"></pre><p>需要在账号安全设置或工作空间权限中允许设备码登录。完成后回到此页，客户端会自动确认。</p></div><div id="manualCodeStep" hidden><h4>2. 粘贴官方页面给出的验证码</h4><label class="field">本次验证码<input id="remoteLoginCode" type="password" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="仅填写官方显示的验证码"></label><button id="submitLoginCode" class="primary" onclick="submitRemoteCode()">提交验证码</button><p>验证码仅传给正在等待的官方客户端，不写入配置或审计记录。</p></div><h4>3. 等待客户端确认</h4><p id="remoteLoginResult" role="status"></p></div><div id="localLoginSteps"><p id="callbackProbeStatus" role="status">等待客户端提供实际回调地址…</p><button id="callbackProbeRetry" onclick="retryCallbackProbe()">重新检测回调映射</button><ol><li data-helper-step hidden><h4>复制本次登录命令</h4><p>选择浏览器所在电脑的系统。命令从当前机器人获取完整脚本后运行，只对本次登录有效、只可获取一次。请确认站点可信，不要分享命令或终端历史。</p><select id="helperPlatform" onchange="resetHelperCommand()"><option value="bash">macOS / Linux（Bash）</option><option value="powershell">Windows（PowerShell）</option></select><textarea id="helperCommand" readonly rows="5" style="width:100%;box-sizing:border-box" aria-label="本次登录助手命令" placeholder="正在生成命令…"></textarea><button id="helperCopy" onclick="copyHelperCommand()" disabled>复制命令</button></li><li data-helper-step hidden><h4>在终端粘贴运行</h4><p>macOS 打开“终端”，Linux 打开终端，Windows 打开 PowerShell，然后粘贴命令并回车。无需手动保存脚本、解压或打开可执行文件，也不会修改系统安全设置。若系统管理策略禁止脚本，请联系管理员。</p><p>macOS/Linux 需要 Python 3.9+，缺少时会明确提示；缺少 cryptography 时在临时 venv 安装加密依赖，结束后清理，不修改系统 Python。Windows 使用 PowerShell 5.1+ 和系统 .NET。</p><p>保持终端开启，显示 Ready 后回到此页面。助手使用本机网络/代理，不继承容器代理；网络失败请检查代理或防火墙，不要关闭 TLS 验证。端口冲突不会自动终止其他程序。取消或超时后助手释放监听。</p><p id="helperConnection" role="status">等待助手连接…</p></li><li><h4>在官方网页授权</h4><p>映射验证成功或助手 Ready 后，点击下面的链接。官方页面自动回调，无需复制代码。</p><a id="officialLoginLink" target="_blank" rel="noopener noreferrer" hidden>打开官方登录页</a></li><li><h4>确认完成</h4><p id="loginWizardResult" role="status">尚未完成。</p><p>只有这里显示“已登录”才算成功；失败或超时点击“重新开始”，获取新命令。助手会自动结束，也可用 Ctrl+C 停止并在此取消登录。</p></li></ol><button onclick="switchRemoteLogin()">改用设备码 / 验证码登录</button></div><p id="loginWizardError" class="danger"></p><div class="toolbar"><button onclick="restartWizard()">重新开始</button><button onclick="cancelWizard()">取消本次登录</button><button onclick="document.getElementById('loginWizard').close()">收起向导</button></div></dialog>
+<dialog id="loginWizard"><h3 id="loginWizardTitle">客户端网页登录</h3><p>请只在官方页面输入账号密码。机器人仅接收本次授权结果，登录凭据保存在服务器中。</p><label class="field">客户端验证方式<select id="wizardLoginMethod" onchange="switchLoginMethod(this.value)"><option value="auto">自动选择</option><option value="local">本地回调</option><option value="remote">设备码 / 验证码</option></select><small>切换会取消本次客户端登录等待并重新开始，不改变管理员 Passkey 鉴权。</small></label><div id="remoteLoginSteps" hidden><div class="info-banner">远程 / 手机登录不需要本地助手，也不需要向公网开放随机端口。</div><h4>1. 打开官方授权页面</h4><a id="remoteOfficialLink" target="_blank" rel="noopener noreferrer" hidden>打开官方登录页</a><div id="deviceCodeStep" hidden><h4>2. 在官方页面输入设备码</h4><pre id="remoteDeviceCode" aria-label="设备码"></pre><p>需要在账号安全设置或工作空间权限中允许设备码登录。完成后回到此页，点击“刷新登录状态”。</p></div><div id="manualCodeStep" hidden><h4>2. 粘贴官方页面给出的验证码</h4><label class="field">本次验证码<input id="remoteLoginCode" type="password" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="仅填写官方显示的验证码"></label><button id="submitLoginCode" class="primary" onclick="submitRemoteCode()">提交验证码</button><p>验证码仅传给正在等待的官方客户端，不写入配置或审计记录。</p></div><h4>3. 等待客户端确认</h4><p id="remoteLoginResult" role="status"></p></div><div id="localLoginSteps"><p id="callbackProbeStatus" role="status">等待客户端提供实际回调地址…</p><button id="callbackProbeRetry" onclick="retryCallbackProbe()">重新检测回调映射</button><ol><li data-helper-step hidden><h4>复制本次登录命令</h4><p>选择浏览器所在电脑的系统。命令从当前机器人获取完整脚本后运行，只对本次登录有效、只可获取一次。请确认站点可信，不要分享命令或终端历史。</p><select id="helperPlatform" onchange="resetHelperCommand()"><option value="bash">macOS / Linux（Bash）</option><option value="powershell">Windows（PowerShell）</option></select><textarea id="helperCommand" readonly rows="5" style="width:100%;box-sizing:border-box" aria-label="本次登录助手命令" placeholder="正在生成命令…"></textarea><button id="helperCopy" onclick="copyHelperCommand()" disabled>复制命令</button></li><li data-helper-step hidden><h4>在终端粘贴运行</h4><p>macOS 打开“终端”，Linux 打开终端，Windows 打开 PowerShell，然后粘贴命令并回车。无需手动保存脚本、解压或打开可执行文件，也不会修改系统安全设置。若系统管理策略禁止脚本，请联系管理员。</p><p>macOS/Linux 需要 Python 3.9+，缺少时会明确提示；缺少 cryptography 时在临时 venv 安装加密依赖，结束后清理，不修改系统 Python。Windows 使用 PowerShell 5.1+ 和系统 .NET。</p><p>保持终端开启，显示 Ready 后回到此页面。助手使用本机网络/代理，不继承容器代理；网络失败请检查代理或防火墙，不要关闭 TLS 验证。端口冲突不会自动终止其他程序。取消或超时后助手释放监听。</p><p id="helperConnection" role="status">等待助手连接…</p></li><li><h4>在官方网页授权</h4><p>映射验证成功或助手 Ready 后，点击下面的链接。官方页面自动回调，无需复制代码。</p><a id="officialLoginLink" target="_blank" rel="noopener noreferrer" hidden>打开官方登录页</a></li><li><h4>确认完成</h4><p id="loginWizardResult" role="status">尚未完成。</p><p>只有这里显示“已登录”才算成功；完成网页授权后点击“刷新登录状态”。失败或超时可“重新开始”并获取新命令。</p></li></ol><button onclick="switchRemoteLogin()">改用设备码 / 验证码登录</button></div><p id="loginWizardError" class="danger"></p><div class="toolbar"><button class="primary" onclick="refreshLoginWizard()">刷新登录状态</button><button onclick="restartWizard()">重新开始</button><button onclick="cancelWizard()">取消本次登录</button><button onclick="document.getElementById('loginWizard').close()">收起向导</button></div></dialog>
 <section data-view="models" hidden><div class="section-heading"><div><h3>连接 AI 模型服务</h3><p>选择客户端账号，或填写 OpenRouter 配置。无需同时配置多种方式；数字越小越先尝试，不可用时依次切换 Provider，不会替换任何 Provider 中用户选定的模型。</p></div></div><div id="clientAlerts" class="status danger" role="alert"></div><div id="clientControls" class="service-grid"></div><div class="toolbar"><button class="primary" onclick="saveSelection()">保存模型启用与顺序</button><span id="modelManageStatus" class="status" role="status"></span></div><p id="clientControlError" class="danger"></p></section>
 <section data-view="models" hidden><h3>服务可用性与实测质量</h3><p class="muted">限流、掉线或凭证过期的服务会自动退避，恢复后自动回到轮换；可用的服务按实测质量排序使用。</p><div id="providerHealth"></div></section>
 <section data-view="models" id="modelConfigurationSection" hidden><h3>模型与连接配置</h3><p class="muted">保存会立即重新检查服务是否可用；不会自动调用付费模型。</p><div id="modelConfigurations"></div></section>
 <section data-view="models" hidden><div class="section-heading"><div><h3>添加 OpenRouter 配置</h3><p>每次创建一个很小的插件文件，对应一份独立的 Key、模型、代理和优先级。文件本身不含凭据。</p></div></div><div class="plugin-grid"><label class="field"><b>配置名</b><input id="openRouterPluginName" value="openrouter_2" pattern="openrouter_[a-z0-9_]+" autocomplete="off"><small>以 openrouter_ 开头，只用小写字母、数字和下划线。</small></label><label class="field"><b>插件目录</b><select id="openRouterPluginTarget"></select></label></div><div class="toolbar"><button onclick="createOpenRouterPlugin()">再添加一个 OpenRouter 配置</button><span id="openRouterPluginStatus" class="status muted" role="status"></span></div></section>
 <section data-view="models" hidden class="advanced-section"><details><summary>安装新的模型服务扩展 <span>开发与自定义部署时使用</span></summary><p class="muted">把受信任的 Python 模型服务源码写入已配置目录。安装后保持禁用且不会初始化，请在上方明确启用并保存。</p><div class="plugin-grid"><label class="field"><b>安装目录</b><select id="modelInstallTarget"></select></label><label class="field"><b>服务名</b><input id="modelInstallName" placeholder="example_provider"></label></div><label class="field"><b>Python 源码</b><textarea id="modelInstallSource" rows="14" placeholder="def initialize_plugin(context): ..."></textarea></label><div class="toolbar"><button class="primary" onclick="installModelPlugin()">安装模型服务</button><span id="modelInstallStatus" class="status muted"></span></div></details></section>
+<section data-view="pnl" hidden><div class="section-heading"><div><h3>盈亏总览与逐笔账本</h3><p>成交、手续费、结算和充提按不可变事件记账。实盘与纸面、不同平台和不同币种不会混算；充值和提现只影响净入金，不计为盈利或亏损。</p></div><button class="primary" onclick="refreshPnl(true)">↻ 刷新</button></div><div class="filter-bar pnl-filters"><label>平台<select id="pnlPlatform" onchange="refreshPnl(true)"><option value="">全部平台</option></select></label><label>账户<select id="pnlMode" onchange="refreshPnl(true)"><option value="">实盘与纸面分列</option><option value="live">仅实盘</option><option value="paper">仅纸面</option></select></label><label>币种<select id="pnlCurrency" onchange="refreshPnl(true)"><option value="">全部币种（分列）</option></select></label><label>明细类型<select id="pnlEventType" onchange="refreshPnl(true)"><option value="">全部类型</option></select></label></div><p id="pnlStatus" class="status muted" role="status">尚未读取</p><div id="pnlTotals" class="pnl-total-groups"></div><div id="pnlAccounts"></div><h3>开放仓位</h3><p class="muted">浮动盈亏只使用最近一次真实盘口标记；没有标记时间的旧仓位显示“未知”，不会按零计算。</p><div id="pnlPositions"></div><div class="section-heading pnl-detail-heading"><div><h3>逐笔明细</h3><p class="muted">现金变化、成本变化、已实现盈亏和外部资金流分别列示，可展开查看关联订单与原始证据。</p></div></div><div id="pnlEvents"></div><div class="toolbar"><button id="pnlMore" onclick="loadMorePnl()" hidden>加载更早记录</button></div></section>
 <section data-view="funds" hidden><div class="section-heading"><div><h3>账户余额、充值与转出</h3><p>各平台插件实时读取自己的账户与资金路线。平台协议、币种校验和执行仍由对应插件负责；本页只集中展示和操作。</p></div><button onclick="refreshFunds(true)">刷新资金状态</button></div><div id="fundsWorkspace" class="config-grid"></div></section>
 <section data-view="overview" id="instructionPanel" hidden><h3>转账附言与要求</h3><p class="muted">你充值时写的话。机器人会读懂它是什么——这笔钱的条件、对策略的要求、还是随口一句——然后在每一轮决策里照做，做到哪一步也写在这里。原文和它的理解并排放着，不一致以你的原话为准。删掉的记录，之后的决策研究不再看到它。</p><div class="toolbar"><button onclick="refreshInstructions()">刷新</button><span class="muted" id="instructionStamp"></span></div><div id="instructionList"></div></section><section data-view="overview"><h3>机器人运行控制</h3><p class="muted">主链只要求至少一个可用 AI 模型服务和至少一个成功启动的平台插件。策略、研究与两类过滤插件都是可选增强；插件自行报告能否启动，通用框架不会猜测其私有参数。这里的暂停设置会保留到下次启动。</p><div id="runtimeControl"></div><div class="toolbar"><button class="primary" onclick="saveRuntimeControl()">保存暂停状态</button><button onclick="refreshRuntime()">刷新运行状态</button><span id="runtimeStatus" class="status muted"></span></div></section>
 <section data-view="security" hidden><h3>管理员安全</h3><div id="securityAccessNote" class="info-banner" hidden>当前通过本地 / 私网入口访问，没有创建需要退出的管理员登录会话。公网入口仍需要 Passkey；下方管理的是服务器已保存的登录凭据和会话。</div><p class="muted">Passkey 是设备上的登录凭据，可用指纹、面容或设备解锁验证。可以添加备用凭据，但必须保留至少一个。下方可查看登录设备并撤销会话。</p><div class="toolbar"><input id="newPasskeyName" placeholder="新 Passkey 名称"><button onclick="addPasskey()">添加 Passkey</button><button id="logoutSession" onclick="logout()">退出当前会话</button></div><h4>Passkey</h4><div id="passkeys"></div><h4>登录设备与会话</h4><div class="toolbar"><button onclick="kickSelectedSessions()">踢出选中会话</button></div><div id="sessions"></div></section>
@@ -68,6 +73,7 @@ HTML = r"""<!doctype html><html lang="zh-CN"><head><meta charset="utf-8">
 <section data-view="plugins" hidden id="pluginWorkspace"><div id="pluginCategoryHome"></div><nav id="pluginCategoryNav" class="subnav" aria-label="插件分类"></nav><div id="pluginCategoryGuide"></div><div class="toolbar plugin-management-tools"><button onclick="refreshPlugins()">重新扫描插件文件</button><span class="muted">新增、删除或更新文件后使用；不会替你启用插件。</span></div><div id="pluginManager"></div><div class="toolbar plugin-management-tools"><button class="primary" onclick="saveSelection()">保存启用与顺序</button><span id="manageStatus" class="status" role="status"></span></div></section>
 <section data-view="plugins" hidden><details><summary>安装新的自定义插件</summary><p class="muted">把受信任的 Python 插件源码写入已配置的类别目录。新插件安装后保持禁用，只扫描文件名；启用后才会导入并调用初始化函数。</p><div class="plugin-grid"><label class="field"><b>类别</b><select id="installKind" onchange="renderInstallTargets()"></select></label><label class="field"><b>安装目录</b><select id="installTarget"></select></label><label class="field"><b>插件名</b><input id="installName" placeholder="example_plugin"></label></div><label class="field"><b>Python 源码</b><textarea id="installSource" rows="14" placeholder="def initialize_plugin(context): ..."></textarea></label><div class="toolbar"><button class="primary" onclick="installPlugin()">安装并刷新</button><span id="installStatus" class="status muted"></span></div></details></section>
 <section data-view="decisions" hidden><h3>查看机器人为什么这样做</h3><p class="muted">一条记录是一次判断，不等于一笔成交。点开一条先看四项：发现了什么、怎么分析的、结论（观望 / 买入 / 卖出）、结果（下单成交情况，揭标后的盈亏）；需要时再看“细节”和“原始数据”。</p><ol class="process-strip"><li>发现市场</li><li>收集证据</li><li>模型判断</li><li>风险检查</li><li>执行与跟踪</li></ol><div class="toolbar ledger-toolbar"><button class="primary" onclick="refreshAudit()" title="重新读取决策记录">↻ 刷新</button><span class="muted" id="ledgerStamp">尚未读取</span><span class="muted">这里不自动刷新——展开的记录不会在你读的时候被收起。</span><label class="ledger-language">决策依据语言 <select id="ledgerLanguage" onchange="saveLedgerLanguage(this.value)"><option value="zh">中文</option><option value="en">English</option></select></label><span class="status" id="ledgerLanguageStatus" role="status"></span></div><div class="ledger-tabs" role="tablist"><button role="tab" data-group="concluded" aria-selected="true" onclick="selectLedgerTab('concluded')">有结论 <span class="tab-count" id="tabCount_concluded"></span></button><button role="tab" data-group="running" aria-selected="false" onclick="selectLedgerTab('running')">分析中 <span class="tab-count" id="tabCount_running"></span></button><button role="tab" data-group="failed" aria-selected="false" onclick="selectLedgerTab('failed')">出错 <span class="tab-count" id="tabCount_failed"></span></button></div><p class="muted" id="ledgerTabNote"></p><div class="result-chips" id="ledgerResultChips" role="group" aria-label="按结果筛选"></div><div class="ledger-bulk" id="ledgerBulk"><label class="ledger-pick-all"><input type="checkbox" id="ledgerPickAll" onchange="pickAllShown(this.checked)"> 全选当前显示的</label><span class="muted" id="ledgerPickCount">勾选记录可以一起删除</span><button id="ledgerForgetPicked" onclick="forgetPicked()" disabled>删除所选</button><button class="ledger-forget-category" id="ledgerForgetCategory" onclick="forgetCategory()">删除本类全部…</button></div><div class="filter-bar"><label>平台<input id="platform" placeholder="全部平台"></label><label>模型服务<input id="providerFilter" placeholder="全部服务"></label><label>记录状态<select id="statusFilter"><option value="">全部状态</option><option value="STARTED">分析中</option><option value="PROVIDER_ERROR">模型调用失败</option><option value="RISK_REJECTED">规则拒绝，未执行</option><option value="EXECUTION_ERROR">执行失败</option><option value="COMPLETED">流程已完成</option></select></label><button class="primary" onclick="refreshAudit()">查询记录</button></div></section>
+<section data-view="decisions" hidden><div class="section-heading"><div><h3>市场采集与候选分析</h3><p>这部分来自独立的采集、粗筛和候选选择证据，不会因为删除决策记录而消失；模型失败后采用了什么降级路径也会在这里显示。</p></div></div><div id="discoveryActivity"><p class="muted">正在读取采集记录…</p></div></section>
 <section data-view="decisions" hidden><div class="section-heading"><div><h3>决策记录</h3><p>先显示最近 10 条，向下滚动每次再加载 5 条。点开一条记录才会读取它的完整证据。</p></div></div><div id="decisions"></div></section>
 <section data-view="decisions" hidden class="advanced-section"><details><summary>平台操作明细 <span>排查问题时展开</span></summary><p class="muted">发送给平台的操作和返回结果；请求失败不代表成交。</p><div id="actions"></div></details></section>
 <section data-view="decisions" hidden class="advanced-section"><details><summary>模型对话明细 <span>排查问题时展开</span></summary><p class="muted">一次决策可能多次询问模型。这里用于排查模型调用失败。</p><div id="turns"></div></details></section>
@@ -162,19 +168,24 @@ async function switchRemoteLogin(){return switchLoginMethod('remote')}
 async function switchLoginMethod(method){LOGIN_METHODS.set(ACTIVE_LOGIN.name,method);document.getElementById('wizardLoginMethod').value=method;document.getElementById('remoteLoginCode').value='';try{await wizardAction('cancel');updateLoginWizard(await wizardAction(loginAction(ACTIVE_LOGIN.name)));await refreshClientControls()}catch(e){document.getElementById('loginWizardError').textContent=e.message}}
 async function submitRemoteCode(){const field=document.getElementById('remoteLoginCode'),code=field.value;field.value='';try{updateLoginWizard(await wizardAction('login_code',{flow_id:LAST_LOGIN_STATUS?.flow_id,code}))}catch(e){document.getElementById('loginWizardError').textContent=e.message}}
 async function cancelWizard(){try{await wizardAction('cancel');document.getElementById('loginWizard').close();await refreshClientControls()}catch(e){document.getElementById('loginWizardError').textContent=e.message}}
-let WIZARD_POLL_IN_FLIGHT=false;setInterval(()=>{if(WIZARD_POLL_IN_FLIGHT||!document.getElementById('loginWizard').open)return;WIZARD_POLL_IN_FLIGHT=true;Promise.resolve(refreshClientControls()).finally(()=>{WIZARD_POLL_IN_FLIGHT=false})},2000);
+async function refreshLoginWizard(){try{await refreshClientControls();document.getElementById('loginWizardError').textContent=''}catch(e){document.getElementById('loginWizardError').textContent=e.message}}
 function renderConfigurationPresets(m){for(let [kind,plugins]of Object.entries(m.plugins)){for(let plugin of plugins){let presets=plugin.configuration?.presets||[];if(!presets.length)continue;let root=document.getElementById('plugin_'+kind+'_'+plugin.name).querySelector('.preset-slot'),bar=controlNode('div','',null);bar.className='toolbar';controlNode('span','预置配置（可编辑，保存后生效）：',bar);for(let preset of presets){let button=controlNode('button',preset.label,bar);button.onclick=()=>{if(!confirm('套用 '+preset.label+'？请重新填写此服务的 API Key；保存时会清除旧密钥。'))return;for(let [name,value]of Object.entries(preset.values)){let input=document.getElementById('cfg_'+kind+'_'+plugin.name+'_'+name);if(!input)continue;if(input.type==='checkbox')input.checked=!!value;else input.value=value;if(input.dataset.type==='secret'){input.dataset.clearSecret='true';input.placeholder='请填写此服务的密钥，保存时不会保留旧密钥'}}}}root.prepend(bar)}}}
 
 
 
-async function refreshRuntime(){let r=await get('/api/runtime');renderRuntime(r);refreshInstructions();return r}
+async function refreshRuntime(){let [r]=await Promise.all([get('/api/runtime'),refreshInstructions()]);renderRuntime(r);return r}
+function renderOverviewSummary(s){let ag=s.aggregate_account||{},cards=[['权益',ag.equity],['决策',s.summary?.decisions],['模型调用错误',s.summary?.provider_errors],['信息收集步骤',s.summary?.agent_steps]];document.getElementById('cards').innerHTML=cards.map(x=>'<div class=card><div class=muted>'+esc(x[0])+'</div><h2>'+esc(x[1]??'—')+'</h2></div>').join('');document.getElementById('stamp').textContent='更新 '+new Date().toLocaleTimeString()}
+async function refreshOverview(){let [s,r]=await Promise.all([get('/api/summary'),refreshRuntime()]);renderOverviewSummary(s);return r}
 let FEEDBACK_TIMER;
 function showOperationFeedback(message,state='good',sticky=false){let n=document.getElementById('globalFeedback');clearTimeout(FEEDBACK_TIMER);n.className=state;n.textContent=message;n.hidden=false;n.onclick=()=>{n.hidden=true};if(!sticky)FEEDBACK_TIMER=setTimeout(()=>{n.hidden=true},5000)}
 function setOperationStatus(node,message,state='good'){if(node){node.className='status '+state;node.textContent=message}showOperationFeedback(message,state,state==='pending')}
 function pluginFeedback(kind,name){return document.getElementById('pluginStatus_'+kind+'_'+name)||managementFeedback()}
 function markPluginSelectionDirty(input){let kind=input.dataset.kind,name=input.dataset.name,card=input.closest('.configuration-card'),note=document.getElementById('selectionStatus_'+kind+'_'+name),disabling=input.classList.contains('enable')&&!input.checked;card?.classList.add('pending-change');if(note){note.className='status pending';note.textContent=disabling?'尚未保存：保存后将禁用，并从启动向导的可选项中移除。':'尚未保存：点击本页“保存启用与顺序”后才会生效。'}let s=managementFeedback();s.className='status pending';s.textContent='插件启用或顺序有未保存更改';showOperationFeedback('插件更改尚未保存，请点击“保存启用与顺序”。','pending',true)}
 function markModelSelectionDirty(input){let name=input.dataset.name,note=document.getElementById('modelSelectionStatus_'+name),disabled=input.classList.contains('model-enable')&&!input.checked;if(note){note.className='status pending';note.textContent=disabled?'尚未保存：保存后将停止使用此模型服务。':'尚未保存：点击“保存模型启用与顺序”后生效。'}let status=document.getElementById('modelManageStatus');status.className='status pending';status.textContent='模型服务启用或顺序有未保存更改';showOperationFeedback('模型服务更改尚未保存。','pending',true)}
-async function saveRuntimeControl(){let s=document.getElementById('runtimeStatus');try{let r=await post('/api/runtime/control',{robot_paused:document.getElementById('pauseAll').checked,paused_platforms:[...document.querySelectorAll('.pausePlatform:checked')].map(e=>e.value)});delete document.getElementById('runtimeControl').dataset.dirty;renderRuntime(r.runtime);s.className='status good';s.textContent='暂停状态已保存并生效'}catch(e){s.className='status danger';s.textContent=e.message}}
+async function saveRuntimeControl(){let s=document.getElementById('runtimeStatus'),root=document.getElementById('runtimeControl');s.className='status pending';s.textContent='正在保存暂停状态…';try{let r=await post('/api/runtime/control',{robot_paused:document.getElementById('pauseAll').checked,paused_platforms:[...document.querySelectorAll('.pausePlatform:checked')].map(e=>e.value)});delete root.dataset.dirty;root.dataset.pending='true';renderRuntime(r.runtime);s.className='status good';s.textContent='暂停状态已保存；机器人正在后台切换，进入本页或点击刷新可查看结果'}catch(e){s.className='status danger';s.textContent=e.message}}
+function managerHasDrafts(){return Boolean(document.querySelector('.pending-change')||[...document.querySelectorAll('[data-field]')].some(input=>JSON.stringify(input.type==='checkbox'?input.checked:input.value)!==input.dataset.savedValue||input.dataset.clearSecret==='true'))}
+async function refreshPluginManager(){let m=await get('/api/plugins/manage');if(!managerHasDrafts())renderManager(m);else{let s=managementFeedback();s.className='status pending';s.textContent='已读取服务器状态；本页有未保存修改，因此保留当前表单'}return m}
+async function refreshModelServices(){if(!LAST_MANAGER)return refreshManager();let [r]=await Promise.all([get('/api/runtime'),refreshClientControls()]);renderRuntime(r);renderProviderHealth(r);return r}
 function renderInstallTargets(){if(!LAST_MANAGER)return;let kind=document.getElementById('installKind').value||KINDS[0],dirs=LAST_MANAGER.plugin_directories.categories[kind]||[];document.getElementById('installTarget').innerHTML=dirs.map(d=>'<option value="'+esc(d)+'">'+esc(d)+'</option>').join('')}
 async function installPlugin(){let s=document.getElementById('installStatus');try{let result=await post('/api/plugins/install',{kind:document.getElementById('installKind').value,target_directory:document.getElementById('installTarget').value,name:document.getElementById('installName').value,source:document.getElementById('installSource').value});renderManager(result.management);s.className='status good';s.textContent='已安装：'+result.installed}catch(e){s.className='status danger';s.textContent=e.message}}
 async function refreshManager(){let [m,r]=await Promise.all([get('/api/plugins/manage'),get('/api/runtime')]);renderManager(m);renderRuntime(r);renderProviderHealth(r);await refreshClientControls()}
@@ -199,8 +210,19 @@ async function deletePasskey(id){if(!confirm('删除这个 Passkey？关联登�
 async function kickSessions(ids){let current=ids.includes(SESSION_ID);await post('/api/auth/sessions/kick',{ids});if(current){await dropKey();location='/api/auth/clear'}else await refreshSecurity()}
 async function kickSelectedSessions(){await kickSessions([...document.querySelectorAll('.sessionPick:checked')].map(e=>e.value))}
 async function logout(){try{await post('/api/auth/logout',{})}finally{await dropKey();location='/'}}
-async function refreshAudit(){setLedgerLoading(true);try{let p=document.getElementById('platform').value,q=p?'&platform='+encodeURIComponent(p):'',dq=q+'&provider='+encodeURIComponent(document.getElementById('providerFilter').value)+'&status='+encodeURIComponent(document.getElementById('statusFilter').value);dq+='&group='+encodeURIComponent(LEDGER_TAB);LEDGER_QUERY=dq;LEDGER_PLATFORM_QUERY=q;let [s,d,m]=await Promise.all([get('/api/summary'),get('/api/decisions?limit='+LEDGER_FIRST_PAGE+'&offset=0'+dq+ledgerResultsQuery()),get('/api/manifest')]);let ag=s.aggregate_account||{},cards=[['权益',ag.equity],['决策',s.summary?.decisions],['模型调用错误',s.summary?.provider_errors],['信息收集步骤',s.summary?.agent_steps]];document.getElementById('cards').innerHTML=cards.map(x=>'<div class=card><div class=muted>'+esc(x[0])+'</div><h2>'+esc(x[1]??'—')+'</h2></div>').join('');renderDecisionLedger(d.items);refreshLedgerTabCounts(q);resetDiagnosticPanels();document.getElementById('manifest').textContent=JSON.stringify(m,null,2);document.getElementById('stamp').textContent='更新 '+new Date().toLocaleTimeString();document.getElementById('ledgerStamp').textContent='读取于 '+new Date().toLocaleTimeString()}catch(e){document.getElementById('stamp').textContent='错误: '+e;document.getElementById('decisions').innerHTML='<div class="empty-state"><strong>没能读到决策记录</strong><p>'+esc(String(e&&e.message||e))+'</p></div>'}finally{setLedgerLoading(false)}}
-document.addEventListener('toggle',()=>activateChoiceLists(),true);document.getElementById('platform').onchange=refreshAudit;renderResultChips();Promise.all([refreshSecurity(),refreshManager(),refreshConfiguration(),refreshAudit()]);let POLL_IN_FLIGHT=false;setInterval(()=>{if(POLL_IN_FLIGHT)return;POLL_IN_FLIGHT=true;Promise.all([refreshRuntime(),refreshClientControls()]).finally(()=>{POLL_IN_FLIGHT=false})},REFRESH_MS);
+async function refreshAudit(){
+ setLedgerLoading(true);
+ try{
+  let p=document.getElementById('platform').value,q=p?'&platform='+encodeURIComponent(p):'',dq=q+'&provider='+encodeURIComponent(document.getElementById('providerFilter').value)+'&status='+encodeURIComponent(document.getElementById('statusFilter').value);
+  dq+='&group='+encodeURIComponent(LEDGER_TAB);LEDGER_QUERY=dq;LEDGER_PLATFORM_QUERY=q;
+  let [s,d,m,discovery]=await Promise.all([get('/api/summary'),get('/api/decisions?limit='+LEDGER_FIRST_PAGE+'&offset=0'+dq+ledgerResultsQuery()),get('/api/manifest'),get('/api/discovery/activity?'+q.replace(/^&/,''))]);
+  renderOverviewSummary(s);
+  renderDiscoveryActivity(discovery);renderDecisionLedger(d.items);refreshLedgerTabCounts(q);resetDiagnosticPanels();document.getElementById('manifest').textContent=JSON.stringify(m,null,2);document.getElementById('stamp').textContent='更新 '+new Date().toLocaleTimeString();document.getElementById('ledgerStamp').textContent='读取于 '+new Date().toLocaleTimeString();
+ }catch(e){document.getElementById('stamp').textContent='错误: '+e;document.getElementById('decisions').innerHTML='<div class="empty-state"><strong>没能读到决策记录</strong><p>'+esc(String(e&&e.message||e))+'</p></div>';let discovery=document.getElementById('discoveryActivity');if(discovery)discovery.innerHTML='<div class="empty-state"><strong>没能读到采集记录</strong><p>'+esc(String(e&&e.message||e))+'</p></div>'}
+ finally{setLedgerLoading(false)}
+}
+async function refreshEnteredDashboardView(name){if(name==='overview')return refreshOverview();if(name==='decisions')return refreshAudit();if(name==='pnl')return refreshPnl(true);if(name==='funds')return refreshFunds(true);if(name==='models')return refreshModelServices();if(name==='plugins')return refreshPluginManager();if(name==='settings')return refreshConfiguration();if(name==='security')return refreshSecurity()}
+document.addEventListener('toggle',()=>activateChoiceLists(),true);document.getElementById('platform').onchange=refreshAudit;renderResultChips();
 </script><script src="/assets/dashboard-shell.js?v=__CONSOLE_VERSION__"></script><script src="/assets/environment.js?v=__CONSOLE_VERSION__"></script></body></html>"""
 
 
@@ -504,6 +526,199 @@ class AuditData:
             }
         return build_report(self.config.session_db, self.state_files())
 
+    def pnl_summary(
+        self, platform: str = "", account_mode: str = "", currency: str = ""
+    ) -> dict[str, Any]:
+        current = Config.load(self.config.application_config_file)
+        return build_pnl_summary(
+            self.config.session_db,
+            self.state_files(),
+            current_mode="paper" if current.paper_trading else "live",
+            platform=platform,
+            account_mode=account_mode,
+            currency=currency,
+        )
+
+    def pnl_positions(self, platform: str = "") -> dict[str, Any]:
+        current = Config.load(self.config.application_config_file)
+        return build_pnl_positions(
+            self.state_files(),
+            current_mode="paper" if current.paper_trading else "live",
+            platform=platform,
+        )
+
+    def pnl_events(
+        self,
+        limit: int,
+        offset: int,
+        platform: str = "",
+        account_mode: str = "",
+        currency: str = "",
+        event_type: str = "",
+    ) -> dict[str, Any]:
+        return build_pnl_events(
+            self.config.session_db,
+            limit=limit,
+            offset=offset,
+            platform=platform,
+            account_mode=account_mode,
+            currency=currency,
+            event_type=event_type,
+        )
+
+    def discovery_activity(self, platform: str = "") -> dict[str, Any]:
+        """Show collection and candidate analysis independently of deletable decisions."""
+        connection = sqlite3.connect(self.config.session_db)
+        try:
+            where, params = (" WHERE platform = ?", [platform]) if platform else ("", [])
+            batches = connection.execute(
+                f"""
+                SELECT platform, MAX(observed_at), COUNT(DISTINCT observed_at), COUNT(*)
+                FROM topic_observations{where} GROUP BY platform ORDER BY platform
+                """,
+                params,
+            ).fetchall()
+            activity = []
+            for name, observed_at, batches_count, all_count in batches:
+                latest_batch_count = int(
+                    connection.execute(
+                        "SELECT COUNT(*) FROM topic_observations WHERE platform = ? AND observed_at = ?",
+                        (name, observed_at),
+                    ).fetchone()[0]
+                )
+                observations = connection.execute(
+                    """
+                    SELECT market_topic_id, title, status, liquidity_usdt, volume_usdt, features_json
+                    FROM topic_observations WHERE platform = ? AND observed_at = ?
+                    ORDER BY liquidity_usdt DESC, volume_usdt DESC LIMIT 500
+                    """,
+                    (name, observed_at),
+                ).fetchall()
+                evaluator_counts: dict[str, int] = {}
+                evaluator_providers: set[str] = set()
+                candidates = []
+                for topic_id, title, status, liquidity, volume, features_json in observations:
+                    features = _json_value(features_json) or {}
+                    typed = features.get("typed_evaluation") if isinstance(features, dict) else None
+                    if isinstance(typed, dict):
+                        action = str(typed.get("action") or "UNKNOWN").upper()
+                        evaluator_counts[action] = evaluator_counts.get(action, 0) + 1
+                        if typed.get("provider"):
+                            evaluator_providers.add(str(typed["provider"]))
+                    candidates.append(
+                        {
+                            "market_topic_id": str(topic_id),
+                            "title": str(title),
+                            "status": str(status),
+                            "liquidity_usdt": float(liquidity or 0),
+                            "volume_usdt": float(volume or 0),
+                            "typed_evaluation": typed if isinstance(typed, dict) else None,
+                        }
+                    )
+                plan = connection.execute(
+                    """
+                    SELECT queries_json, next_scan_seconds, reason, resume_json, updated_at
+                    FROM survey_plans WHERE platform = ?
+                    """,
+                    (name,),
+                ).fetchone()
+                activity.append(
+                    {
+                        "platform": str(name),
+                        "latest_observed_at": int(observed_at),
+                        "latest_batch_count": latest_batch_count,
+                        "batches": int(batches_count),
+                        "observations": int(all_count),
+                        "evaluator_counts": evaluator_counts,
+                        "evaluator_providers": sorted(evaluator_providers),
+                        "top_candidates": candidates[:10],
+                        "plan": (
+                            {
+                                "queries": _json_value(plan[0]) or [],
+                                "next_scan_seconds": int(plan[1]),
+                                "reason": str(plan[2]),
+                                "resume": _json_value(plan[3]) or {},
+                                "updated_at": int(plan[4]),
+                            }
+                            if plan else None
+                        ),
+                    }
+                )
+            selection_where = "WHERE selection.platform = ?" if platform else ""
+            selections = connection.execute(
+                f"""
+                SELECT selection.id, selection.selected_at, selection.platform,
+                       selection.strategy, selection.market_topic_id, selection.position,
+                       selection.reason, selection.features_json, selection.outcome_json,
+                       (SELECT observation.title FROM topic_observations AS observation
+                        WHERE observation.platform = selection.platform
+                          AND observation.market_topic_id = selection.market_topic_id
+                        ORDER BY observation.observed_at DESC LIMIT 1)
+                FROM discovery_selections AS selection {selection_where}
+                ORDER BY selection.selected_at DESC, selection.id DESC LIMIT 30
+                """,
+                params,
+            ).fetchall()
+            recent = [
+                {
+                    "id": int(row[0]), "selected_at": int(row[1]), "platform": str(row[2]),
+                    "strategy": str(row[3]), "market_topic_id": str(row[4]),
+                    "position": int(row[5]), "reason": str(row[6]),
+                    "features": _json_value(row[7]) or {}, "outcome": _json_value(row[8]) or {},
+                    "title": str(row[9] or row[4]),
+                }
+                for row in selections
+            ]
+            deletions = [
+                {
+                    "id": int(row[0]), "deleted_at": int(row[1]), "source": str(row[2]),
+                    "scope": _json_value(row[3]) or {}, "result": _json_value(row[4]) or {},
+                }
+                for row in connection.execute(
+                    """
+                    SELECT id, deleted_at, source, scope_json, result_json
+                    FROM decision_deletions ORDER BY deleted_at DESC LIMIT 10
+                    """
+                ).fetchall()
+            ]
+            orphaned = int(
+                connection.execute(
+                    """
+                    SELECT COUNT(DISTINCT action.decision_id) FROM execution_actions AS action
+                    LEFT JOIN decision_ledger AS ledger ON ledger.id = action.decision_id
+                    WHERE action.decision_id IS NOT NULL AND ledger.id IS NULL
+                    """
+                ).fetchone()[0]
+            )
+            incident_where = "WHERE platform = ?" if platform else ""
+            incidents = [
+                {
+                    "id": int(row[0]), "created_at": int(row[1]),
+                    "platform": str(row[2]), "stage": str(row[3]),
+                    "severity": str(row[4]), "message": str(row[5]),
+                    "fallback": str(row[6]), "details": _json_value(row[7]) or {},
+                }
+                for row in connection.execute(
+                    f"""
+                    SELECT id, created_at, platform, stage, severity, message, fallback,
+                           details_json
+                    FROM runtime_incidents {incident_where}
+                    ORDER BY created_at DESC, id DESC LIMIT 30
+                    """,
+                    params,
+                ).fetchall()
+            ]
+        finally:
+            connection.close()
+        return {
+            "platforms": activity,
+            "recent_selections": recent,
+            "incidents": incidents,
+            "decision_deletions": deletions,
+            "orphaned_action_decisions": orphaned,
+            "legacy_deletion_detected": bool(orphaned and not deletions),
+        }
+
     def manifest(self) -> dict[str, Any]:
         current = Config.load(self.config.application_config_file)
         plugins: dict[str, Any] = {}
@@ -612,6 +827,15 @@ class AuditData:
                 # A delete by category with no explicit list is the unbounded one - "every failed
                 # record", "everything concluded" - and the one that leaves the log enormous.
                 answer["log"] = memory.reclaim_log()
+            memory.record_decision_deletion(
+                source="management_console",
+                scope={
+                    "decision_ids": [int(item) for item in decision_ids],
+                    "status": status,
+                    "platform": platform,
+                },
+                result={key: value for key, value in answer.items() if key != "log"},
+            )
             return answer
         finally:
             memory.connection.close()
@@ -1068,8 +1292,7 @@ def create_app(config: Config, *, start_robot: bool = True) -> FastAPI:
     def home(request: Request) -> str:
         if is_local_request(request):
             return (
-                HTML.replace("REFRESH_MS", str(config.dashboard_refresh_seconds * 1000))
-                .replace("__CONSOLE_VERSION__", console_version())
+                HTML.replace("__CONSOLE_VERSION__", console_version())
                 .replace("CSRF_TOKEN", "")
                 .replace("'SESSION_ID'", "''")
                 .replace("LOCAL_ACCESS_VALUE", "true")
@@ -1087,8 +1310,7 @@ def create_app(config: Config, *, start_robot: bool = True) -> FastAPI:
                 .replace("CREDENTIAL_METHOD", "get" if initialized else "create")
             )
         return (
-            HTML.replace("REFRESH_MS", str(config.dashboard_refresh_seconds * 1000))
-            .replace("__CONSOLE_VERSION__", console_version())
+            HTML.replace("__CONSOLE_VERSION__", console_version())
             .replace("CSRF_TOKEN", session.csrf_token)
             .replace("'SESSION_ID'", json.dumps(session.session_id))
             .replace("LOCAL_ACCESS_VALUE", "false")
@@ -1183,6 +1405,25 @@ def create_app(config: Config, *, start_robot: bool = True) -> FastAPI:
             return environment.probe(str(payload.get("route_id", "")))
         if path in {"/api/summary", "/api/report"}:
             return data.summary()
+        if path == "/api/pnl/summary":
+            return data.pnl_summary(
+                query_value(query, "platform"),
+                query_value(query, "account_mode"),
+                query_value(query, "currency"),
+            )
+        if path == "/api/pnl/positions":
+            return data.pnl_positions(query_value(query, "platform"))
+        if path == "/api/pnl/events":
+            return data.pnl_events(
+                max(1, min(200, int(query_value(query, "limit", "50")))),
+                max(0, int(query_value(query, "offset", "0"))),
+                query_value(query, "platform"),
+                query_value(query, "account_mode"),
+                query_value(query, "currency"),
+                query_value(query, "event_type"),
+            )
+        if path == "/api/discovery/activity":
+            return data.discovery_activity(query_value(query, "platform"))
         if path == "/api/manifest":
             return data.manifest()
         if path == "/api/plugins/manage":
@@ -1223,14 +1464,15 @@ def create_app(config: Config, *, start_robot: bool = True) -> FastAPI:
             status["console_version"]=console_version()
             return status
         if path == "/api/runtime/control":
-            runtime.stop()
             result = management.save_runtime_control(
                 robot_paused=payload.get("robot_paused", False),
                 paused_platforms=payload.get("paused_platforms", []),
             )
             if start_robot:
-                runtime.reconcile()
-            return {**result, "runtime": runtime.status()}
+                runtime.reconcile_async()
+            current = runtime.status()
+            current["reconcile_pending"] = bool(start_robot)
+            return {**result, "runtime": current}
         if path == "/api/settings":
             if body is None:
                 return application_settings.manifest()

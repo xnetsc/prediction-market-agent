@@ -177,10 +177,17 @@ class ArchitectureContractTests(unittest.TestCase):
         dashboard = (PACKAGE / "runtime" / "dashboard.py").read_text(encoding="utf-8")
         self.assertIn("CREATE TABLE IF NOT EXISTS decision_ledger", memory)
         self.assertIn("/api/decisions", dashboard)
+        self.assertIn("/api/discovery/activity", dashboard)
+        self.assertIn("/api/pnl/summary", dashboard)
+        self.assertIn("CREATE TABLE IF NOT EXISTS runtime_incidents", memory)
+        self.assertIn("CREATE TABLE IF NOT EXISTS pnl_events", memory)
         self.assertIn("决策账本", dashboard)
+        self.assertIn('href="#pnl"', dashboard)
+        self.assertIn('data-view="pnl"', dashboard)
         self.assertIn('href="#funds"', dashboard)
         self.assertIn('data-view="funds"', dashboard)
         self.assertIn("账户余额、充值与转出", dashboard)
+        self.assertNotIn("setInterval(", dashboard)
         for name in (
             "context_json",
             "research_json",

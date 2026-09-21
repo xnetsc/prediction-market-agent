@@ -18,7 +18,7 @@ from prediction_market_agent.plugin_system.discovery import (
     PluginSpec,
 )
 from prediction_market_agent.plugins.providers._model_catalog import ClientModelCatalog
-from prediction_market_agent.plugins.providers._shared import configured_client_homes, resolve_executable, shared_agent_history_instruction, subprocess_environment, subprocess_output_text
+from prediction_market_agent.plugins.providers._shared import cli_failure_detail, configured_client_homes, resolve_executable, shared_agent_history_instruction, subprocess_environment, subprocess_output_text
 from prediction_market_agent.plugins.providers._client_control import ClientControl, client_fields, client_configuration_loader
 
 
@@ -139,7 +139,13 @@ class CodexCliBackend:
             if completed.returncode != 0 or not output_path.exists():
                 if self.control:
                     self.control.record_auth_failure(completed.stderr + completed.stdout)
-                raise DecisionProviderError(f"Codex failed: {completed.stderr[-1000:]}", raw)
+                detail = cli_failure_detail(
+                    returncode=completed.returncode,
+                    stdout=completed.stdout,
+                    stderr=completed.stderr,
+                    output_exists=output_path.exists(),
+                )
+                raise DecisionProviderError(f"Codex failed: {detail}", raw)
             if active_root is not None and not thread_id:
                 started = self._thread_id(completed.stdout)
                 if not started:

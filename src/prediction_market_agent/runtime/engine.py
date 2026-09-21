@@ -40,6 +40,38 @@ class TradingEngine(MarketEvaluationMixin, ExecutionActionsMixin):
         self.risk = components.risk
         self.api_registry = components.api_registry
         self.platforms = components.platforms
+        for runtime in self.platforms.values():
+            runtime.gateway.pnl_event_sink = self.memory.record_pnl_event
+            if not self.memory.has_pnl_events(
+                platform=runtime.plugin.name, account_mode=runtime.account_mode
+            ):
+                state = runtime.state
+                legacy_activity = bool(
+                    state.orders
+                    or state.positions
+                    or abs(state.realized_pnl) > 1e-12
+                    or abs(state.transferred_out) > 1e-12
+                    or abs(state.cash - state.starting_capital) > 1e-12
+                )
+                self.memory.record_pnl_event(
+                    {
+                        "created_at": state.created_at,
+                        "platform": runtime.plugin.name,
+                        "account_mode": runtime.account_mode,
+                        "currency": runtime.currency,
+                        "event_type": "ACCOUNT_BASELINE",
+                        "cash_after": state.cash,
+                        "equity_after": state.equity,
+                        "realized_pnl_after": state.realized_pnl,
+                        "evidence_status": "partial" if legacy_activity else "complete",
+                        "metadata": {
+                            "starting_capital": state.starting_capital,
+                            "open_positions": len(state.positions),
+                            "orders_before_event_ledger": len(state.orders),
+                            "historical_breakdown_available": not legacy_activity,
+                        },
+                    }
+                )
         self.provider = components.provider
         self.evaluator = components.evaluator
         self.research_contributions = components.research_contributions

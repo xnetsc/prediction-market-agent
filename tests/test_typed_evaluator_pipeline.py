@@ -14,6 +14,7 @@ from prediction_market_agent.agent.decision_evaluator import (
     CandidateAssessment,
     ContinuationAssessment,
     DecisionEvaluatorError,
+    DecisionEvaluatorPool,
 )
 from prediction_market_agent.agent.market_discovery import BuiltInMarketDiscovery
 from prediction_market_agent.plugin_system.contracts import Market, Outcome, Topic, TopicDetail
@@ -604,3 +605,75 @@ class DiscoveryAttributionTests(unittest.TestCase):
         self.assertTrue(final["outcome_complete"])
         self.assertTrue(final["net_pnl_known"])
         self.assertEqual(final["realized_pnl"], 2.5)
+
+
+class ConfidenceThatStandsApartTests(unittest.TestCase):
+    """A timid screener's 0.6, in a round of 0.1s, says something a fixed floor cannot hear.
+
+    The floor stays: sure in absolute terms is still sure. Beside it there is now a second way to
+    be trusted - standing clearly above this round's own answers - and which answers those are is
+    asked of the screener that produced them, because a constant written here would be a number
+    nobody measured applied to every model and every batch alike.
+    """
+
+    class Screener:
+        name = "jev"
+        available = True
+
+        def __init__(self, verdicts=None, fails=False):
+            self.verdicts = verdicts or {}
+            self.fails = fails
+            self.asked = []
+
+        def screen_outliers(self, state, assessments):
+            if self.fails:
+                raise RuntimeError("screener is down")
+            self.asked.append({"state": state, "assessments": assessments})
+            return dict(self.verdicts)
+
+    def _pool(self, *screeners):
+        return DecisionEvaluatorPool(list(screeners))
+
+    def test_only_the_answers_below_the_floor_are_put_back_to_the_screener(self) -> None:
+        screener = self.Screener({"a": True})
+        pool = self._pool(screener)
+        assessments = [
+            {"candidate_id": "a", "confidence": 0.6, "under_review": True},
+            {"candidate_id": "b", "confidence": 0.12, "under_review": True},
+            {"candidate_id": "c", "confidence": 0.95, "under_review": False},
+            {"candidate_id": "d", "confidence": 0.1, "under_review": True},
+        ]
+        self.assertEqual(pool.screen_outliers({}, assessments), {"a": True})
+        sent = screener.asked[0]["assessments"]
+        self.assertEqual(len(sent), 4, "the whole round is supplied; separation is about the batch")
+
+    def test_a_batch_too_small_to_have_a_crowd_is_not_asked_about(self) -> None:
+        screener = self.Screener({"a": True})
+        pool = self._pool(screener)
+        self.assertEqual(pool.screen_outliers({}, [{"candidate_id": "a", "under_review": True}]), {})
+        self.assertEqual(screener.asked, [], "nothing was asked")
+
+    def test_screeners_that_looked_and_disagreed_outvote_one_that_did_not(self) -> None:
+        """This path drops candidates, so one opinion against two is not enough to act on."""
+        pool = self._pool(
+            self.Screener({"a": True}), self.Screener({"a": False}), self.Screener({"a": False})
+        )
+        assessments = [{"candidate_id": key, "under_review": True} for key in "abcd"]
+        self.assertEqual(pool.screen_outliers({}, assessments), {"a": False})
+
+    def test_a_screener_that_fails_is_recorded_and_not_counted_as_agreement(self) -> None:
+        working = self.Screener({"a": True})
+        pool = self._pool(working, self.Screener(fails=True))
+        assessments = [{"candidate_id": key, "under_review": True} for key in "abcd"]
+        self.assertEqual(pool.screen_outliers({}, assessments), {"a": True})
+        self.assertIn("jev", pool.errors)
+
+    def test_the_gate_accepts_either_route(self) -> None:
+        from prediction_market_agent.agent.decision_evaluator import is_high_confidence
+
+        self.assertTrue(is_high_confidence(0.95, 0.9), "the floor still passes what is above it")
+        self.assertFalse(is_high_confidence(0.6, 0.9), "and still refuses what is below it")
+        source = Path("src/prediction_market_agent/runtime/market_discovery.py").read_text()
+        gate = source[source.index("assessment.action in {\"DEFER\", \"REJECT\"}"):][:400]
+        self.assertIn("is_high_confidence", gate)
+        self.assertIn("trusted_outliers", gate)

@@ -15,6 +15,10 @@ def is_high_confidence(value: float | None, threshold: float = DEFAULT_SCREENING
     return value is not None and float(value) >= effective
 
 
+OUTLIER_REVIEW_MINIMUM = 4
+"""Fewer answers than this describe no crowd, so there is nothing for one of them to stand out from."""
+
+
 class DecisionEvaluatorError(RuntimeError):
     """A typed evaluator could not produce a usable answer."""
 
@@ -67,6 +71,48 @@ class DecisionEvaluator(Protocol):
         self, state: dict[str, Any], frontier: list[dict[str, Any]], page: dict[str, Any]
     ) -> ContinuationAssessment: ...
 
+    def screen_outliers(
+        self, state: dict[str, Any], assessments: list[dict[str, Any]]
+    ) -> dict[str, bool]:
+        """Second look at its own first-pass answers: which verdicts stand apart from the batch.
+
+        An absolute floor asks whether the screener is sure in absolute terms. That is the wrong
+        question for a screener that is systematically timid: a batch answering 0.1, 0.15, 0.2 and
+        then 0.6 is saying something about that 0.6 which no fixed cut-off can hear. Which ones
+        those are is a judgement about this batch, so it is put back to the screener rather than
+        settled here by a formula - a rule written into this file would be a constant nobody
+        measured, applied to every model and every batch alike.
+        """
+        ...
+
+def _consistent_upwards(
+    trusted: dict[str, bool], assessments: list[dict[str, Any]]
+) -> dict[str, bool]:
+    """Keep the screener's own answers in an order that "stands apart" has to obey.
+
+    Standing above a batch is monotone by construction: if 0.55 is clear of the crowd, 0.60 in the
+    same batch is clear of it too. A real screener will still answer otherwise now and then - asked
+    here, one called 0.55 separated and 0.60 not - and that is noise, not a finer judgement. So
+    nothing about where the line falls is decided here; only that whatever line the screener drew
+    applies the same way to everything above it.
+    """
+    confidences = {
+        str(item.get("candidate_id")): item.get("confidence")
+        for item in assessments
+        if item.get("confidence") is not None
+    }
+    lowest = min(
+        (confidences[key] for key, value in trusted.items() if value and key in confidences),
+        default=None,
+    )
+    if lowest is None:
+        return trusted
+    return {
+        candidate_id: bool(value or confidences.get(candidate_id, float("-inf")) >= lowest)
+        for candidate_id, value in trusted.items()
+    }
+
+
 class DecisionEvaluatorPool:
     """Run all configured evaluators; failures are errors, never implicit agreement."""
 
@@ -112,6 +158,36 @@ class DecisionEvaluatorPool:
             )
             for candidate_id, answers in grouped.items()
         ]
+
+    def screen_outliers(
+        self, state: dict[str, Any], assessments: list[dict[str, Any]]
+    ) -> dict[str, bool]:
+        """Ask every screener which of its own answers stand apart, and keep what they agree on.
+
+        A candidate is trusted on separation only when more of the screeners that answered say so
+        than not: this path lets a verdict below the floor drop a candidate, so a single evaluator
+        having an opinion is not enough to act on when others looked and disagreed.
+        """
+        votes: dict[str, list[bool]] = {}
+        self.errors = {}
+        if len(assessments) < OUTLIER_REVIEW_MINIMUM:
+            return {}
+        for evaluator in self.evaluators:
+            review = getattr(evaluator, "screen_outliers", None)
+            if not callable(review):
+                continue
+            try:
+                answer = review(state, assessments)
+            except Exception as error:
+                self.errors[evaluator.name] = str(error)[:500]
+                continue
+            for candidate_id, trusted in (answer or {}).items():
+                votes.setdefault(str(candidate_id), []).append(bool(trusted))
+        trusted = {
+            candidate_id: sum(opinions) * 2 > len(opinions)
+            for candidate_id, opinions in votes.items()
+        }
+        return _consistent_upwards(trusted, assessments)
 
     def assess_continuation(
         self, state: dict[str, Any], frontier: list[dict[str, Any]], page: dict[str, Any]

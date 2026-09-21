@@ -98,6 +98,15 @@ REVIEW_SETTLE_MS = 30 * 60 * 1000
 """How long after a selection its downstream decisions are considered final."""
 
 
+def _provider_incident_details(error: Exception) -> dict[str, Any]:
+    raw = str(getattr(error, "raw_output", "") or "")
+    return {
+        "error_type": type(error).__name__,
+        "raw_output": raw[-20_000:],
+        "raw_output_truncated": len(raw) > 20_000,
+    }
+
+
 
 def _band(value: float, edges: tuple[float, ...]) -> str:
     low = 0.0
@@ -243,6 +252,14 @@ class DiscoveryEngine:
             return dict(result.value)
         except (DecisionProviderError, AttributeError, KeyError, TypeError, ValueError) as error:
             LOGGER.warning("discovery continuation provider unavailable on %s: %s", platform, error)
+            self.memory.record_runtime_incident(
+                platform=platform,
+                stage="discovery_continuation",
+                severity="warning",
+                message=str(error),
+                fallback="使用有界扫描规则继续",
+                details=_provider_incident_details(error),
+            )
             return None
 
     @staticmethod
@@ -258,6 +275,38 @@ class DiscoveryEngine:
         if answer.action in {"PROCESS_FRONTIER", "SOURCE_EXHAUSTED"}:
             return answer.marginal_value <= 0.5
         return answer.action == "PAUSE_AND_RESUME"
+
+    def _separated_verdicts(self) -> set[str]:
+        """Which sub-floor screening verdicts this round's screener says stand apart from the rest.
+
+        The floor is one way to be sure and the shape of the batch is another; both are allowed to
+        drop a candidate, and neither is decided here. This asks only about the answers that failed
+        the floor, and only when the screener answered cleanly in the first place - a round whose
+        first pass errored is not one to ask a follow-up question of.
+        """
+        if self.evaluator is None or not self.evaluator.available or self._evaluator_candidate_errors:
+            return set()
+        assessments = [
+            {
+                "candidate_id": candidate_id,
+                "action": item.action,
+                "quality": round(float(item.quality), 4),
+                "confidence": item.confidence,
+                "under_review": (
+                    item.action in {"DEFER", "REJECT"}
+                    and not is_high_confidence(item.confidence, self._screening_threshold)
+                    and item.confidence is not None
+                ),
+            }
+            for candidate_id, item in self._evaluator_assessments.items()
+        ]
+        if not any(item["under_review"] for item in assessments):
+            return set()
+        verdicts = self.evaluator.screen_outliers(
+            {"absolute_floor": self._screening_threshold},
+            assessments,
+        )
+        return {candidate_id for candidate_id, trusted in verdicts.items() if trusted}
 
     def _adaptive_survey(
         self, plugin: PredictionMarketApiPlugin, budget: DiscoveryBudget
@@ -744,6 +793,7 @@ class DiscoveryEngine:
             research=self.research_contributions,
         )
         horizon_days = int(getattr(self.strategy, "horizon_days", 0) or 0)
+        trusted_outliers = self._separated_verdicts()
         excluded_topics: list[tuple[Topic, Any]] = []
         eligible_pool: list[Topic] = []
         for topic in pool:
@@ -752,7 +802,10 @@ class DiscoveryEngine:
                 assessment is not None
                 and not self._evaluator_candidate_errors
                 and assessment.action in {"DEFER", "REJECT"}
-                and is_high_confidence(assessment.confidence, self._screening_threshold)
+                and (
+                    is_high_confidence(assessment.confidence, self._screening_threshold)
+                    or topic.topic_id in trusted_outliers
+                )
             ):
                 excluded_topics.append((topic, assessment))
             else:
@@ -915,6 +968,17 @@ class DiscoveryEngine:
                 "market discovery agent unavailable on %s; falling back to prescore order: %s",
                 platform,
                 error,
+            )
+            self.memory.record_runtime_incident(
+                platform=platform,
+                stage="market_selection",
+                severity="error",
+                message=str(error),
+                fallback="按 prescore 顺序机械选择候选",
+                details={
+                    **_provider_incident_details(error),
+                    "decision_id": decision_id,
+                },
             )
             self.memory.complete_decision(
                 decision_id,

@@ -99,8 +99,18 @@ class WaitingOutALimitTests(unittest.TestCase):
         self.assertFalse(state.ready(time.time() + COOLDOWN_CEILING + 60))
 
     def test_the_end_is_read_from_the_error_itself(self) -> None:
+        """The date comes from the clock, not from the calendar this test was written on.
+
+        It used to name a fixed day, which made the test a slow-burning alarm: it passed until that
+        afternoon arrived and then failed for everyone, saying nothing about the parsing it exists
+        to check.
+        """
+        when = datetime.fromtimestamp(time.time() + 3 * 86400, tz=timezone.utc)
         registry = ProviderHealthRegistry(("claude",))
-        registry.record_failure("claude", "You've hit your weekly limit · resets Sep 21, 1pm (UTC)")
+        registry.record_failure(
+            "claude",
+            f"You've hit your weekly limit · resets {when.strftime('%b %-d')}, 1pm (UTC)",
+        )
         self.assertGreater(registry.state("claude").recovers_at, time.time())
 
     def test_the_operator_can_still_bring_it_back_early(self) -> None:

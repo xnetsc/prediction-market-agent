@@ -50,6 +50,9 @@ class RobotRuntimeManager:
         # finishes is a console that looks broken exactly when it has the most to report.
         self._snapshot: dict[str, Any] = dict(self._status)
         self._busy_since = 0.0
+        self._reconcile_request_lock = threading.Lock()
+        self._reconcile_generation = 0
+        self._reconcile_thread: threading.Thread | None = None
 
     @staticmethod
     def _safe_readiness(catalog: PluginCatalog, kind: str, name: str) -> PluginReadiness:
@@ -132,6 +135,39 @@ class RobotRuntimeManager:
                 timer.start()
                 status = self.status()
             return status
+
+    def reconcile_async(self) -> None:
+        """Queue a reconcile without making an HTTP request wait for an active model call.
+
+        Saving pause state is a small durable write.  Stopping the current runtime can take until
+        an in-flight CLI invocation returns, so tying the two together made the Save button look
+        dead for minutes.  Multiple saves collapse to the newest generation and are reconciled in
+        order after whichever operation currently owns the runtime lock finishes.
+        """
+        with self._reconcile_request_lock:
+            self._reconcile_generation += 1
+            if self._reconcile_thread is not None and self._reconcile_thread.is_alive():
+                return
+            thread = threading.Thread(
+                target=self._run_requested_reconcile,
+                name="robot-runtime-reconcile",
+                daemon=True,
+            )
+            self._reconcile_thread = thread
+            thread.start()
+
+    def _run_requested_reconcile(self) -> None:
+        while True:
+            with self._reconcile_request_lock:
+                generation = self._reconcile_generation
+            try:
+                self.reconcile()
+            except Exception:
+                LOGGER.exception("background robot reconcile failed")
+            with self._reconcile_request_lock:
+                if generation == self._reconcile_generation:
+                    self._reconcile_thread = None
+                    return
 
     def _reconcile_locked(self, *, start_runtimes: bool = True) -> dict[str, Any]:
         self._stop_locked()

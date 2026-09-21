@@ -132,17 +132,18 @@ class ReadingIsNotInterruptedTests(unittest.TestCase):
 
     def test_the_ledger_is_not_on_the_timer(self) -> None:
         shell = self._shell()
-        timer = shell[shell.index("if(POLL_IN_FLIGHT)return;"):]
-        self.assertNotIn("refreshAudit", timer[:300], "history does not change once written")
+        self.assertNotIn("setInterval(", shell)
+        self.assertNotIn("POLL_IN_FLIGHT", shell)
 
-    def test_the_timer_waits_for_the_last_answer_before_asking_again(self) -> None:
-        """A poll that fires regardless queues on a slow restart until no worker thread is left,
-        and then every page of the console stops answering, not just the one that was polling."""
+    def test_each_page_refreshes_once_when_entered_instead_of_polling(self) -> None:
         shell = self._shell()
-        timer = shell[shell.index("let POLL_IN_FLIGHT=false;"):][:400]
-        self.assertIn("if(POLL_IN_FLIGHT)return;", timer)
-        self.assertIn("POLL_IN_FLIGHT=true;", timer)
-        self.assertIn("finally(()=>{POLL_IN_FLIGHT=false})", timer)
+        navigation = Path(
+            "src/prediction_market_agent/runtime/static/dashboard-shell.js"
+        ).read_text()
+        self.assertIn("refreshEnteredDashboardView", shell)
+        self.assertIn("name!==currentView", navigation)
+        self.assertIn("refreshEnteredDashboardView(name)", navigation)
+        self.assertNotIn("setInterval(", navigation)
 
     def test_there_is_a_refresh_control_and_it_says_when_it_last_read(self) -> None:
         shell = self._shell()

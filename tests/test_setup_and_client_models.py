@@ -12,7 +12,7 @@ from prediction_market_agent.core.config import Config
 from prediction_market_agent.runtime.dashboard import create_app
 from prediction_market_agent.runtime.setup_guide import setup_guide
 from prediction_market_agent.plugins.providers._model_catalog import ClientModelCatalog, normalize_models
-from prediction_market_agent.plugins.providers._shared import configured_client_homes
+from prediction_market_agent.plugins.providers._shared import cli_failure_detail, configured_client_homes
 from prediction_market_agent.plugins.providers.codex import CodexCliBackend
 from prediction_market_agent.plugins.providers.claude import ClaudeCliBackend
 
@@ -22,6 +22,15 @@ def plugin(name,ready,fields=()):
 
 
 class SetupGuideTests(unittest.TestCase):
+    def test_cli_failure_uses_stdout_when_stderr_is_empty(self):
+        detail = cli_failure_detail(
+            returncode=1,
+            stdout='{"type":"error","error":{"message":"quota exhausted"}}\n',
+            stderr="",
+            output_exists=False,
+        )
+        self.assertEqual(detail, "quota exhausted")
+
     def test_shared_history_homes_follow_both_private_client_configs(self):
         with tempfile.TemporaryDirectory() as directory:
             root=Path(directory);configs=root/'config'/'plugins';configs.mkdir(parents=True)

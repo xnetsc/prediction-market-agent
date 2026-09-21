@@ -56,6 +56,32 @@ class PlatformOwnedLoopTests(unittest.TestCase):
 
 
 class RuntimeManagerTests(unittest.TestCase):
+    def test_async_reconcile_returns_immediately_and_keeps_the_latest_request(self) -> None:
+        manager = RobotRuntimeManager(Path("/tmp/application.json"))
+        entered = threading.Event()
+        release = threading.Event()
+        finished = threading.Event()
+        calls = []
+
+        def reconcile(*, start_runtimes=True):
+            calls.append(start_runtimes)
+            entered.set()
+            if len(calls) == 1:
+                release.wait(2)
+            if len(calls) == 2:
+                finished.set()
+            return {}
+
+        manager.reconcile = reconcile
+        manager.reconcile_async()
+        self.assertTrue(entered.wait(1))
+        manager.reconcile_async()
+        self.assertEqual(calls, [True], "a second save must not block behind the active reconcile")
+        release.set()
+        self.assertTrue(finished.wait(2), "the newest saved choice must be reconciled next")
+        if manager._reconcile_thread is not None:
+            manager._reconcile_thread.join(2)
+
     @staticmethod
     def _config() -> Config:
         return Config(

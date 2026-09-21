@@ -206,3 +206,45 @@ class DecisionAndMemoryTests(unittest.TestCase):
             records = AuditData(cfg).records("actions", 10, 0, "binance")
             self.assertEqual(records["items"][0]["action"], "BUY_FAILED")
             self.assertEqual(records["items"][0]["result"]["error"], "server rejected")
+
+    def test_collection_activity_survives_without_decision_rows_and_shows_incidents(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            cfg = Config(
+                state_file=root / "state.json",
+                session_db=root / "sessions.sqlite3",
+                market_api_plugins=("venue",),
+            )
+            memory = SessionMemory(cfg.session_db)
+            memory.record_topic_observations(
+                platform="venue",
+                observations=[{
+                    "market_topic_id": "topic-1",
+                    "title": "One market",
+                    "status": "OPEN",
+                    "liquidity_usdt": 100,
+                    "volume_usdt": 200,
+                    "features": {"typed_evaluation": {
+                        "action": "DEFER", "confidence": 0.92, "provider": "jev"
+                    }},
+                }],
+            )
+            memory.record_discovery_selection(
+                platform="venue", strategy="built-in", market_topic_id="topic-1",
+                position=1, reason="candidate reason", priors=[], features={},
+            )
+            memory.record_runtime_incident(
+                platform="venue", stage="market_selection", severity="error",
+                message="schema violation", fallback="prescore",
+            )
+            memory.close()
+            data = AuditData(cfg)
+            try:
+                activity = data.discovery_activity("venue")
+            finally:
+                data.management.shutdown()
+            self.assertEqual(activity["platforms"][0]["latest_batch_count"], 1)
+            self.assertEqual(activity["platforms"][0]["evaluator_counts"], {"DEFER": 1})
+            self.assertEqual(activity["recent_selections"][0]["title"], "One market")
+            self.assertEqual(activity["incidents"][0]["message"], "schema violation")
+            self.assertEqual(activity["incidents"][0]["fallback"], "prescore")

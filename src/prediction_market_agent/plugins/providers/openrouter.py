@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import io
 import json
+import logging
 import hashlib
 import os
 import secrets
@@ -34,6 +36,7 @@ from prediction_market_agent.plugin_system.discovery import (
 )
 from prediction_market_agent.plugin_system.network_diagnostics import configured_proxy_route
 from prediction_market_agent.plugins.providers._shared import (
+    cli_failure_detail,
     client_subprocess_environment,
     configured_client_homes,
     resolve_executable,
@@ -51,6 +54,98 @@ OPENROUTER_CREDITS_URL = OPENROUTER_API_BASE + "/credits"
 REQUIRED_MODEL_PARAMETERS = frozenset({"structured_outputs", "tools"})
 CODEX_REQUIRED_MODEL_PARAMETERS = REQUIRED_MODEL_PARAMETERS
 AGENT_CLI_OPTIONS = ("AUTO", "CODEX", "CLAUDE")
+
+
+def _openrouter_schema_prompt(prompt: str, schema: dict[str, Any]) -> str:
+    """Make the Responses compatibility boundary explicit to the selected model.
+
+    Codex correctly sends ``text.format=json_schema`` to the private bridge, but OpenRouter's
+    Responses compatibility route can acknowledge that field while a routed model still answers
+    as ordinary prose.  The native schema remains on the API request; this duplicated instruction
+    prevents the model from treating the final contract as an unnamed Codex-only detail.
+    """
+    return (
+        prompt
+        + "\n\nFINAL RESPONSE CONTRACT (MANDATORY): Return exactly one JSON object and no "
+        "explanation. It must validate against this complete JSON Schema:\n"
+        + json.dumps(schema, ensure_ascii=False, separators=(",", ":"))
+    )
+
+
+def _schema_error(value: Any, schema: dict[str, Any], path: str = "$") -> str:
+    """Validate the JSON-Schema subset used by runtime contracts without coercion."""
+    expected = schema.get("type")
+    allowed = expected if isinstance(expected, list) else [expected] if expected else []
+
+    def is_type(name: str) -> bool:
+        return {
+            "null": value is None,
+            "object": isinstance(value, dict),
+            "array": isinstance(value, list),
+            "string": isinstance(value, str),
+            "boolean": isinstance(value, bool),
+            "integer": isinstance(value, int) and not isinstance(value, bool),
+            "number": isinstance(value, (int, float)) and not isinstance(value, bool),
+        }.get(name, False)
+
+    if allowed and not any(is_type(str(name)) for name in allowed):
+        return f"{path} must be {' or '.join(map(str, allowed))}"
+    if "enum" in schema and value not in schema["enum"]:
+        return f"{path} is not one of the allowed values"
+    if isinstance(value, dict):
+        properties = schema.get("properties") or {}
+        missing = [name for name in schema.get("required") or [] if name not in value]
+        if missing:
+            return f"{path} is missing {', '.join(missing)}"
+        additional = schema.get("additionalProperties", True)
+        for name, child in value.items():
+            child_schema = properties.get(name)
+            if child_schema is None:
+                if additional is False:
+                    return f"{path}.{name} is not allowed"
+                child_schema = additional if isinstance(additional, dict) else None
+            if isinstance(child_schema, dict):
+                error = _schema_error(child, child_schema, f"{path}.{name}")
+                if error:
+                    return error
+    elif isinstance(value, list):
+        if "minItems" in schema and len(value) < int(schema["minItems"]):
+            return f"{path} has too few items"
+        if "maxItems" in schema and len(value) > int(schema["maxItems"]):
+            return f"{path} has too many items"
+        item_schema = schema.get("items")
+        if isinstance(item_schema, dict):
+            for index, child in enumerate(value):
+                error = _schema_error(child, item_schema, f"{path}[{index}]")
+                if error:
+                    return error
+    elif isinstance(value, str):
+        if "minLength" in schema and len(value) < int(schema["minLength"]):
+            return f"{path} is too short"
+        if "maxLength" in schema and len(value) > int(schema["maxLength"]):
+            return f"{path} is too long"
+    elif isinstance(value, (int, float)) and not isinstance(value, bool):
+        if "minimum" in schema and value < schema["minimum"]:
+            return f"{path} is below the minimum"
+        if "maximum" in schema and value > schema["maximum"]:
+            return f"{path} is above the maximum"
+    return ""
+
+
+def _strict_schema_object(text: str, schema: dict[str, Any]) -> dict[str, Any]:
+    """Accept plain JSON or one bare JSON code fence, then enforce the whole schema."""
+    candidate = text.strip()
+    if candidate.startswith("```json\n") and candidate.endswith("```"):
+        candidate = candidate[8:-3].strip()
+    elif candidate.startswith("```\n") and candidate.endswith("```"):
+        candidate = candidate[4:-3].strip()
+    value = json.loads(candidate)
+    if not isinstance(value, dict):
+        raise ValueError("root is not an object")
+    error = _schema_error(value, schema)
+    if error:
+        raise ValueError(error)
+    return value
 
 
 def _server_tool_parameters(tool: dict[str, Any]) -> dict[str, Any]:
@@ -143,6 +238,28 @@ def _adapt_server_tools(
         adapted.append(tool)
     body["tools"] = adapted
     return namespace_names
+
+
+LOGGER = logging.getLogger(__name__)
+
+NO_ENDPOINTS = "No endpoints found that can handle the requested parameters"
+
+
+def _routing_refusal(stdout: str, stderr: str) -> str:
+    """OpenRouter's own words when it declined to route, which name the fix.
+
+    "No endpoints found that can handle the requested parameters" is not a model failing to answer:
+    it is this model having no provider that supports everything the request asked for at once -
+    a schema, tools, reasoning. The operator can act on that sentence and cannot act on "returned
+    no content", so it is carried up when the client printed it.
+    """
+    for text in (stderr, stdout):
+        if NO_ENDPOINTS in (text or ""):
+            return (
+                "OpenRouter 说这个模型没有端点能同时满足本次请求的全部参数"
+                "（结构化输出、工具等）。换一个支持这些参数的模型，或在模型配置里降低要求。"
+            )
+    return ""
 
 
 def _adapt_optional_parameters(
@@ -699,18 +816,7 @@ class _BridgeHandler(BaseHTTPRequestHandler):
             namespace_names = _adapt_server_tools(
                 body, server.native_model_parameters
             )
-            request = urllib.request.Request(
-                upstream,
-                data=json.dumps(body).encode("utf-8"),
-                headers=self._upstream_headers(
-                    server, content_type="application/json"
-                ),
-                method="POST",
-            )
-            with server.opener.open(request, timeout=server.timeout) as response:
-                payload = response.read(64 * 1024 * 1024)
-                content_type = response.headers.get("Content-Type", "application/json")
-                status = response.status
+            payload, content_type, status = self._ask_upstream(server, upstream, body)
             payload = _restore_namespace_calls(
                 payload, content_type, namespace_names
             )
@@ -718,11 +824,57 @@ class _BridgeHandler(BaseHTTPRequestHandler):
         except urllib.error.HTTPError as error:
             detail = error.read(1024 * 1024)
             self._write(error.code, "application/json", detail)
+
         except Exception as error:
             payload = json.dumps(
                 {"error": {"message": str(error)[:1000], "type": "openrouter_bridge"}}
             ).encode("utf-8")
             self._write(502, "application/json", payload)
+
+    def _ask_upstream(self, server, upstream: str, body: dict[str, Any]):
+        """Send the round, and when routing refuses the parameters, send it once more without them.
+
+        `require_parameters` asks OpenRouter to route only to a provider supporting everything in
+        the request. It is a good default and a bad ultimatum: a model whose endpoints support the
+        schema but not, say, tool calls answers 404 "No endpoints found", and the round dies having
+        never been attempted. Dropping the flag costs nothing here, because the schema is checked
+        against the returned object on the way out either way - the guarantee comes from that check,
+        not from the routing hint.
+        """
+        attempts = [body]
+        relaxed = {key: value for key, value in body.items() if key != "provider"}
+        routing = {key: value for key, value in (body.get("provider") or {}).items()
+                   if key != "require_parameters"}
+        if routing:
+            relaxed["provider"] = routing
+        attempts.append(relaxed)
+        for index, attempt in enumerate(attempts):
+            request = urllib.request.Request(
+                upstream,
+                data=json.dumps(attempt).encode("utf-8"),
+                headers=self._upstream_headers(server, content_type="application/json"),
+                method="POST",
+            )
+            try:
+                with server.opener.open(request, timeout=server.timeout) as response:
+                    return (
+                        response.read(64 * 1024 * 1024),
+                        response.headers.get("Content-Type", "application/json"),
+                        response.status,
+                    )
+            except urllib.error.HTTPError as error:
+                detail = error.read(1024 * 1024)
+                text = detail.decode("utf-8", errors="replace")
+                if index + 1 < len(attempts) and error.code == 404 and NO_ENDPOINTS in text:
+                    LOGGER.warning(
+                        "OpenRouter refused to route %s with require_parameters; retrying without it",
+                        server.model,
+                    )
+                    continue
+                raise urllib.error.HTTPError(
+                    error.url, error.code, error.reason, error.headers, io.BytesIO(detail)
+                ) from error
+        raise RuntimeError("unreachable")
 
 
 class OpenRouterBackend:
@@ -1044,7 +1196,7 @@ class OpenRouterBackend:
             try:
                 completed = subprocess.run(
                     command,
-                    input=self._with_history(prompt),
+                    input=self._with_history(_openrouter_schema_prompt(prompt, schema)),
                     text=True,
                     capture_output=True,
                     timeout=self.timeout + 15,
@@ -1075,8 +1227,14 @@ class OpenRouterBackend:
                 ensure_ascii=False,
             )
             if completed.returncode != 0 or not output_path.exists():
+                detail = cli_failure_detail(
+                    returncode=completed.returncode,
+                    stdout=completed.stdout,
+                    stderr=completed.stderr,
+                    output_exists=output_path.exists(),
+                )
                 raise DecisionProviderError(
-                    f"OpenRouter runtime failed: {completed.stderr[-1000:]}", raw
+                    f"OpenRouter runtime failed: {detail}", raw
                 )
             if active_root is not None and not thread_id:
                 started = self._thread_id(completed.stdout)
@@ -1085,16 +1243,24 @@ class OpenRouterBackend:
                         "Codex did not report the new OpenRouter round session id", raw
                     )
                 self._sessions.thread_id = started
-            try:
-                value = json.loads(output_path.read_text(encoding="utf-8"))
-            except json.JSONDecodeError as error:
+            written = output_path.read_text(encoding="utf-8") if output_path.exists() else ""
+            if not written.strip():
+                # Nothing came back at all. Reported as a schema violation this read as "the model
+                # answered badly" and sent everyone looking at prompts and schemas; the ledger row
+                # said `[]`. An empty answer is a failed call, and the routing refusal that usually
+                # causes it is printed by the client rather than returned here.
                 raise DecisionProviderError(
-                    "OpenRouter returned invalid JSON", raw
-                ) from error
-            if not isinstance(value, dict):
-                raise DecisionProviderError(
-                    "OpenRouter returned non-object JSON", raw
+                    "OpenRouter returned no content at all"
+                    + (f"：{_routing_refusal(completed.stdout, completed.stderr)}"
+                       if _routing_refusal(completed.stdout, completed.stderr) else ""),
+                    raw,
                 )
+            try:
+                value = _strict_schema_object(written, schema)
+            except (json.JSONDecodeError, ValueError) as error:
+                raise DecisionProviderError(
+                    f"OpenRouter returned output that violates the required schema: {error}", raw
+                ) from error
             return StructuredResult(value, raw)
         finally:
             if temporary is not None:
@@ -1203,8 +1369,14 @@ class OpenRouterBackend:
                 ensure_ascii=False,
             )
             if completed.returncode != 0:
+                detail = cli_failure_detail(
+                    returncode=completed.returncode,
+                    stdout=completed.stdout,
+                    stderr=completed.stderr,
+                    output_exists=True,
+                )
                 raise DecisionProviderError(
-                    f"OpenRouter Claude Agent failed: {completed.stderr[-1000:]}", raw
+                    f"OpenRouter Claude Agent failed: {detail}", raw
                 )
             try:
                 envelope = json.loads(completed.stdout)
@@ -1216,6 +1388,13 @@ class OpenRouterBackend:
             if not isinstance(value, dict):
                 raise DecisionProviderError(
                     "OpenRouter Claude Agent returned non-object structured output", raw
+                )
+            schema_error = _schema_error(value, schema)
+            if schema_error:
+                raise DecisionProviderError(
+                    "OpenRouter Claude Agent returned output that violates the required schema: "
+                    + schema_error,
+                    raw,
                 )
             if active_root is not None:
                 self._sessions.started = True

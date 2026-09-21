@@ -53,6 +53,7 @@ class ErrorClassificationTests(unittest.TestCase):
             "invalid api key": "auth",
             "Connection timed out": "transient",
             "HTTP 503 service unavailable": "transient",
+            "Selected model is at capacity": "transient",
             "Invalid decision payload: 'rationale'": "contract",
             "something nobody predicted": "unknown",
         }

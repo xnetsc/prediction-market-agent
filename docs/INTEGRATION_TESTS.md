@@ -12,17 +12,17 @@ PYTHONPATH=src .venv/bin/python -m compileall -q src tests examples
 PYTHONPATH=src .venv/bin/python -m pytest -q --ignore=tests/test_api_integration.py
 ```
 
-2026-09-20 本轮 typed evaluator、OpenRouter、自适应发现与资金连接优化后的最终结果为
-`659 passed, 246 subtests passed`，另有 2 条第三方弃用警告。其中覆盖：
+2026-09-20 本轮 typed evaluator、OpenRouter、自适应发现、资金连接、盈亏账本和控制台刷新优化后的最终结果为
+`671 passed, 250 subtests passed`，另有 2 条第三方弃用警告。其中覆盖：
 
 - 八类插件发现、禁用不导入、启停/刷新/teardown、动态配置和示例 schema 一致性；
 - 平台自有 runtime、立即首轮、可中断等待、失败退避和通用业务事件队列；
 - 内置/用户发现与决策策略、策略进化、Provider 健康与质量排序；
 - Codex、Claude、OpenRouter 的模型目录、结构化输出、代理、登录和凭据迁移；
 - 两类过滤插件、资金请求、实盘网关与独立纸面交易状态；
-- SQLite 台账、分页/筛选/删除、并发 HTTP、Passkey/ECDH、回环与公网访问隔离；
+- SQLite 决策/异常/盈亏台账、分页/筛选/删除、并发 HTTP、Passkey/ECDH、回环与公网访问隔离；
 - 本地启动器、宿主机代理、回调转发、registry 拉取和云部署契约；
-- 公共示例字段完整、无退役字段、默认值一致，管理示例不启用不存在的插件；
+- 公共示例字段完整、无退役字段、默认值一致，旧轮询字段升级时忽略并安全清理，管理示例不启用不存在的插件；
 - 测试树不允许 `skip`、`xfail` 或 `expectedFailure` 装饰器。
 
 完整 `pytest` 默认包含生产联网测试，因此在 Binance 受限网络中会保留真实失败，而不是显示全绿。需要只看
@@ -42,11 +42,11 @@ PYTHONPATH=src .venv/bin/python -m pytest -q tests/test_api_integration.py
 写探针使用无效资源标识和极小金额，成功标准是请求确实到达服务器并收到预期拒绝；若本地配置检查、mock
 或纸面传输提前返回，测试失败。权限或远端行为改变时必须人工复核输入，不能把意外接受当作通过。
 
-2026-09-20 最终结果为 `4 passed, 9 subtests passed`。首次复跑暴露出当前继承代理单次往返约 5.3 秒，
-Binance 已同步的正确时间戳仍会刚好超过其默认 5 秒 `recvWindow`；签名读请求现显式携带 20 秒窗口，仍低于
-客户端 15 秒单次网络超时所需的有限缓冲，不吞掉鉴权或时钟错误。修正后 Binance、Polymarket 单平台和
-双平台注册矩阵全部通过。此前曾出现一次 Polymarket TLS EOF，单项立即复跑与最终完整矩阵均通过，因此
-保留为外部瞬态连接记录，未加入静默重试。
+2026-09-20 最新结果为 `2 passed, 2 failed, 9 subtests passed`：Polymarket 与真实未认证写拒绝探针通过；
+当前宿主出口访问 Binance 公共 `/api/v3/time` 即收到地域限制 HTTP 451，因此 Binance 单平台和双平台用例
+如实失败，不能把它记成代码通过。更早一次可访问出口的复跑曾暴露继承代理单次往返约 5.3 秒，使正确
+时间戳超过默认 5 秒 `recvWindow`；签名读请求已显式携带 20 秒窗口，随后当时的四项矩阵全部通过。该历史
+成功不覆盖本轮 451 结果，也没有为生产联网测试增加 skip、mock 或静默绕路。
 
 ## OpenRouter 严格 schema 验收
 
@@ -61,6 +61,8 @@ Binance 已同步的正确时间戳仍会刚好超过其默认 5 秒 `recvWindow
   在缺少原生支持时展平，JSON 与 SSE 返回中的调用名都会复原；Claude 非 Anthropic 路由会移除不受支持的
   默认 `output_config.effort`，但保留 structured format、thinking、context management 和普通工具；
 - 推理请求强制 `provider.require_parameters=true`；
+- OpenRouter-Codex 最终提示包含完整 schema；只兼容一个纯 JSON Markdown 围栏，随后仍严格校验类型、
+  必填、枚举、范围和额外字段，散文或夹杂解释不会被提取成交易结果；
 - 本机回环加入 `NO_PROXY`，桥到 OpenRouter 的远端请求仍经过该插件解析后的统一或独立代理；
 - 真实本地 HTTP 代理收到远端目录/推理请求，证明透明守卫没有屏蔽原有网络代理层；
 - 普通推理 Key 与可选 Management Key 分别查询 `/key` 用量和 `/credits` 账户余额，凭据不回显且查询沿用该插件代理；
@@ -68,6 +70,8 @@ Binance 已同步的正确时间戳仍会刚好超过其默认 5 秒 `recvWindow
 - `AUTO/CODEX/CLAUDE` 选择、CLI 缺失判定、同一轮 session resume、下一轮新 session，以及给两种 CLI
   同时提供统一账本和双方私有历史路径；路径从双方 AUTH_DIRECTORY 解析，OpenRouter 子进程也使用所选
   CLI 的同一私有 HOME。
+- Codex 非零退出会从 stderr 或 stdout JSON 失败事件中提取实际原因；模型容量过载归为 transient，和
+  短时/周额度窗口分开处理。
 
 evaluator 专项位于 `tests/test_typed_evaluator_pipeline.py`：验证 Jev 原生 OpenRouter Decisions 请求、其它
 OpenRouter 模型的 `structured_outputs` 过滤与 `require_parameters`、自定义普通聊天模型原生优先的 strict
@@ -85,11 +89,18 @@ OpenRouter 模型的 `structured_outputs` 过滤与 `require_parameters`、自�
 探针随后均以 `INHERIT` 通过，没有改为 DIRECT，也没有修改保存配置。这只证明当时账号与路由可用，不
 保证未来额度、模型端点或供应商状态。
 
+2026-09-20 又在运行容器中用保存的 `qwen/qwen3.7-max` 和 Codex CLI 复现了 Responses 路由接受 schema
+却返回散文/Markdown 围栏的问题；应用上述双重契约和本地严格复验后，同 Key、模型、CLI 与代理返回合法
+对象。探针只要求一个合成枚举和短理由，不读取市场、不写交易。随后原生 `gpt-5.6-terra` 的 shell + schema
+探针也通过；此前空白 Codex 错误从客户端私有失败记录确认是 `serverOverloaded`/模型容量过载，不是容器
+CLI 或账户 schema 配置损坏。
+
 ## 浏览器验收
 
-`tests/dashboard_ui.cjs` 使用本机 Chrome，在 390、768、1440px 检查七区导航、插件中心七类二级页、
+`tests/dashboard_ui.cjs` 使用本机 Chrome，在 390、768、1440px 检查八区导航、插件中心七类二级页、
 模型服务、三种 Provider 常驻账号/额度信息、OpenRouter 受限模型选择与独立配置生成、未保存草稿、启用顺序、
-决策五步、网络折叠和远程登录弹窗。模型列表、账号读数和写请求由浏览器测试局部 fixture 拦截，不向运行
+独立采集/异常证据、盈亏账本、决策五步、网络折叠和远程登录弹窗，并断言页面停留期间不会后台轮询
+runtime 或模型 controls。模型列表、账号读数和写请求由浏览器测试局部 fixture 拦截，不向运行
 部署提交测试 Key、配置、验证码或交易。
 
 ```bash
@@ -113,10 +124,10 @@ iOS Safari、Android 真机、Windows 原生浏览器或真实账号授权验收
 .venv/bin/python -m build --wheel --outdir runtime-data/build-openrouter
 ```
 
-2026-09-20 最终 wheel 为 436402 字节，SHA-256
-`3b480471b023eb2f51b1ac484062e592bae46270d3e50f0030ed06ac346aa0c8`。已检查包内包含
+2026-09-20 最终 wheel 为 453145 字节，SHA-256
+`1537acde09bc522df679c0e982b2b4b99ee68250f74405b15170b09ce64aa777`。已检查包内包含
 `agent/decision_evaluator.py`、`plugin_system/config_io.py`、`plugins/evaluators/jev.py`、
-`plugins/providers/openrouter.py` 和新版 dashboard
+`plugins/providers/openrouter.py`、`runtime/pnl.py` 和新版 dashboard
 静态资源，不包含任何已退役的通用兼容 Provider 模块。
 
 `.github/workflows/container.yml` 的 `login-helpers` 作业在 macOS、Ubuntu 和 Windows 原生运行终端助手与

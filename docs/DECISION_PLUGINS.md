@@ -16,12 +16,17 @@
   版本化 Web Search/Fetch 声明转成 OpenRouter server tools、把 Codex namespace tools 展平并在返回时复原，
   并移除非 Anthropic 路由不接受的 Claude 默认 `output_config.effort` 提示；JSON format、thinking、context
   management、普通工具和消息内容保持不变。不把 Agent 协议降级成 Chat Completions，也不自己重做 CLI
-  的 Agent 循环。
+  的 Agent 循环。部分 Responses 兼容路由会接收 `json_schema` 却仍给最终对象包 Markdown 围栏；因此
+  OpenRouter-Codex 路径同时把完整 schema 写进最终提示，只剥离一个纯 JSON 围栏并在本地严格复验整个
+  schema。夹杂散文、缺字段、额外字段或范围错误仍按 contract failure 处理。
 
 三种 Provider 都严格遵守各自保存的模型选择。Codex/Claude 留空表示明确使用当前客户端默认；
 填写后每次命令都传入该型号。OpenRouter 必须选择一个型号，守卫会同时固定 CLI 命令、本地模型目录与
 上游请求中的 `model`；不支持的组合直接不可用，不自动改用其他模型。Provider 故障转移只会切换到用户已启用的
 另一个 Provider，不改写任何 Provider 自己的模型设置。
+Codex 的结构化失败事件可能写在 JSONL stdout 而不是 stderr；运行层同时解析两者，并区分模型容量过载
+（transient）、账号额度窗口（rate_limit）和 schema 违约（contract）。界面不会再把容量过载显示成空错误
+或误报为周/短时额度耗尽。
 
 每个发现、分析或决策顶层任务创建一个新的官方 CLI 会话；同一轮里的业务工具往返和插件反问续接该会话，
 下一轮不沿用。机器人保存完整审计记录，但不替 CLI 做滑动窗口、摘要或自动历史拼接。新会话首条输入明确

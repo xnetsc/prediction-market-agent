@@ -19,8 +19,10 @@ const fs = require('node:fs');
             const context = await browser.newContext({viewport:{width,height:1000},reducedMotion:'reduce'});
             const page = await context.newPage();
             let remoteModel=null;
+            const passiveReads=[];
             await page.route('**/api/local',async route=>{
                 const message=route.request().postDataJSON();
+                if(['/api/runtime','/api/plugins/controls'].includes(message.url))passiveReads.push(message.url);
                 if(message.url==='/api/plugins/controls'){
                     const checked=Math.floor(Date.now()/1000);
                     await route.fulfill({json:{items:[
@@ -66,8 +68,11 @@ const fs = require('node:fs');
             assert.equal(await page.locator('[data-setup-panel="required"]').isVisible(),false);
             assert((await page.locator('[data-setup-panel="optional"]').innerText()).includes('未就绪不会阻止机器人启动'));
             await page.locator('[data-setup-tab="required"]').click();
+            const readsAfterEntry=passiveReads.length;
+            await page.waitForTimeout(1200);
+            assert.equal(passiveReads.length,readsAfterEntry,'the console must not poll runtime or controls in the background');
             if(output)await page.screenshot({path:path.join(output,`setup-${width}.png`),fullPage:true});
-            for (const view of ['overview','funds','models','plugins','decisions','settings','security']) {
+            for (const view of ['overview','decisions','pnl','funds','models','plugins','settings','security']) {
                 await page.evaluate(view => {location.hash=view}, view);
                 await page.waitForFunction(view => document.querySelector('.nav-link[aria-current="page"]').hash==='#'+view, view);
                 assert(await page.locator(`[data-view="${view}"]`).first().isVisible());
@@ -86,6 +91,14 @@ const fs = require('node:fs');
                     await page.locator('#environmentFacts summary').click();
                     assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth>innerWidth),false);
                     if(output)await page.screenshot({path:path.join(output,`environment-${width}.png`)});
+                }
+                if(view==='decisions'){
+                    assert.equal(await page.locator('#discoveryActivity').count(),1);
+                }
+                if(view==='pnl'){
+                    assert.equal(await page.locator('#pnlTotals').count(),1);
+                    assert.equal(await page.locator('#pnlAccounts').count(),1);
+                    assert.equal(await page.locator('#pnlEvents').count(),1);
                 }
             }
             if(width<801){
@@ -287,6 +300,7 @@ const fs = require('node:fs');
             await page.unroute('**/api/local');
             await page.evaluate(()=>{location.hash='decisions'});
             await page.waitForFunction(()=>document.querySelector('.nav-link[aria-current="page"]').hash==='#decisions');
+            await page.waitForFunction(()=>!document.getElementById('decisions').hasAttribute('aria-busy'));
             await page.evaluate(()=>{LEDGER_TAB='concluded';LEDGER_RESULTS=new Set();renderDecisionLedger([{id:'ui-fixture',created_at:new Date().toISOString(),platform:'demo',market_topic_id:'Only a browser fixture',context:{market:{title:'Very long market '.repeat(20)}},final_decision:{action:'HOLD',rationale:'Evidence is incomplete; do not place an order.'},proposed_decision:{action:'HOLD',rationale:'Need research'},status:'NO_ACTION',group:'concluded',result:'HOLD',agent_steps:2,research:[{source:'fixture'}]}])});
             await page.locator('.decision-entry>summary').click();
             assert.equal(await page.locator('.ledger-four>dt').count(),4);

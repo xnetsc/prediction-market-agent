@@ -115,6 +115,39 @@ class SessionMemory:
             );
             CREATE INDEX IF NOT EXISTS idx_decision_ledger_lookup
                 ON decision_ledger(platform, token_id, created_at DESC);
+            CREATE TABLE IF NOT EXISTS pnl_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                created_at INTEGER NOT NULL,
+                platform TEXT NOT NULL,
+                account_mode TEXT NOT NULL,
+                currency TEXT NOT NULL,
+                event_type TEXT NOT NULL,
+                market_topic_id TEXT NOT NULL DEFAULT '',
+                market_id TEXT NOT NULL DEFAULT '',
+                token_id TEXT NOT NULL DEFAULT '',
+                order_id TEXT NOT NULL DEFAULT '',
+                decision_id INTEGER,
+                quantity REAL,
+                price REAL,
+                cash_delta REAL,
+                position_quantity_delta REAL,
+                cost_basis_delta REAL,
+                realized_pnl_delta REAL,
+                fee REAL,
+                external_flow_delta REAL,
+                cash_after REAL,
+                equity_after REAL,
+                realized_pnl_after REAL,
+                evidence_status TEXT NOT NULL DEFAULT 'complete',
+                metadata_json TEXT NOT NULL DEFAULT '{}'
+            );
+            CREATE INDEX IF NOT EXISTS idx_pnl_events_account
+                ON pnl_events(platform, account_mode, currency, created_at DESC, id DESC);
+            CREATE INDEX IF NOT EXISTS idx_pnl_events_market
+                ON pnl_events(platform, token_id, created_at DESC, id DESC);
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_pnl_events_order_type
+                ON pnl_events(platform, account_mode, order_id, event_type)
+                WHERE order_id != '';
             """
         )
         ledger_columns = {
@@ -195,6 +228,8 @@ class SessionMemory:
             );
             CREATE INDEX IF NOT EXISTS idx_topic_observation
                 ON topic_observations(platform, market_topic_id, observed_at DESC);
+            CREATE INDEX IF NOT EXISTS idx_topic_observation_batch
+                ON topic_observations(platform, observed_at DESC);
             CREATE TABLE IF NOT EXISTS discovery_selections (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 selected_at INTEGER NOT NULL,
@@ -274,6 +309,29 @@ class SessionMemory:
                 ON provider_reviews(subject_provider, created_at DESC);
             CREATE INDEX IF NOT EXISTS idx_provider_review_decision
                 ON provider_reviews(decision_id);
+            CREATE TABLE IF NOT EXISTS decision_deletions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                deleted_at INTEGER NOT NULL,
+                source TEXT NOT NULL,
+                scope_json TEXT NOT NULL,
+                result_json TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_decision_deletions_time
+                ON decision_deletions(deleted_at DESC);
+            CREATE TABLE IF NOT EXISTS runtime_incidents (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                created_at INTEGER NOT NULL,
+                platform TEXT NOT NULL,
+                stage TEXT NOT NULL,
+                severity TEXT NOT NULL,
+                message TEXT NOT NULL,
+                fallback TEXT NOT NULL DEFAULT '',
+                details_json TEXT NOT NULL DEFAULT '{}'
+            );
+            CREATE INDEX IF NOT EXISTS idx_runtime_incidents_time
+                ON runtime_incidents(created_at DESC, id DESC);
+            CREATE INDEX IF NOT EXISTS idx_runtime_incidents_platform
+                ON runtime_incidents(platform, created_at DESC, id DESC);
             """
         )
         selection_columns = {
@@ -453,6 +511,129 @@ class SessionMemory:
                 self._json(request),
                 self._json(result),
                 decision_id,
+            ),
+        )
+        self.connection.commit()
+        return int(cursor.lastrowid)
+
+    def record_pnl_event(self, event: dict[str, Any]) -> int:
+        """Append one immutable accounting fact after a platform accepted an action.
+
+        A transfer is an external flow, not profit.  A fill or redemption may change realised
+        profit.  Keeping those as separate columns lets the reader reconcile cash without ever
+        calling a deposit a win.  Unknown basis is stored as SQL NULL rather than zero.
+        """
+        required = ("platform", "account_mode", "currency", "event_type")
+        missing = [name for name in required if not str(event.get(name, "")).strip()]
+        if missing:
+            raise ValueError(f"P&L event is missing: {', '.join(missing)}")
+        created_at = int(event.get("created_at") or time.time() * 1000)
+        fields = (
+            "quantity", "price", "cash_delta", "position_quantity_delta",
+            "cost_basis_delta", "realized_pnl_delta", "fee", "external_flow_delta",
+            "cash_after", "equity_after", "realized_pnl_after",
+        )
+        numbers = [None if event.get(name) is None else float(event[name]) for name in fields]
+        try:
+            cursor = self.connection.execute(
+                """
+                INSERT INTO pnl_events(
+                    created_at, platform, account_mode, currency, event_type,
+                    market_topic_id, market_id, token_id, order_id, decision_id,
+                    quantity, price, cash_delta, position_quantity_delta, cost_basis_delta,
+                    realized_pnl_delta, fee, external_flow_delta, cash_after, equity_after,
+                    realized_pnl_after, evidence_status, metadata_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    created_at,
+                    str(event["platform"]),
+                    str(event["account_mode"]).lower(),
+                    str(event["currency"]).upper(),
+                    str(event["event_type"]).upper(),
+                    str(event.get("market_topic_id") or ""),
+                    str(event.get("market_id") or ""),
+                    str(event.get("token_id") or ""),
+                    str(event.get("order_id") or ""),
+                    None if event.get("decision_id") is None else int(event["decision_id"]),
+                    *numbers,
+                    str(event.get("evidence_status") or "complete"),
+                    self._json(event.get("metadata") or {}),
+                ),
+            )
+        except sqlite3.IntegrityError as error:
+            # An order response may be retried after the venue has already accepted it.  The
+            # unique order/type key makes that replay idempotent without hiding other DB errors.
+            order_id = str(event.get("order_id") or "")
+            if not order_id:
+                raise
+            row = self.connection.execute(
+                """
+                SELECT id FROM pnl_events
+                WHERE platform = ? AND account_mode = ? AND order_id = ? AND event_type = ?
+                """,
+                (
+                    str(event["platform"]), str(event["account_mode"]).lower(), order_id,
+                    str(event["event_type"]).upper(),
+                ),
+            ).fetchone()
+            if row is None:
+                raise error
+            return int(row[0])
+        self.connection.commit()
+        return int(cursor.lastrowid)
+
+    def has_pnl_events(self, *, platform: str, account_mode: str) -> bool:
+        row = self.connection.execute(
+            "SELECT 1 FROM pnl_events WHERE platform = ? AND account_mode = ? LIMIT 1",
+            (platform, account_mode.lower()),
+        ).fetchone()
+        return row is not None
+
+    def record_decision_deletion(
+        self, *, source: str, scope: dict[str, Any], result: dict[str, Any]
+    ) -> int:
+        cursor = self.connection.execute(
+            """
+            INSERT INTO decision_deletions(deleted_at, source, scope_json, result_json)
+            VALUES (?, ?, ?, ?)
+            """,
+            (int(time.time() * 1000), source, self._json(scope), self._json(result)),
+        )
+        self.connection.commit()
+        return int(cursor.lastrowid)
+
+    def record_runtime_incident(
+        self,
+        *,
+        platform: str,
+        stage: str,
+        severity: str,
+        message: str,
+        fallback: str = "",
+        details: dict[str, Any] | None = None,
+    ) -> int:
+        """Persist an operational failure even when the workflow safely falls back.
+
+        Discovery has several deliberate fallback paths.  A log line alone makes those paths
+        invisible in the console, while putting them in the decision ledger incorrectly implies
+        that a market decision was completed.  Incidents are therefore their own append-only
+        evidence stream.
+        """
+        cursor = self.connection.execute(
+            """
+            INSERT INTO runtime_incidents(
+                created_at, platform, stage, severity, message, fallback, details_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                int(time.time() * 1000),
+                str(platform),
+                str(stage),
+                str(severity),
+                str(message),
+                str(fallback),
+                self._json(details or {}),
             ),
         )
         self.connection.commit()

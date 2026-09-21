@@ -3,6 +3,7 @@
     const views = {
         overview: ['运行概览', '查看运行状态与关键指标，管理各平台的暂停状态。', 'WORKSPACE / OVERVIEW'],
         decisions: ['决策账本', '从研究证据到执行结果，追溯每一次决策的完整过程。', 'WORKSPACE / DECISIONS'],
+        pnl: ['盈亏账本', '分账户查看已实现、浮动盈亏和每一笔会计事件。', 'WORKSPACE / PROFIT & LOSS'],
         funds: ['资金管理', '查看平台余额，按平台实时支持的链与币种充值或转出。', 'WORKSPACE / FUNDS'],
         models: ['模型服务', '连接 Codex、Claude 或 OpenRouter，为机器人选择可用的模型。', 'CONFIGURATION / MODELS'],
         plugins: ['插件中心', '按用途选择能力，了解它们如何配合，再配置需要的部分。', 'CONFIGURATION / PLUGINS'],
@@ -12,6 +13,7 @@
     const menu = document.getElementById('menuToggle');
     const sidebar = document.getElementById('sidebar');
     const narrow = matchMedia('(max-width:800px)');
+    let currentView = '';
     function closeMenu() { document.body.classList.remove('menu-open'); menu.setAttribute('aria-expanded', 'false'); sidebar.inert = narrow.matches; }
     narrow.addEventListener('change', closeMenu);
     menu.addEventListener('click', () => {
@@ -23,7 +25,7 @@
     document.getElementById('navBackdrop').addEventListener('click', closeMenu);
     for (const link of document.querySelectorAll('.nav-link')) link.addEventListener('click', closeMenu);
     document.addEventListener('keydown', event => { if (event.key === 'Escape') { closeMenu(); menu.focus(); } });
-    function showView() {
+    function showView(refresh = true, closeNavigation = true) {
         let hash;
         try { hash = decodeURIComponent(location.hash.slice(1)); } catch (_) { hash = ''; }
         if(hash==='plugins/decision_provider'){
@@ -55,7 +57,7 @@
         document.getElementById('pageDescription').textContent=views[name][1];
         document.getElementById('pageEyebrow').textContent=help&&name==='plugins'?'插件中心 / '+help.title:views[name][2];
         document.title=document.getElementById('pageTitle').textContent+' · Prediction Agent';
-        closeMenu();
+        if(closeNavigation)closeMenu();
         if (target) {
             const detail = target.querySelector('.plugin-config');
             if (detail) detail.open = true;
@@ -63,10 +65,14 @@
         } else window.scrollTo(0, 0);
         activateChoiceLists();
         if(modelName)loadCurrentModelConfig(modelName);
-        if(name==='funds')refreshFunds();
+        const entered=name!==currentView;currentView=name;
+        if(refresh&&entered)Promise.resolve(refreshEnteredDashboardView(name)).catch(error=>{
+            const feedback=document.getElementById('globalFeedback');
+            feedback.textContent=error?.message||String(error);feedback.hidden=false;
+        });
     }
     window.showDashboardView = showView;
-    window.addEventListener('hashchange', showView);
+    window.addEventListener('hashchange', ()=>showView(true));
     showView();
     document.getElementById('accessMode').textContent = typeof LOCAL_ACCESS !== 'undefined' && LOCAL_ACCESS ? '本地 / 私网访问' : '加密管理会话';
     document.getElementById('securityAccessNote').hidden=!LOCAL_ACCESS;

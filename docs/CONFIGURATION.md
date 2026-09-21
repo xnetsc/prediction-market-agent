@@ -56,9 +56,11 @@
 | `shared_no_proxy` | 统一代理的绕过主机，回环地址始终自动加入 |
 | `host_proxy_file` | 一键启动器写入的宿主机代理检测/转发信息文件 |
 | `dashboard_host`、`dashboard_port` | 管理服务监听地址和端口 |
-| `dashboard_refresh_seconds` | 页面自动刷新间隔 |
 | `environment_probe_services` | 手动公网出口查询的 HTTPS 服务列表 JSON；空数组禁用 |
 | `environment_probe_timeout` | 每个出口查询服务的超时秒数，范围 1–30 |
+
+旧版 `dashboard_refresh_seconds` 已退役：控制台不再后台轮询。升级时旧 JSON 中该字段会被忽略，并在下次
+保存任一程序设置时自动清除；它不会重新出现在界面或影响请求频率。
 
 应用配置示例见 `examples/application.json`。通用 Config 只提供各插件可选择继承的统一网络代理，不包含
 任何平台专属代理、平台 URL、API Key、私钥、实盘账户资金、扫描间隔、分页/每轮规模、失败退避、

@@ -193,10 +193,6 @@ APPLICATION_FIELDS = (
         "serve 命令监听的 TCP 端口；修改后需重启。", 8765, 1, 65535,
     ),
     ApplicationConfigField(
-        "dashboard_refresh_seconds", "界面刷新间隔（秒）", "integer",
-        "运行状态和插件状态在浏览器中的自动刷新间隔。决策账本不在其中——它是只写历史，写完不会变，由页面顶部的刷新按钮手动读取，免得在你读的时候把展开的记录收起来。", 5, 1, 300,
-    ),
-    ApplicationConfigField(
         "environment_probe_services", "公网出口查询服务 JSON", "string",
         "仅手动查询时使用。JSON 数组元素含 name、HTTPS url、ip_field、可选 port_field；不发送业务凭据。空数组禁用。保存后下次查询生效。",
         '[{"name":"ipify IPv4","url":"https://api.ipify.org?format=json","ip_field":"ip"},'
@@ -210,6 +206,7 @@ APPLICATION_FIELDS = (
 )
 
 _FIELD_MAP = {field.name: field for field in APPLICATION_FIELDS}
+RETIRED_APPLICATION_FIELDS = frozenset({"dashboard_refresh_seconds"})
 
 
 class ApplicationConfigStore:
@@ -238,12 +235,16 @@ class ApplicationConfigStore:
         values = document.get("values", {})
         if not isinstance(values, dict):
             raise ValueError("Application configuration values must be an object")
-        unknown = sorted(set(values) - set(_FIELD_MAP))
+        unknown = sorted(set(values) - set(_FIELD_MAP) - RETIRED_APPLICATION_FIELDS)
         if unknown:
             raise ValueError(
                 "Application configuration has unknown fields: " + ", ".join(unknown)
             )
-        return {name: _FIELD_MAP[name].validate(value) for name, value in values.items()}
+        return {
+            name: _FIELD_MAP[name].validate(value)
+            for name, value in values.items()
+            if name in _FIELD_MAP
+        }
 
     def values(self) -> dict[str, str | int]:
         overrides = self._read_overrides()
@@ -358,7 +359,6 @@ class Config:
     research_tool_plugins: tuple[str, ...] = ()
     dashboard_host: str = "127.0.0.1"
     dashboard_port: int = 8765
-    dashboard_refresh_seconds: int = 5
     shared_http_proxy: str = "HOST"
     shared_no_proxy: str = "localhost,127.0.0.1,::1"
     host_proxy_file: Path = Path(".deployment/host-proxy.json")
@@ -404,7 +404,6 @@ class Config:
             research_tool_plugins=managed.selected("research_tool", ()),
             dashboard_host=str(values["dashboard_host"]),
             dashboard_port=int(values["dashboard_port"]),
-            dashboard_refresh_seconds=int(values["dashboard_refresh_seconds"]),
             shared_http_proxy=str(values["shared_http_proxy"]),
             shared_no_proxy=str(values["shared_no_proxy"]),
             host_proxy_file=_runtime_path(
@@ -427,8 +426,6 @@ class Config:
             raise ValueError("dashboard_host must be a supported listen address")
         if not 1 <= self.dashboard_port <= 65535:
             raise ValueError("dashboard_port must be in [1, 65535]")
-        if not 1 <= self.dashboard_refresh_seconds <= 300:
-            raise ValueError("dashboard_refresh_seconds must be in [1, 300]")
         validate_proxy_selector(
             self.shared_http_proxy,
             field_name="shared_http_proxy",

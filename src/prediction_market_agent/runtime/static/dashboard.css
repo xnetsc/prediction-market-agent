@@ -61,6 +61,17 @@ dialog{background:var(--surface)!important;color:var(--ink)!important;border:1px
 .usage-stamp{padding-top:4px;border-top:1px solid var(--line)}
 .account-actions{align-items:center;margin-top:10px}.account-actions button{font-size:12px;padding:7px 10px;min-height:36px}.account-actions small{flex:1 1 180px;color:var(--muted)}
 
+/* Profit and loss is an accounting view, not another decision card.  Totals stay grouped by
+   mode and currency, and every event keeps its debit/credit columns visible when expanded. */
+.pnl-total-groups{display:grid;gap:16px;margin:18px 0}.pnl-total-group{border:1px solid var(--line);border-radius:12px;padding:18px;background:#fbfdfc}.pnl-total-group .section-heading{margin-bottom:12px}.pnl-cards{margin:0;grid-template-columns:repeat(3,minmax(0,1fr))}.pnl-cards .card{min-width:0}.pnl-cards h2{font-size:20px;overflow-wrap:anywhere}.pnl-cards h2 small{font-size:11px;color:var(--muted);font-weight:500}.pnl-gain{color:#1f7a4c}.pnl-loss{color:#b04028}.pnl-detail-heading{margin-top:28px}.pnl-event{border:1px solid var(--line);border-radius:10px;margin:10px 0;padding:0 16px;background:#fff}.pnl-event>summary{display:flex;justify-content:space-between;align-items:center;gap:18px;padding:15px 0;cursor:pointer;list-style:none}.pnl-event>summary::-webkit-details-marker{display:none}.pnl-event>summary>span:first-child{min-width:0;overflow-wrap:anywhere}.pnl-event>summary small{display:block;color:var(--muted);font-size:11px;margin-top:4px}.pnl-event>summary>span:last-child{white-space:nowrap;font-variant-numeric:tabular-nums}.pnl-event-facts{display:grid;grid-template-columns:max-content 1fr max-content 1fr;gap:8px 14px;padding:14px;background:#f6f9f7;border-radius:8px;font-size:13px}.pnl-event-facts dt{color:var(--muted)}.pnl-event-facts dd{margin:0;font-variant-numeric:tabular-nums}.pnl-event pre{max-height:280px;overflow:auto;white-space:pre-wrap;word-break:break-word}.pnl-filters{margin-bottom:10px}
+@media(max-width:900px){.pnl-cards{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media(max-width:650px){.pnl-cards{grid-template-columns:minmax(0,1fr)}.pnl-event>summary{align-items:flex-start;flex-direction:column;gap:8px}.pnl-event-facts{grid-template-columns:max-content 1fr}.pnl-event{padding:0 12px}}
+
+/* Collection evidence is not a decision row.  Keep the persistent scan facts and fallback
+   incidents visually separate so an empty/deleted ledger never reads as "nothing ran". */
+.discovery-platform{border:1px solid var(--line);border-radius:12px;padding:16px;margin:12px 0;background:#fbfdfc}.discovery-platform .section-heading{margin-bottom:8px}.discovery-platform .summary-line{margin:8px 0}.discovery-incidents{margin:12px 0}.runtime-incident{border:1px solid var(--line);border-left:4px solid #d6a51d;border-radius:8px;padding:0 14px;margin:8px 0;background:#fffaf0}.runtime-incident.danger{border-left-color:#b04028;background:#fff7f5}.runtime-incident>summary{display:flex;justify-content:space-between;gap:12px;cursor:pointer;padding:12px 0}.runtime-incident pre{max-height:280px;overflow:auto;white-space:pre-wrap;word-break:break-word}.info-banner.danger{border-color:#dfaaa0;background:#fff7f5}
+@media(max-width:650px){.runtime-incident>summary{flex-direction:column;gap:4px}}
+
 /* A value a plugin handed back for the operator to keep. It has to survive being looked at:
    selectable, wrapping rather than truncating, and not styled like a transient status line. */
 .notice-reveal{display:flex;gap:.5rem;align-items:flex-start;margin-top:.5rem}

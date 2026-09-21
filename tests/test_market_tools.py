@@ -107,7 +107,8 @@ class ToolCoverageTests(unittest.TestCase):
         plumbing = {
             "create_write_gateway", "write_transport", "configuration_manifest",
             "topic_page_size", "capabilities", "name", "mark",
-            "business_risk",     # the injected filter callback, not a capability
+            "business_risk", "account_mode", "currency", "pnl_event_sink",
+            # Injected accounting/risk plumbing, not model-callable capabilities.
         }
         covered = set(DESCRIPTIONS) | {
             "GET_KLINES", "SEARCH_MARKETS", "REFRESH_MARKET",  # supplied by standard_research
