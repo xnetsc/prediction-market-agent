@@ -764,3 +764,31 @@ class TheCoreComesFirstTests(unittest.TestCase):
         self.assertIn("这个页面怎么看", guide[:80])
         self.assertIn("process-strip", guide[:900], "the five-step diagram is inside it")
         self.assertNotIn('<details class="page-guide" open', shell)
+
+
+class EachRoundSaysWhatItDidTests(unittest.TestCase):
+    """Every discovery round was titled "发现轮次", which distinguishes it from nothing.
+
+    The facts are on the row already: how many candidates it looked at, how many it took, which one
+    first, and why it took none. A list of forty rounds with the same four characters on each is a
+    list nobody can scan.
+    """
+
+    def _views(self) -> str:
+        return Path("src/prediction_market_agent/runtime/static/dashboard-views.js").read_text()
+
+    def test_the_generic_label_is_gone(self) -> None:
+        views = self._views()
+        self.assertNotIn("isDiscovery(r)?'发现轮次'", views)
+        self.assertIn("isDiscovery(r)?discoveryTitle(r)", views)
+
+    def test_the_title_is_built_from_what_the_round_did(self) -> None:
+        block = self._views()
+        block = block[block.index("function discoveryTitle("):]
+        for piece in ("选中 ", "一个都没选", "正在挑选", "没选成", "candidates"):
+            self.assertIn(piece, block[:1400], piece)
+
+    def test_a_round_that_took_nothing_says_why(self) -> None:
+        block = self._views()
+        block = block[block.index("function discoveryTitle("):]
+        self.assertIn("final.skipped_reason", block[:1400])

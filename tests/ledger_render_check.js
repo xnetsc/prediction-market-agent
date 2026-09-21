@@ -45,8 +45,10 @@ const rejected = { ...base, id: 5, status: 'RISK_REJECTED', group: 'concluded', 
   context: { market: { title: 'X' } }, final_decision: { action: 'BUY', notional_usdt: 50, order_type: 'LIMIT', limit_price: 0.3 },
   risk_decision: { outcome: 'REJECT', reason: '单笔超过上限' } };
 
-expect('hold', render([hold]), ['发现了什么', 'Merz 在 10 月 31 日前离任', '买一 0.12 / 卖一 0.13', '市场隐含 12.5%', '模型估计 14%',
-  '>观望<', '按结论不下单', '观望：卖价 0.13 已反映 14% 估计', '细节', '原始数据']);
+// 「怎么分析的」要说它做了什么、凭什么，不是把下面数字带里的估计值再念一遍。
+expect('hold', render([hold]), ['发现了什么', 'Merz 在 10 月 31 日前离任', '买一 0.12 / 卖一 0.13', '市场隐含 12.5%',
+  '价差已反映', '>观望<', '按结论不下单', '观望：卖价 0.13 已反映 14% 估计', '细节', '原始数据']);
+if (render([hold]).includes('模型估计 14%，信心 55%')) failures.push('hold: the analysis line is still repeating the numbers strip');
 expect('buy', render([buy]), ['>买入<', '12 USDT', '市价', '模拟', '已成交', '28.5 份 @ 0.42', '揭标：赢', '盈亏 +16.46 USDT']);
 expect('discovery', render([discovery]), ['24 个候选市场', '6 个读到了真实价差', '选出 1 个', 'NATO x Russia 冲突',
   '交给决策阶段分析 1 个标的', '约 15 分钟后再看', 'fed decision']);
@@ -72,7 +74,7 @@ const discoveryFull = { ...base, id: 6, status: 'OK', group: 'concluded', result
   ],
   final_decision: { selections: [{ topic_id: '48930', reason: '成交量 +67%' }] } };
 const discoveryHtml = render([{ ...discoveryFull, context: { ...discoveryFull.context, preferred_window_days: 3, verified_count: 4 } }]);
-expect('discovery (opened)', discoveryHtml, ['查了 3 次：看以往记录 ×2、跨平台搜同类市场', '选出 1 个', 'NATO x Russia 冲突',
+expect('discovery (opened)', discoveryHtml, ['查了 3 次：看以往记录 ×2、跨平台搜同类市场', '选出 1 个', 'NATO x Russia 冲突', '选中 1 个',
   '没读到价格：平台上这个结果没有订单簿', '0.14 / 0.15', '6.9%', '$88.3k', '这个事件下没有开放交易的市场', '本轮没去核实',
   '「fed decision」', '内置发现策略', '1 个读到了真实价差', '（偏好 3 天内揭标）', 'AI 挑了 4 个去核实']);
 if (discoveryHtml.includes('没有调用研究工具')) failures.push('discovery (opened): its steps were not counted');
@@ -82,7 +84,7 @@ if (discoveryHtml.includes('&lt;/reason&gt;')) failures.push('discovery (opened)
 const discoveryFailed = { ...base, id: 7, status: 'PROVIDER_ERROR', group: 'failed', result: 'PROVIDER_ERROR', strategy_name: 'built_in:discovery',
   error: "All decision providers failed: claude: [unknown] Claude failed: success / api_error / You've hit your weekly limit · resets 1pm (UTC)",
   context: { stage: 'discovery', candidates } };
-expect('discovery (failed)', render([discoveryFailed]), ['发现轮次', '没能得出结论', '模型调用失败，没分析完',
+expect('discovery (failed)', render([discoveryFailed]), ['没选成：模型未能作答', '没能得出结论', '模型调用失败，没分析完',
   '没有执行：Claude：本周额度用完，1pm (UTC) 恢复', '原始报错']);
 
 // Two services tried in turn, one timing out.

@@ -1384,15 +1384,20 @@ function analysisText(r){
         return tools||'没有追加查询，直接从候选列表里挑';
     }
     const d=r.final_decision||r.proposed_decision||{};
-    const est=pct(d.estimated_probability),conf=pct(d.confidence);
-    const implied=pct(r.context?.outcome?.displayed_probability);
     const parts=[];
-    if(est!==null)parts.push('模型估计 '+est+'%'+(implied!==null?'（市场 '+implied+'%）':''));
-    if(conf!==null)parts.push('信心 '+conf+'%');
-    if(tools)parts.push(tools);
+    // 这一栏问的是「怎么分析的」。原来答的是估计值、市场价和信心——三个数字下面那条数字带里
+    // 已经写着，等于把同一件事说两遍，而真正的推理就在 rationale 里没人看见。所以：先说查了
+    // 什么（没查就直说），再给模型自己的头一句理由。
+    parts.push(tools||'没有额外查询，只看了盘口和条款');
+    const reasoning=cleanReason(d.rationale);
+    if(reasoning){
+        const first=reasoning.split(/(?<=[。！？!?])\s*/).filter(Boolean)[0]||reasoning;
+        parts.push(first.length>140?first.slice(0,140)+'…':first);
+    }
     if(failed)parts.push('模型调用失败，没分析完');
     else if(r.status==='STARTED')parts.push('还在分析');
-    return parts.join('，')||'模型没有给出估计';
+    else if(!reasoning)parts.push('模型没有写下推理');
+    return parts.join('；');
 }
 
 function conclusionHtml(r){
@@ -1526,7 +1531,7 @@ function decisionEntriesHtml(rows){
         const readable=r.readable||null;
         const headline=headlineText(r);
         const kind=isDiscovery(r)?'发现':'决策';
-        const title=isDiscovery(r)?'发现轮次':marketTitle(r);
+        const title=isDiscovery(r)?discoveryTitle(r):marketTitle(r);
         return '<details class="decision-entry" data-id="'+esc(r.id)+'" data-created="'+esc(r.created_at)+'" data-result="'+esc(String(r.result||r.status||'').toUpperCase())+'"'+(r.slim?' data-slim="1"':'')+(readable?' data-readable="1"':'')+(hasProse(r)?' data-prose="1"':'')+' '+(opened.has(String(r.id))?'open':'')+'>'
             +'<summary><input type="checkbox" class="decision-pick" aria-label="选中这条" data-pick="'+esc(r.id)+'"'+(LEDGER_PICKED.has(String(r.id))?' checked':'')+' onclick="event.stopPropagation()" onchange="pickDecision(this)"><span class="decision-meta">'+esc(new Date(r.created_at).toLocaleString())+' · '+esc(r.platform)+' · '+kind+'</span>'
             +'<span class="decision-title">'+esc(title)+'</span>'
@@ -1948,4 +1953,23 @@ function ownPausedPlatforms(){
     return [...document.querySelectorAll('.pausePlatform')]
         .filter(box=>box.dataset.own!==undefined?box.dataset.own==='1':box.checked)
         .map(box=>box.value);
+}
+
+
+// 每条发现轮次原本都叫「发现轮次」，一行字说不出这轮做了什么，几十条排在一起完全分不开。
+// 这一轮的事实它自己都有：看了多少候选、选中几个、选的第一个是什么、没选是为什么。
+function discoveryTitle(r){
+    const final=r.final_decision||{};
+    const picks=Array.isArray(final.selections)?final.selections:null;
+    const candidates=Array.isArray(r.context?.candidates)?r.context.candidates:[];
+    const pool=candidates.length||r.context?.candidate_count||r.context?.available_selection_count||0;
+    const poolText=pool?' / '+pool+' 候选':'';
+    if(!picks){
+        if(String(r.status||'').toUpperCase()==='STARTED')return '正在挑选'+(pool?'（'+pool+' 个候选）':'');
+        return r.error?'没选成：模型未能作答':'这一轮没有留下选择';
+    }
+    if(!picks.length)return '一个都没选'+(pool?'（看过 '+pool+' 个）':'')+(cleanReason(final.skipped_reason)?'：'+cleanReason(final.skipped_reason):'');
+    const titles=new Map(candidates.map(item=>[String(item&&(item.topic_id??item.market_topic_id)),item&&item.title]));
+    const first=picks[0]&&(picks[0].title||titles.get(String(picks[0].topic_id))||picks[0].topic_id);
+    return '选中 '+picks.length+' 个'+poolText+(first?'：'+first:'');
 }
