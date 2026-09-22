@@ -100,6 +100,81 @@ class MarketEvaluationMixin:
                     runtime, topic, detail, market, outcome, seconds_remaining
                 )
 
+    SCREEN_CONFIDENCE = 0.6
+    """How sure the screener has to be before a decision is skipped on its word alone."""
+
+    def _settled_last_time(
+        self, runtime: PlatformRuntime, topic: Topic, detail: TopicDetail, outcome: Outcome, *,
+        bid: float, ask: float, seconds_remaining: float, position: Any,
+        funding_followup: dict[str, Any] | None,
+    ) -> dict[str, Any] | None:
+        """Ask the cheap screener whether anything has changed since this was last settled.
+
+        Most binary markets are priced about right and answer HOLD, and they answer it again the
+        next time and the time after. Paying a full reasoning round to be told that again is the
+        largest avoidable cost here - but only when the last round said what it was waiting for and
+        none of it has happened. That is a comparison, not a judgement about the trade, which is
+        why it belongs to a screener that answers from the facts it is given rather than to a model
+        that can reason its way into a story.
+
+        Nothing is skipped without a previous verdict to stand on, and nothing is skipped when this
+        round exists for a reason of its own: a position to manage, money that arrived, a screener
+        that erred or is unsure. Examining costs a model call; skipping costs a trade nobody looked
+        at, and those are not the same mistake.
+        """
+        evaluator = getattr(self, "evaluator", None)
+        if evaluator is None or not getattr(evaluator, "available", False):
+            return None
+        if position is not None or funding_followup is not None:
+            return None
+        platform = runtime.plugin.name
+        history = self.memory.topic_verdict_history(platform=platform).get(
+            str(detail.topic.topic_id)
+        )
+        if not history or not str(history.get("revisit_when") or "").strip():
+            return None
+        candidate = {
+            "candidate_id": str(detail.topic.topic_id),
+            "title": topic.title,
+            "outcome": outcome.name,
+            "best_bid": bid,
+            "best_ask": ask,
+            "spread": round(ask - bid, 6),
+            "seconds_remaining": int(seconds_remaining),
+            "previous_verdict": {
+                "action": history.get("last_action"),
+                "said": history.get("last_headline"),
+                "revisit_when": history.get("revisit_when"),
+                "times_held": history.get("holds"),
+                "seconds_since": max(
+                    0, int(time.time()) - int(history.get("last_at", 0)) // 1000
+                ),
+            },
+        }
+        try:
+            answers = evaluator.screen_decision(
+                {"platform": platform, "why": "decide whether this still needs a full decision"},
+                [candidate],
+            )
+        except Exception as error:
+            LOGGER.warning("decision screening failed on %s: %s", platform, error)
+            return None
+        verdict = (answers or {}).get(str(detail.topic.topic_id))
+        if not verdict or verdict.get("examine", True):
+            return None
+        if float(verdict.get("confidence") or 0.0) < self.SCREEN_CONFIDENCE:
+            return None
+        LOGGER.info(
+            "%s %s: not re-examined, previous verdict stands (%s)",
+            platform, detail.topic.topic_id, verdict.get("why", ""),
+        )
+        return {
+            "why": verdict.get("why", ""),
+            "confidence": verdict.get("confidence"),
+            "provider": verdict.get("provider", ""),
+            "previous_verdict": candidate["previous_verdict"],
+        }
+
     def _plan_outcomes(
         self, runtime: PlatformRuntime, topics: list[Topic]
     ) -> list[tuple[Topic, TopicDetail, Market, Outcome, float]]:
@@ -159,6 +234,28 @@ class MarketEvaluationMixin:
         bid, ask = best_prices(book)
         runtime.gateway.mark(token_id, (bid + ask) / 2.0)
         position = runtime.state.positions.get(token_id)
+        skipped = self._settled_last_time(
+            runtime, topic, detail, outcome, bid=bid, ask=ask,
+            seconds_remaining=seconds_remaining, position=position,
+            funding_followup=funding_followup,
+        )
+        if skipped is not None:
+            self.memory.complete_decision(
+                self.memory.begin_decision(
+                    platform=platform, market_topic_id=market_topic_id, market_id=market_id,
+                    token_id=token_id, strategy_name="screened",
+                    strategy_sha256=getattr(self.decision_strategy, "sha256", ""),
+                    context={
+                        "market": compact_market(platform, topic, detail, market),
+                        "outcome": {"name": outcome.name, "token_id": token_id},
+                        "order_book": {"best_bid": bid, "best_ask": ask},
+                        "screened_out": skipped,
+                    },
+                ),
+                provider=str(skipped.get("provider", "")),
+                status=SessionMemory.SCREENED_OUT,
+            )
+            return
         # The strategy text reaches the model once, through the instruction block; the context
         # JSON carries only which priors and lessons were applied.
         strategy_payload = self.decision_evolution.payload()

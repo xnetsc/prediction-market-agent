@@ -158,14 +158,21 @@ def bootstrap_engine(
             for engine in engines:
                 risk.register(engine)
 
+        provider = make_provider(config, catalog)
+        evaluator = _decision_evaluators(config, catalog)
+        health = getattr(provider, "health", None)
+        if health is not None and evaluator.available:
+            # A client message the patterns do not recognise gets one cheap question instead of
+            # being filed as "unknown" and retried every round. Asked at most once per message.
+            health.classifier = evaluator.classify_failure
         return EngineComponents(
             plugin_catalog=catalog,
             decision_strategy=decision_strategy,
             risk=risk,
             api_registry=api_registry,
             platforms=platforms,
-            provider=make_provider(config, catalog),
-            evaluator=_decision_evaluators(config, catalog),
+            provider=provider,
+            evaluator=evaluator,
             research_contributions=_optional_research(config, catalog),
             discovery_strategy=_discovery_strategy(config, catalog),
             strategy_evolution=bool(config.strategy_evolution),

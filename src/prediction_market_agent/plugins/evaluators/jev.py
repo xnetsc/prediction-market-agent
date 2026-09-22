@@ -420,6 +420,18 @@ class SchemaDecisionEvaluator:
                         "Highest-value candidate in this batch",
                     ],
                 }
+                questions[f"series_{key}"] = {
+                    "type": "noul",
+                    "instructions": (
+                        f"Is candidate {key} one of a series that is relisted on a schedule - the "
+                        "same question for the next fifteen minutes, the next day, the next round "
+                        "of a tournament - rather than a one-off event?"
+                    ),
+                    "criteria": {
+                        "true": "One window of a recurring series; more of them will be listed.",
+                        "false": "A one-off question that will not be relisted when it settles.",
+                    },
+                }
                 questions[f"evidence_{key}"] = {
                     "type": "noul",
                     "instructions": (
@@ -442,6 +454,7 @@ class SchemaDecisionEvaluator:
                 route = answers.get(f"route_{item['key']}") or {}
                 quality = answers.get(f"quality_{item['key']}") or {}
                 evidence = answers.get(f"evidence_{item['key']}") or {}
+                series = answers.get(f"series_{item['key']}") or {}
                 action = str(route.get("choice", "DEFER")).upper()
                 evidence_sufficient = max(0.0, min(1.0, float(evidence.get("noul", 0.0))))
                 if action == "PRIORITIZE" and evidence_sufficient < 0.5:
@@ -453,11 +466,91 @@ class SchemaDecisionEvaluator:
                         action=action,
                         quality=score,
                         confidence=(float(route["confidence"]) if route.get("confidence") is not None else None),
+                        recurring=(max(0.0, min(1.0, float(series["noul"])))
+                                   if series.get("noul") is not None else None),
                         probabilities=_probabilities(route),
                         provider=f"{self.connection_name}:{response['model']}",
                     )
                 )
         return results
+
+    def classify_failure(self, message: str) -> str:
+        """Which kind of failure a client message describes, from the message alone."""
+        response = self._evaluate(
+            {"workflow": "failure_classification", "client_message": str(message)[:1200]},
+            {
+                "kind": {
+                    "type": "choice",
+                    "instructions": (
+                        "A model client failed and printed this. Name what kind of failure it is "
+                        "from the words themselves; do not guess at causes the message does not "
+                        "state."
+                    ),
+                    "criteria": {
+                        "rate_limit": "An account limit or quota is spent, or the service is "
+                                      "asking to slow down; it will work again later.",
+                        "auth": "Not signed in, a rejected or expired credential, or no "
+                                "permission for this account.",
+                        "contract": "The request itself was not acceptable - an unsupported "
+                                    "parameter, a model or endpoint that cannot serve it, a reply "
+                                    "that did not match what was asked for.",
+                        "transient": "A timeout, a dropped connection, an overloaded server or "
+                                     "another fault that may simply pass.",
+                    },
+                }
+            },
+        )
+        answer = (response["answers"].get("kind") or {})
+        return str(answer.get("choice") or "").strip().lower()
+
+    def screen_decision(
+        self, state: dict[str, Any], candidates: list[dict[str, Any]]
+    ) -> dict[str, dict[str, Any]]:
+        """Answer, per candidate, whether anything has changed since it was last settled."""
+        verdicts: dict[str, dict[str, Any]] = {}
+        for start in range(0, len(candidates), self.batch_size):
+            batch = candidates[start:start + self.batch_size]
+            questions: dict[str, Any] = {}
+            indexed: list[dict[str, Any]] = []
+            for index, candidate in enumerate(batch):
+                key = f"d{index}"
+                indexed.append({"key": key, **candidate})
+                questions[f"worth_{key}"] = {
+                    "type": "choice",
+                    "instructions": (
+                        f"Candidate {key} was decided before. `previous_verdict` carries what was "
+                        "concluded, and `revisit_when` the condition that round named for looking "
+                        "again; the rest of the entry is how the market stands now. Compare the "
+                        "two. Do not reason about whether the trade is good - that is the next "
+                        "model's work and it costs real money to run."
+                    ),
+                    "criteria": {
+                        "EXAMINE": "Something the last round was waiting for has plausibly "
+                                   "happened, or the figures have moved enough that the old "
+                                   "conclusion may no longer hold.",
+                        "SKIP": "Nothing named in the trigger has happened and the figures are "
+                                "materially where they were; the previous conclusion still stands.",
+                    },
+                }
+            if not indexed:
+                continue
+            response = self._evaluate(
+                {"workflow": "decision_worth_screening", "run_state": state,
+                 "candidates": indexed},
+                questions,
+            )
+            answers = response["answers"]
+            for item in indexed:
+                answer = answers.get(f"worth_{item['key']}") or {}
+                choice = str(answer.get("choice", "EXAMINE")).upper()
+                verdicts[str(item.get("candidate_id"))] = {
+                    "examine": choice != "SKIP",
+                    "confidence": (float(answer["confidence"])
+                                   if answer.get("confidence") is not None else 0.0),
+                    "why": str(answer.get("reason") or answer.get("why") or "")[:200],
+                    "provider": f"{self.connection_name}:{response['model']}",
+                }
+        return verdicts
 
     def screen_outliers(
         self, state: dict[str, Any], assessments: list[dict[str, Any]]

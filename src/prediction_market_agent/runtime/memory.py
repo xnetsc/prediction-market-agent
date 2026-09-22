@@ -1326,6 +1326,14 @@ class SessionMemory:
 
     IN_PROGRESS = "STARTED"
 
+    SCREENED_OUT = "SCREENED_OUT"
+    """A round that was not run, because the cheap screener said nothing had changed since the last.
+
+    Deliberately not a HOLD: nothing was analysed, and a ledger that records an unexamined market
+    as a judgement is a ledger that lies about what was done. The row carries the previous verdict
+    it is standing on and what the screener compared, so the saving is auditable rather than silent.
+    """
+
     VENUE_ACTION_SQL = (
         "NOT (COALESCE(json_extract(result_json, '$.status'), '') IN ('NO_ACTION', 'NO_POSITION')"
         " OR action = 'RISK_REJECTED' OR action LIKE '%\\_FAILED' ESCAPE '\\')"

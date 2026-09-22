@@ -29,6 +29,14 @@ class CandidateAssessment:
     action: str
     quality: float
     confidence: float | None = None
+    recurring: float | None = None
+    """How likely this is one of a series relisted on a schedule, as the screener read it.
+
+    "Ethereum up or down, 3:30-3:45" is followed by 3:45-4:00 and forty more the same day. Taken as
+    separate markets they fill a slate with copies of one question; the round needs to know they
+    are one thing, and whether they are is a judgement about the title and the terms, not something
+    a string rule can be trusted to find.
+    """
     probabilities: dict[str, float] = field(default_factory=dict)
     provider: str = ""
 
@@ -70,6 +78,22 @@ class DecisionEvaluator(Protocol):
     def assess_continuation(
         self, state: dict[str, Any], frontier: list[dict[str, Any]], page: dict[str, Any]
     ) -> ContinuationAssessment: ...
+
+    def screen_decision(
+        self, state: dict[str, Any], candidates: list[dict[str, Any]]
+    ) -> dict[str, dict[str, Any]]:
+        """Is this market worth a full decision right now, on the facts already in hand.
+
+        A trade decision is reasoning: the wording, the book, the news and the position, weighed
+        together. Whether one is worth paying for is not - it is a comparison between what was
+        concluded last time, the condition that conclusion named, and what the numbers say now.
+        That is a question with an answer in the facts, which is where this screener is better than
+        a reasoning model rather than merely cheaper: it cannot talk itself into a story.
+
+        Answers per candidate: {"examine": bool, "confidence": float, "why": str}. Saying examine
+        is always safe; saying skip is a claim that nothing has changed since it was last settled.
+        """
+        ...
 
     def screen_outliers(
         self, state: dict[str, Any], assessments: list[dict[str, Any]]
@@ -130,6 +154,11 @@ class DecisionEvaluatorPool:
         return bool(self.evaluators)
 
     @staticmethod
+    def _recurring(items: list[Any]) -> float | None:
+        values = [float(item.recurring) for item in items if getattr(item, "recurring", None) is not None]
+        return sum(values) / len(values) if values else None
+
+    @staticmethod
     def _confidence(items: list[Any]) -> float | None:
         values = [float(item.confidence) for item in items if item.confidence is not None]
         return sum(values) / len(values) if values else None
@@ -154,10 +183,66 @@ class DecisionEvaluatorPool:
                 action=max(answers, key=lambda item: priority[item.action]).action,
                 quality=sum(item.quality for item in answers) / len(answers),
                 confidence=self._confidence(answers),
+                recurring=self._recurring(answers),
                 provider="+".join(item.provider or "unknown" for item in answers),
             )
             for candidate_id, answers in grouped.items()
         ]
+
+    def classify_failure(self, message: str) -> str:
+        """Name a client failure the patterns did not recognise, or say unknown.
+
+        Asked at most once per distinct message, and only when the regexes found nothing. Naming
+        what a message is - out of quota, signed out, a network fault, a broken request - is
+        reading, not reasoning, and getting it wrong costs a provider that is retried every round
+        instead of waited out, or waited out when it would have worked.
+        """
+        for evaluator in self.evaluators:
+            classify = getattr(evaluator, "classify_failure", None)
+            if not callable(classify):
+                continue
+            try:
+                answer = str(classify(message) or "").strip().lower()
+            except Exception as error:
+                self.errors[evaluator.name] = str(error)[:500]
+                continue
+            if answer:
+                return answer
+        return "unknown"
+
+    def screen_decision(
+        self, state: dict[str, Any], candidates: list[dict[str, Any]]
+    ) -> dict[str, dict[str, Any]]:
+        """Ask every screener whether each candidate still deserves a full decision.
+
+        Skipping is only agreed when every screener that answered says so: examining costs a model
+        call, skipping costs a trade nobody looked at, and those are not the same mistake.
+        """
+        answers: dict[str, list[dict[str, Any]]] = {}
+        self.errors = {}
+        for evaluator in self.evaluators:
+            screen = getattr(evaluator, "screen_decision", None)
+            if not callable(screen):
+                continue
+            try:
+                answer = screen(state, candidates)
+            except Exception as error:
+                self.errors[evaluator.name] = str(error)[:500]
+                continue
+            for candidate_id, verdict in (answer or {}).items():
+                if isinstance(verdict, dict):
+                    answers.setdefault(str(candidate_id), []).append(verdict)
+        if self.errors:
+            return {}
+        return {
+            candidate_id: {
+                "examine": any(bool(item.get("examine", True)) for item in verdicts),
+                "confidence": min(float(item.get("confidence") or 0.0) for item in verdicts),
+                "why": next((str(item.get("why", "")) for item in verdicts
+                             if not item.get("examine", True)), ""),
+            }
+            for candidate_id, verdicts in answers.items()
+        }
 
     def screen_outliers(
         self, state: dict[str, Any], assessments: list[dict[str, Any]]

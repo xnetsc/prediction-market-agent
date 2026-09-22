@@ -744,3 +744,112 @@ class TheScreenerRemembersTests(unittest.TestCase):
         block = source[source.index('questions[f"route_{key}"]'):][:2200]
         for piece in ("history", "revisit_when", "already known", "screening_calibration"):
             self.assertIn(piece, block, piece)
+
+
+class WhatTheCheapModelIsBetterAtTests(unittest.TestCase):
+    """A screener is a cheap if-else whose conditions may be qualitative, and it does not invent.
+
+    That makes it the right thing - not merely the affordable thing - for the questions here whose
+    answer is in the facts already supplied: has the condition a previous round named happened, is
+    this one window of a recurring series, which kind of failure is this message describing, and
+    which candidate is worth reading first. Reasoning models are for the trade itself.
+    """
+
+    class Screener:
+        name = "jev"
+        available = True
+
+        def __init__(self, **answers):
+            self.answers = answers
+            self.asked = []
+
+        def screen_decision(self, state, candidates):
+            self.asked.append(("screen_decision", state, candidates))
+            return self.answers.get("screen_decision", {})
+
+        def classify_failure(self, message):
+            self.asked.append(("classify_failure", message))
+            return self.answers.get("classify_failure", "")
+
+    def test_skipping_is_agreed_only_when_every_screener_says_so(self) -> None:
+        keeps = self.Screener(screen_decision={"t1": {"examine": True, "confidence": 0.9}})
+        skips = self.Screener(screen_decision={"t1": {"examine": False, "confidence": 0.9,
+                                                      "why": "触发条件未发生"}})
+        both = DecisionEvaluatorPool([keeps, skips]).screen_decision({}, [{"candidate_id": "t1"}])
+        self.assertTrue(both["t1"]["examine"], "one screener wanting a look is enough to look")
+        only_skip = DecisionEvaluatorPool([skips]).screen_decision({}, [{"candidate_id": "t1"}])
+        self.assertFalse(only_skip["t1"]["examine"])
+        self.assertEqual(only_skip["t1"]["why"], "触发条件未发生")
+
+    def test_a_screener_that_failed_cannot_cause_a_skip(self) -> None:
+        class Broken(self.Screener):
+            def screen_decision(self, state, candidates):
+                raise RuntimeError("down")
+
+        pool = DecisionEvaluatorPool([
+            self.Screener(screen_decision={"t1": {"examine": False, "confidence": 1.0}}), Broken()
+        ])
+        self.assertEqual(pool.screen_decision({}, [{"candidate_id": "t1"}]), {})
+        self.assertIn("jev", pool.errors)
+
+    def test_the_gate_refuses_to_skip_without_a_previous_verdict(self) -> None:
+        source = Path("src/prediction_market_agent/runtime/evaluation.py").read_text()
+        body = source[source.index("def _settled_last_time("):source.index("def _plan_outcomes(")]
+        self.assertIn("if position is not None or funding_followup is not None:", body)
+        self.assertIn('if not history or not str(history.get("revisit_when")', body)
+        self.assertIn("self.SCREEN_CONFIDENCE", body)
+        self.assertIn("SessionMemory.SCREENED_OUT", source)
+
+    def test_a_skipped_round_is_not_recorded_as_a_decision(self) -> None:
+        from prediction_market_agent.runtime.memory import SessionMemory
+
+        self.assertEqual(SessionMemory.SCREENED_OUT, "SCREENED_OUT")
+        self.assertEqual(SessionMemory.decision_group("SCREENED_OUT"), "concluded")
+        source = Path("src/prediction_market_agent/runtime/evaluation.py").read_text()
+        recorded = source[source.index("if skipped is not None:"):][:900]
+        self.assertNotIn("final_decision", recorded, "nothing decided, so nothing written as one")
+        self.assertIn('"screened_out": skipped', recorded)
+
+    def test_an_unrecognised_failure_is_named_once_and_remembered(self) -> None:
+        from prediction_market_agent.agent.provider_health import ProviderHealthRegistry
+
+        screener = self.Screener(classify_failure="contract")
+        registry = ProviderHealthRegistry(("openrouter",))
+        registry.classifier = DecisionEvaluatorPool([screener]).classify_failure
+        message = "unexpected status 404: No endpoints found that can handle the requested parameters"
+        self.assertEqual(registry.record_failure("openrouter", message), "contract")
+        self.assertEqual(registry.record_failure("openrouter", message), "contract")
+        self.assertEqual(len([call for call in screener.asked if call[0] == "classify_failure"]), 1)
+
+    def test_a_message_the_patterns_know_is_never_sent_anywhere(self) -> None:
+        from prediction_market_agent.agent.provider_health import ProviderHealthRegistry
+
+        screener = self.Screener(classify_failure="contract")
+        registry = ProviderHealthRegistry(("claude",))
+        registry.classifier = DecisionEvaluatorPool([screener]).classify_failure
+        self.assertEqual(registry.record_failure("claude", "You've hit your weekly limit"), "rate_limit")
+        self.assertEqual(screener.asked, [])
+
+    def test_an_answer_outside_the_known_kinds_is_refused(self) -> None:
+        from prediction_market_agent.agent.provider_health import ProviderHealthRegistry
+
+        registry = ProviderHealthRegistry(("claude",))
+        registry.classifier = lambda message: "something-else"
+        self.assertEqual(registry.record_failure("claude", "totally novel wording"), "unknown")
+
+    def test_the_pool_order_follows_the_screener_not_the_weights(self) -> None:
+        source = Path("src/prediction_market_agent/runtime/market_discovery.py").read_text()
+        body = source[source.index("def _suggested_rank("):source.index("def _prescore(")]
+        self.assertIn("self._evaluator_assessments.get(topic_id)", body)
+        self.assertIn('"PRIORITIZE": 3.0', body)
+        self.assertIn("return self._prescore(", body, "the formula stays for rounds with no screener")
+
+    def test_a_recurring_series_is_a_judgement_the_screener_makes(self) -> None:
+        jev = Path("src/prediction_market_agent/plugins/evaluators/jev.py").read_text()
+        self.assertIn('questions[f"series_{key}"]', jev)
+        self.assertIn("relisted on a schedule", jev)
+        discovery = Path("src/prediction_market_agent/runtime/market_discovery.py").read_text()
+        self.assertIn('"recurring_series": typed.recurring', discovery)
+        self.assertEqual(
+            CandidateAssessment("t", "DEFER", 0.5, recurring=0.9).recurring, 0.9
+        )

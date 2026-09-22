@@ -632,6 +632,24 @@ class DiscoveryEngine:
             for item in self.memory.load_discovery_lessons(DISCOVERY_EVOLUTION_KEY)
         )
 
+    def _suggested_rank(
+        self, topic_id: str, features_by_topic: dict[str, dict[str, Any]],
+        weights: dict[str, float], budget: DiscoveryBudget,
+    ) -> float:
+        """Where the framework would start reading, preferring the screener's own ordering.
+
+        The formula below is a set of constants nobody measured - fresh listing plus one, mid-tier
+        liquidity plus a half, recently selected times a quarter - applied to every market on every
+        platform alike. The screener has already read each candidate and said what it is worth, on
+        the facts rather than on a table of weights, so that is the order used when it answered.
+        The formula remains for the rounds where no screener is configured or it failed.
+        """
+        typed = self._evaluator_assessments.get(topic_id)
+        if typed is not None and not self._evaluator_candidate_errors:
+            priority = {"PRIORITIZE": 3.0, "NEEDS_DATA": 2.0, "DEFER": 1.0, "REJECT": 0.0}
+            return priority.get(str(typed.action), 1.0) + float(typed.quality or 0.0)
+        return self._prescore(features_by_topic[topic_id], weights, budget)
+
     def _prescore(
         self, features: dict[str, Any], weights: dict[str, float], budget: DiscoveryBudget
     ) -> float:
@@ -691,6 +709,10 @@ class DiscoveryEngine:
                     "quality": typed.quality,
                     "confidence": typed.confidence,
                     "provider": typed.provider,
+                    # Whether this is one window of a series that will be relisted. A slate of
+                    # copies of one question is a slate that decides one question several times.
+                    **({"recurring_series": typed.recurring}
+                       if typed.recurring is not None else {}),
                 }
             features_by_topic[topic.topic_id] = features
             observations.append(
@@ -714,7 +736,7 @@ class DiscoveryEngine:
             surveyed,
             key=lambda item: (
                 item.topic_id not in near_dated,
-                -self._prescore(features_by_topic[item.topic_id], weights, budget),
+                -self._suggested_rank(item.topic_id, features_by_topic, weights, budget),
             ),
         )
         by_id = {topic.topic_id: topic for topic in surveyed}

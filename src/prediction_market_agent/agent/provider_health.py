@@ -5,9 +5,13 @@ import threading
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone, tzinfo
+from collections.abc import Callable
 from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
+
+FAILURE_KINDS = ("rate_limit", "auth", "contract", "transient")
+"""The kinds a failure can be named as, which is also what a screener may answer."""
 
 RATE_LIMIT_PATTERNS = (
     r"\b429\b",
@@ -258,6 +262,37 @@ class ProviderHealthRegistry:
             name: ProviderState(name) for name in names
         }
         self._quality: dict[str, float] = {}
+        self.classifier: Callable[[str], str] | None = None
+        """Asked to name a failure the patterns did not recognise; set by the runtime.
+
+        The patterns below cover what these clients have said so far, and clients keep saying new
+        things: an account out of weekly quota once arrived as an "unknown" failure and was
+        retried every round instead of waited out, and a routing refusal did the same. Reading a
+        message and naming which kind it is needs no reasoning and no invention - it is exactly
+        what a cheap screening model answers reliably - so an unrecognised message gets one such
+        question instead of a shrug. Nothing is asked when the patterns already matched.
+        """
+        self._classified: dict[str, str] = {}
+
+    def _kind_of(self, message: str) -> str:
+        """The patterns first, free and certain; the screener only for what they did not know."""
+        kind = classify_error(message)
+        if kind != "unknown" or self.classifier is None:
+            return kind
+        key = " ".join(str(message).split())[:300]
+        with self._lock:
+            remembered = self._classified.get(key)
+        if remembered:
+            return remembered
+        try:
+            answer = str(self.classifier(key) or "unknown").strip().lower()
+        except Exception:
+            return "unknown"
+        if answer not in FAILURE_KINDS:
+            return "unknown"
+        with self._lock:
+            self._classified[key] = answer
+        return answer
 
     def state(self, name: str) -> ProviderState:
         with self._lock:
@@ -338,7 +373,7 @@ class ProviderHealthRegistry:
         `attempted` is False when nothing was asked of the provider - its client reported, for
         free, that it cannot serve - so the measured success rate is left alone.
         """
-        kind = kind or classify_error(message)
+        kind = kind or self._kind_of(message)
         now = time.time()
         stated = recovers_at if recovers_at and recovers_at > now else None
         if stated is None and kind == "rate_limit":
