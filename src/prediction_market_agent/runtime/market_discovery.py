@@ -981,9 +981,23 @@ class DiscoveryEngine:
                 "history_handoff": request["history_handoff"],
             },
         )
+        def record_step(**values: Any) -> None:
+            # A discovery round reads books, verifies resolutions and searches other platforms, and
+            # none of it was written down: only the decision path passed a recorder, so the console
+            # showed an empty research trail for every round and there was no way to tell a round
+            # that went and looked from one that answered off the list.
+            self.memory.record_agent_step(
+                platform=platform,
+                market_topic_id="",
+                token_id="",
+                decision_id=decision_id,
+                **values,
+            )
+
         try:
             result = self.provider.run(
                 request,
+                step_recorder=record_step,
                 schema=DISCOVERY_SCHEMA,
                 schema_name="market_discovery",
                 mission=DISCOVERY_MISSION,

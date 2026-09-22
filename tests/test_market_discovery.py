@@ -1354,3 +1354,28 @@ class AlreadyAnsweredTests(unittest.TestCase):
         text = " ".join(BuiltInDecisionStrategy().instructions.split())
         self.assertIn("revisit_when", text)
         self.assertIn("priced about right", text)
+
+
+class TheResearchTrailIsRecordedTests(unittest.TestCase):
+    """A discovery round reads books, checks resolutions and searches other platforms.
+
+    None of it was written down: only the decision path passed a step recorder, so the console
+    showed an empty research trail for every discovery round, and nothing distinguished a round
+    that went and looked from one that answered straight off the candidate list.
+    """
+
+    def test_discovery_passes_a_recorder_bound_to_its_own_round(self) -> None:
+        source = Path("src/prediction_market_agent/runtime/market_discovery.py").read_text()
+        block = source[source.index("def record_step("):]
+        self.assertIn("self.memory.record_agent_step(", block[:700])
+        self.assertIn("decision_id=decision_id", block[:700])
+        call = source[source.index("result = self.provider.run(\n                request,"):][:400]
+        self.assertIn("step_recorder=record_step", call)
+
+    def test_deciding_immediately_is_a_judgement_the_round_has_to_make_honestly(self) -> None:
+        """Three live rounds in a row went straight to the answer with every tool in the prompt."""
+        from prediction_market_agent.agent.decision import TRADE_CONTROL_MISSION
+
+        self.assertIn("resolution wording", TRADE_CONTROL_MISSION)
+        self.assertIn("top of the book", TRADE_CONTROL_MISSION)
+        self.assertIn("unused step is not saved", TRADE_CONTROL_MISSION)

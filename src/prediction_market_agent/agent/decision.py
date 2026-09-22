@@ -203,7 +203,13 @@ TRADE_MISSION = (
 )
 
 TRADE_CONTROL_MISSION = (
-    "Choose one next action. Use DECIDE when more research is unlikely to change the trade."
+    "Choose one next action. Use DECIDE when more research is unlikely to change the trade - and "
+    "say that to yourself honestly: a price that looks about right at a glance is not the same as "
+    "having checked the two things that most often make it wrong. Reading the resolution wording "
+    "in full, and looking past the top of the book at what size is actually there, each cost one "
+    "step and regularly change the answer; searching for news that should have moved a line and "
+    "did not is the third. An unused step is not saved for later, and a round that decides "
+    "immediately on a market it could have checked is the cheap half of this job done twice."
 )
 
 
