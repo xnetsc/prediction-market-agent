@@ -365,6 +365,9 @@ class TradingEngine(MarketEvaluationMixin, ExecutionActionsMixin):
         self._settle_open_positions(runtime)
         eligible = self.decision_strategy.select_topics(topics)
         queue = self._plan_outcomes(runtime, eligible)
+        # One screening pass for the whole cycle, before any expensive round: which of these were
+        # already settled and said what they were waiting for.
+        self.screen_queue(runtime, queue)
         LOGGER.info(
             "platform=%s scanned=%d candidates=%d outcomes=%d provider=%s safety_limit=%d",
             runtime.plugin.name,

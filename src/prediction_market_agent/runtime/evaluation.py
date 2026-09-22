@@ -100,80 +100,91 @@ class MarketEvaluationMixin:
                     runtime, topic, detail, market, outcome, seconds_remaining
                 )
 
-    SCREEN_CONFIDENCE = 0.6
-    """How sure the screener has to be before a decision is skipped on its word alone."""
-
-    def _settled_last_time(
-        self, runtime: PlatformRuntime, topic: Topic, detail: TopicDetail, outcome: Outcome, *,
-        bid: float, ask: float, seconds_remaining: float, position: Any,
-        funding_followup: dict[str, Any] | None,
-    ) -> dict[str, Any] | None:
-        """Ask the cheap screener whether anything has changed since this was last settled.
+    def screen_queue(
+        self, runtime: PlatformRuntime,
+        queue: list[tuple[Topic, TopicDetail, Market, Outcome, float]],
+    ) -> None:
+        """Ask the screener, once for the whole cycle, which of these are already settled.
 
         Most binary markets are priced about right and answer HOLD, and they answer it again the
-        next time and the time after. Paying a full reasoning round to be told that again is the
-        largest avoidable cost here - but only when the last round said what it was waiting for and
-        none of it has happened. That is a comparison, not a judgement about the trade, which is
-        why it belongs to a screener that answers from the facts it is given rather than to a model
-        that can reason its way into a story.
+        next time; paying a reasoning round to be told so is the largest avoidable cost here. What
+        makes that answer reusable is the trigger the last round named - so this is a comparison
+        between that trigger and how the market stands now, which is what a screener answers from
+        the facts rather than something to reason about.
 
-        Nothing is skipped without a previous verdict to stand on, and nothing is skipped when this
-        round exists for a reason of its own: a position to manage, money that arrived, a screener
-        that erred or is unsure. Examining costs a model call; skipping costs a trade nobody looked
-        at, and those are not the same mistake.
+        Asked as one batch, because how sure it is only means something next to the others: a skip
+        is acted on when the screener itself says that answer stands apart from the rest of this
+        round, not when it clears some number written here. Nothing is skipped for a market with an
+        open position, one that has never been decided, or one whose last round named no trigger.
         """
+        self._screened_out = {}
         evaluator = getattr(self, "evaluator", None)
-        if evaluator is None or not getattr(evaluator, "available", False):
-            return None
-        if position is not None or funding_followup is not None:
-            return None
+        if evaluator is None or not getattr(evaluator, "available", False) or not queue:
+            return
         platform = runtime.plugin.name
-        history = self.memory.topic_verdict_history(platform=platform).get(
-            str(detail.topic.topic_id)
-        )
-        if not history or not str(history.get("revisit_when") or "").strip():
-            return None
-        candidate = {
-            "candidate_id": str(detail.topic.topic_id),
-            "title": topic.title,
-            "outcome": outcome.name,
-            "best_bid": bid,
-            "best_ask": ask,
-            "spread": round(ask - bid, 6),
-            "seconds_remaining": int(seconds_remaining),
-            "previous_verdict": {
-                "action": history.get("last_action"),
-                "said": history.get("last_headline"),
-                "revisit_when": history.get("revisit_when"),
-                "times_held": history.get("holds"),
-                "seconds_since": max(
-                    0, int(time.time()) - int(history.get("last_at", 0)) // 1000
-                ),
-            },
-        }
+        history_by_topic = self.memory.topic_verdict_history(platform=platform)
+        candidates: list[dict[str, Any]] = []
+        for topic, detail, market, outcome, seconds_remaining in queue:
+            if runtime.state.positions.get(outcome.outcome_id) is not None:
+                continue
+            history = history_by_topic.get(str(topic.topic_id))
+            if not history or not str(history.get("revisit_when") or "").strip():
+                continue
+            candidates.append({
+                "candidate_id": f"{topic.topic_id}:{outcome.outcome_id}",
+                "title": topic.title,
+                "outcome": outcome.name,
+                "seconds_remaining": int(seconds_remaining),
+                "liquidity_usdt": topic.liquidity_usdt,
+                "volume_usdt": topic.volume_usdt,
+                "previous_verdict": {
+                    "action": history.get("last_action"),
+                    "said": history.get("last_headline"),
+                    "revisit_when": history.get("revisit_when"),
+                    "times_held": history.get("holds"),
+                    "seconds_since": max(
+                        0, int(time.time()) - int(history.get("last_at", 0)) // 1000
+                    ),
+                },
+            })
+        if not candidates:
+            return
+        state = {"platform": platform, "why": "decide which of these still need a full decision"}
         try:
-            answers = evaluator.screen_decision(
-                {"platform": platform, "why": "decide whether this still needs a full decision"},
-                [candidate],
-            )
+            answers = evaluator.screen_decision(state, candidates) or {}
         except Exception as error:
             LOGGER.warning("decision screening failed on %s: %s", platform, error)
-            return None
-        verdict = (answers or {}).get(str(detail.topic.topic_id))
-        if not verdict or verdict.get("examine", True):
-            return None
-        if float(verdict.get("confidence") or 0.0) < self.SCREEN_CONFIDENCE:
-            return None
-        LOGGER.info(
-            "%s %s: not re-examined, previous verdict stands (%s)",
-            platform, detail.topic.topic_id, verdict.get("why", ""),
-        )
-        return {
-            "why": verdict.get("why", ""),
-            "confidence": verdict.get("confidence"),
-            "provider": verdict.get("provider", ""),
-            "previous_verdict": candidate["previous_verdict"],
+            return
+        skips = {
+            key: value for key, value in answers.items()
+            if not value.get("examine", True)
         }
+        if not skips:
+            return
+        # Which of those answers are sure enough to act on is the screener's own judgement about
+        # this batch, not a threshold: most rounds cluster, and the ones worth trusting are the
+        # ones standing clear of the cluster.
+        trusted = evaluator.screen_outliers(state, [
+            {
+                "candidate_id": key,
+                "confidence": value.get("confidence"),
+                "under_review": key in skips,
+            }
+            for key, value in answers.items()
+        ])
+        self._screened_out = {
+            key: {**value, "previous_verdict": next(
+                (item["previous_verdict"] for item in candidates
+                 if item["candidate_id"] == key), {}
+            )}
+            for key, value in skips.items()
+            if trusted.get(key)
+        }
+        if self._screened_out:
+            LOGGER.info(
+                "%s: %d of %d queued outcomes are already settled and will not be re-examined",
+                platform, len(self._screened_out), len(queue),
+            )
 
     def _plan_outcomes(
         self, runtime: PlatformRuntime, topics: list[Topic]
@@ -234,10 +245,9 @@ class MarketEvaluationMixin:
         bid, ask = best_prices(book)
         runtime.gateway.mark(token_id, (bid + ask) / 2.0)
         position = runtime.state.positions.get(token_id)
-        skipped = self._settled_last_time(
-            runtime, topic, detail, outcome, bid=bid, ask=ask,
-            seconds_remaining=seconds_remaining, position=position,
-            funding_followup=funding_followup,
+        skipped = (
+            None if (position is not None or funding_followup is not None)
+            else getattr(self, "_screened_out", {}).get(f"{market_topic_id}:{token_id}")
         )
         if skipped is not None:
             self.memory.complete_decision(

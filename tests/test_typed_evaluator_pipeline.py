@@ -794,11 +794,30 @@ class WhatTheCheapModelIsBetterAtTests(unittest.TestCase):
 
     def test_the_gate_refuses_to_skip_without_a_previous_verdict(self) -> None:
         source = Path("src/prediction_market_agent/runtime/evaluation.py").read_text()
-        body = source[source.index("def _settled_last_time("):source.index("def _plan_outcomes(")]
-        self.assertIn("if position is not None or funding_followup is not None:", body)
+        body = source[source.index("def screen_queue("):source.index("def _plan_outcomes(")]
+        self.assertIn("runtime.state.positions.get(outcome.outcome_id) is not None", body)
         self.assertIn('if not history or not str(history.get("revisit_when")', body)
-        self.assertIn("self.SCREEN_CONFIDENCE", body)
+        self.assertIn("position is not None or funding_followup is not None", source)
         self.assertIn("SessionMemory.SCREENED_OUT", source)
+
+    def test_how_sure_is_judged_against_the_batch_not_against_a_number(self) -> None:
+        """Most answers cluster; the ones worth acting on are the ones standing clear of it."""
+        source = Path("src/prediction_market_agent/runtime/evaluation.py").read_text()
+        body = source[source.index("def screen_queue("):source.index("def _plan_outcomes(")]
+        self.assertIn("evaluator.screen_outliers(", body)
+        self.assertIn("if trusted.get(key)", body)
+        self.assertNotIn("SCREEN_CONFIDENCE", source, "no threshold written into the runtime")
+        self.assertNotIn("confidence\") or 0.0) <", source)
+
+    def test_the_whole_cycle_is_screened_in_one_call(self) -> None:
+        engine = Path("src/prediction_market_agent/runtime/engine.py").read_text()
+        self.assertIn("self.screen_queue(runtime, queue)", engine)
+        after_plan = engine[engine.index("queue = self._plan_outcomes("):]
+        self.assertLess(
+            after_plan.index("self.screen_queue(runtime, queue)"),
+            after_plan.index("self._evaluate_outcome("),
+            "the cycle is screened before any of its rounds run",
+        )
 
     def test_a_skipped_round_is_not_recorded_as_a_decision(self) -> None:
         from prediction_market_agent.runtime.memory import SessionMemory
