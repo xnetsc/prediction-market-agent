@@ -390,7 +390,17 @@ class SchemaDecisionEvaluator:
                     "instructions": (
                         f"Choose the next treatment for candidate {key} from only the supplied facts. "
                         "Missing facts require NEEDS_DATA; low current value is DEFER; use REJECT only "
-                        "when the supplied facts establish that it is unusable."
+                        "when the supplied facts establish that it is unusable. When the candidate "
+                        "carries `history`, it has been here before: `screened` is what you called "
+                        "it, `decided` is what the deciding model concluded each time, and "
+                        "`revisit_when` is the condition it named for looking again. A market "
+                        "already decided and left alone is worth another expensive look only when "
+                        "something it was waiting for has plausibly happened - a price or deadline "
+                        "the trigger names, a change in the supplied figures. Otherwise DEFER: "
+                        "handing it on again spends the round on an answer that is already known. "
+                        "`screening_calibration` in the state says what your own verdicts here have "
+                        "led to so far; if what you call PRIORITIZE is almost always held, ask less "
+                        "for that kind and more for what actually got traded."
                     ),
                     "criteria": {
                         "PRIORITIZE": "Worth scarce research attention now.",

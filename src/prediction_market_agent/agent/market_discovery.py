@@ -96,9 +96,25 @@ tried - that is a finding. "No data" about something you never looked up is not 
   slate that ignores something still owed is a slate the operator did not ask for.
 
 ROTATION AND BUDGET DISCIPLINE
-- Recently analyzed topics arrive with their last analysis time. Re-selecting one is justified only
-  by a concrete change since then: the price moved, the book changed, a catalyst passed, or an open
-  position needs review. Otherwise pick something unexamined.
+- Recently analyzed topics arrive with their last analysis time, and - when one has been decided
+  before - with `previous_verdict`: what was concluded, the one line it was concluded in, how many
+  times it has been held, and `revisit_when`, the trigger that round named for looking again.
+  Re-selecting one is justified only by that trigger having plausibly fired, or by a concrete change
+  since then: the price moved, the book changed, a catalyst passed, or an open position needs
+  review. A market held twice with nothing it was waiting for having happened is the clearest waste
+  of a slot there is - the answer is already known and it will be the same answer. Say which trigger
+  fired when you take one anyway.
+- Most binary markets are priced about right, so most of them are correctly left alone. That makes
+  the choice of what to look at the whole job: slates full of efficiently priced markets return
+  nothing however well each one is analysed. Spend the slots where a price can actually be wrong -
+  resolution wording that does not match what people think they are betting on, a line that has not
+  moved since news that should have moved it, thin or newly listed books, multi-outcome sets whose
+  prices do not sum sensibly - rather than on liquid, heavily traded markets whose price is the
+  consensus.
+- Recurring families - the same question relisted every fifteen minutes, every day, every round of
+  a tournament - are one market for this purpose. Taking several windows of one family fills the
+  slate with copies of a question already answered; take one, and only if the family's last verdict
+  does not already settle it.
 - Reserve part of every cycle for topics never analyzed before. A pool that only returns its own
   previous winners stops discovering, and stops producing the evidence its own priors are measured
   against.

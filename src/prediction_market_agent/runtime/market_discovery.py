@@ -123,6 +123,7 @@ def topic_features(
     previous: dict[str, Any] | None,
     attention: dict[str, Any] | None,
     now_ms: int,
+    verdict: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Cheap, list-payload-only features. Buckets are what outcome attribution aggregates on."""
     buckets: list[str] = [
@@ -157,6 +158,25 @@ def topic_features(
         features["never_selected"] = True
         buckets.append("attention:never")
 
+    # What was decided about this market before, so a round can tell "already looked at and found
+    # fairly priced" from "nobody has looked". Most binary markets are priced about right and
+    # answer HOLD; without this the same ones come back every round, take the same slots and get
+    # the same answer, and the robot spends everything it has on questions already settled.
+    if verdict:
+        features["previous_verdict"] = {
+            "action": verdict.get("last_action", ""),
+            "said": verdict.get("last_headline", ""),
+            "revisit_when": verdict.get("revisit_when", ""),
+            "times_decided": int(verdict.get("decisions", 0)),
+            "times_held": int(verdict.get("holds", 0)),
+            "seconds_since": max(0, (now_ms - int(verdict.get("last_at", now_ms))) // 1000),
+        }
+        buckets.append(f"verdict:{str(verdict.get('last_action', '')).lower() or 'none'}")
+        if int(verdict.get("holds", 0)) >= 2:
+            buckets.append("verdict:held-repeatedly")
+    elif attention:
+        features["decided_before"] = False
+
     features["buckets"] = buckets
     return features
 
@@ -187,6 +207,10 @@ class DiscoveryEngine:
         self._scan_audit: list[dict[str, Any]] = []
         self._evaluator_assessments: dict[str, Any] = {}
         self._evaluator_candidate_errors: dict[str, str] = {}
+        # Read once per round and handed to the screener with every candidate: what has already
+        # been screened and decided here. Empty until a round loads it.
+        self._screening_history: dict[str, dict[str, Any]] = {}
+        self._screening_calibration: dict[str, Any] = {}
         self._screening_threshold = DEFAULT_SCREENING_CONFIDENCE
         self._selection_ids: dict[tuple[str, str], int] = {}
         self.evolution_enabled = evolution_enabled
@@ -205,9 +229,8 @@ class DiscoveryEngine:
     operator_instructions: Any = None
     """Asked for the open instructions each round; the runtime sets it, tests may leave it out."""
 
-    @staticmethod
-    def _evaluation_candidate(topic: Topic) -> dict[str, Any]:
-        return {
+    def _evaluation_candidate(self, topic: Topic) -> dict[str, Any]:
+        candidate = {
             "candidate_id": topic.topic_id,
             "topic_id": topic.topic_id,
             "title": topic.title,
@@ -218,6 +241,14 @@ class DiscoveryEngine:
             "liquidity_usdt": topic.liquidity_usdt,
             "volume_usdt": topic.volume_usdt,
         }
+        # Whatever is already known about this market: how it has been screened before, and what
+        # the deciding model concluded each time. Screening it without this is screening it as if
+        # for the first time, every time - which is how the same markets kept being handed on and
+        # kept coming back held.
+        known = self._screening_history.get(str(topic.topic_id))
+        if known:
+            candidate["history"] = known
+        return candidate
 
     def _llm_continuation(
         self, *, platform: str, scan_state: dict[str, Any], frontier: list[dict[str, Any]],
@@ -314,6 +345,10 @@ class DiscoveryEngine:
         started = time.monotonic()
         horizon_days = int(getattr(self.strategy, "horizon_days", 0) or 0)
         now_ms = int(time.time() * 1000)
+        # Loaded before the first candidate is screened, because the screener is asked about every
+        # page and each of those calls has to see the same history.
+        self._screening_history = self.memory.screening_history(platform=plugin.name)
+        self._screening_calibration = self.memory.screening_calibration(platform=plugin.name)
         deadline_listing = getattr(plugin, "list_topics_by_deadline", None)
         sources: list[tuple[str, Any, dict[str, Any]]] = []
         if horizon_days > 0 and callable(deadline_listing):
@@ -395,6 +430,9 @@ class DiscoveryEngine:
                             "pages_scanned": page_number,
                             "topics_seen": len(seen),
                             "source": source,
+                            # How this screener's own verdicts have turned out here so far, so a
+                            # round can be better calibrated than the one before it.
+                            "screening_calibration": self._screening_calibration,
                         },
                         candidates,
                     )
@@ -633,6 +671,7 @@ class DiscoveryEngine:
 
         previous = self.memory.previous_topic_observations(platform=platform, before_ms=now_ms)
         attention = self.memory.topic_attention_history(platform=platform)
+        verdicts = self.memory.topic_verdict_history(platform=platform)
         weights = self._prior_weights()
 
         features_by_topic: dict[str, dict[str, Any]] = {}
@@ -643,6 +682,7 @@ class DiscoveryEngine:
                 previous=previous.get(topic.topic_id),
                 attention=attention.get(topic.topic_id),
                 now_ms=now_ms,
+                verdict=verdicts.get(topic.topic_id),
             )
             typed = self._evaluator_assessments.get(topic.topic_id)
             if typed is not None:

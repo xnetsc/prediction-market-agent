@@ -949,6 +949,140 @@ class SessionMemory:
             for row in rows
         }
 
+    def topic_verdict_history(self, *, platform: str) -> dict[str, dict[str, Any]]:
+        """What was decided about each topic last time, and how often it was left alone.
+
+        Selection used to know only when a topic was last picked and how many times. That cannot
+        distinguish "looked at and found fairly priced" from "never examined", so the rounds kept
+        spending their few slots re-deciding the same markets and reaching the same HOLD. The
+        verdict, its one-line reason and the trigger the round named are what make that answer
+        reusable instead of repeatable.
+        """
+        rows = self.connection.execute(
+            """
+            SELECT market_topic_id, created_at, final_decision_json
+            FROM decision_ledger
+            WHERE platform = ? AND strategy_name NOT LIKE '%discovery%'
+              AND final_decision_json IS NOT NULL AND market_topic_id != ''
+            ORDER BY created_at
+            """,
+            (str(platform),),
+        ).fetchall()
+        history: dict[str, dict[str, Any]] = {}
+        for topic_id, created_at, final_json in rows:
+            try:
+                final = json.loads(final_json or "{}")
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(final, dict):
+                continue
+            action = str(final.get("action") or "").upper()
+            entry = history.setdefault(
+                str(topic_id), {"decisions": 0, "holds": 0, "last_action": "", "last_at": 0,
+                                "last_headline": "", "revisit_when": ""}
+            )
+            entry["decisions"] += 1
+            if action == "HOLD":
+                entry["holds"] += 1
+            entry["last_action"] = action
+            entry["last_at"] = int(created_at)
+            entry["last_headline"] = str(final.get("headline") or "")[:120]
+            entry["revisit_when"] = str(final.get("revisit_when") or "")[:200]
+        return history
+
+    SCREENING_HISTORY_LIMIT = 6
+    """How many past screenings and past decisions per topic are carried forward."""
+
+    def screening_history(self, *, platform: str) -> dict[str, dict[str, Any]]:
+        """Everything already known about each topic: how it was screened, and what came of it.
+
+        The coarse screener judges hundreds of candidates a round and, given only the candidate,
+        judges each one as if for the first time - so a market screened and decided a dozen times
+        is screened again on the same facts and comes back with the same answer, and the expensive
+        round behind it spends its slots re-deciding what is already settled. This is the record it
+        was missing: its own past calls on this topic, and the decisions that followed them.
+        """
+        history: dict[str, dict[str, Any]] = {}
+
+        def entry(topic_id: str) -> dict[str, Any]:
+            return history.setdefault(str(topic_id), {
+                "screened": [], "screen_counts": {}, "decided": [], "decision_counts": {},
+            })
+
+        for topic_id, observed_at, features_json in self.connection.execute(
+            """
+            SELECT market_topic_id, observed_at, features_json FROM topic_observations
+            WHERE platform = ? AND features_json LIKE '%typed_evaluation%'
+            ORDER BY observed_at
+            """,
+            (str(platform),),
+        ):
+            try:
+                typed = (json.loads(features_json or "{}") or {}).get("typed_evaluation")
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(typed, dict) or not typed.get("action"):
+                continue
+            item = entry(topic_id)
+            action = str(typed["action"]).upper()
+            item["screen_counts"][action] = item["screen_counts"].get(action, 0) + 1
+            item["screened"].append({
+                "action": action,
+                "confidence": typed.get("confidence"),
+                "at_ms": int(observed_at),
+            })
+            item["screened"] = item["screened"][-self.SCREENING_HISTORY_LIMIT:]
+
+        for topic_id, created_at, final_json in self.connection.execute(
+            """
+            SELECT market_topic_id, created_at, final_decision_json FROM decision_ledger
+            WHERE platform = ? AND strategy_name NOT LIKE '%discovery%'
+              AND final_decision_json IS NOT NULL AND market_topic_id != ''
+            ORDER BY created_at
+            """,
+            (str(platform),),
+        ):
+            try:
+                final = json.loads(final_json or "{}")
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(final, dict) or not final.get("action"):
+                continue
+            item = entry(topic_id)
+            action = str(final["action"]).upper()
+            item["decision_counts"][action] = item["decision_counts"].get(action, 0) + 1
+            item["decided"].append({
+                "action": action,
+                "said": str(final.get("headline") or "")[:120],
+                "revisit_when": str(final.get("revisit_when") or "")[:200],
+                "at_ms": int(created_at),
+            })
+            item["decided"] = item["decided"][-self.SCREENING_HISTORY_LIMIT:]
+        return history
+
+    def screening_calibration(self, *, platform: str) -> dict[str, Any]:
+        """What each screening verdict has been worth on this platform, counted from what followed.
+
+        Per-topic history tells the screener about markets it has seen. This tells it about itself:
+        of everything it called worth attention, how much the deciding model then traded, and how
+        much it left alone. A screener that cannot see that has no way to become better calibrated;
+        it can only repeat whatever it did the first time.
+        """
+        history = self.screening_history(platform=platform)
+        outcomes: dict[str, dict[str, int]] = {}
+        for item in history.values():
+            if not item["screened"] or not item["decided"]:
+                continue
+            screened = item["screened"][-1]["action"]
+            bucket = outcomes.setdefault(screened, {})
+            for decision in item["decided"]:
+                bucket[decision["action"]] = bucket.get(decision["action"], 0) + 1
+        return {
+            "meaning": "每种粗筛结论之后，决策模型实际做了什么（按标的累计）",
+            "by_screening_action": outcomes,
+            "topics_with_history": len(history),
+        }
+
     def record_discovery_selection(
         self,
         *,

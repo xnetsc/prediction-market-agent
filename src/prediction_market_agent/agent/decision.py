@@ -26,6 +26,11 @@ DECISION_SCHEMA: dict[str, Any] = {
         "estimated_probability": {"type": "number", "minimum": 0, "maximum": 1},
         "rationale": {"type": "string", "minLength": 1, "maxLength": 1200},
         "headline": {"type": "string", "minLength": 1, "maxLength": 90},
+        # What would have to be true for this answer to change. Asked in the same call, so it
+        # costs nothing, and it is the only thing that makes a HOLD reusable: without it the next
+        # round has no way to tell "I looked and there is nothing here" from "nobody has looked",
+        # and spends its slots looking again at what was already settled.
+        "revisit_when": {"type": "string", "maxLength": 200},
         "priors": {
             "type": "array",
             "maxItems": 4,
@@ -42,6 +47,7 @@ DECISION_SCHEMA: dict[str, Any] = {
         "estimated_probability",
         "rationale",
         "headline",
+        "revisit_when",
         "priors",
     ],
 }
@@ -95,6 +101,13 @@ class Decision:
     estimated_probability: float
     rationale: str
     priors: tuple[str, ...] = ()
+    revisit_when: str = ""
+    """What would have to change for this answer to be different, in the round's own words.
+
+    A binary market priced fairly returns HOLD, and it will still be priced fairly the next time it
+    is looked at. Without a stated trigger every later round either re-decides it from scratch or
+    ignores it blindly; with one, a round can tell whether anything it was waiting for has happened.
+    """
     headline: str = ""
     """The conclusion in one line, for the person scanning the ledger rather than auditing it.
 
@@ -115,6 +128,7 @@ class Decision:
                 estimated_probability=float(value["estimated_probability"]),
                 rationale=str(value["rationale"]),
                 priors=tuple(str(item) for item in value.get("priors") or ())[:4],
+                revisit_when=str(value.get("revisit_when") or "").strip()[:200],
                 headline=str(value.get("headline") or "").strip()[:90],
             )
         except (KeyError, TypeError, ValueError) as error:

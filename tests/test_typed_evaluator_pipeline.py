@@ -677,3 +677,70 @@ class ConfidenceThatStandsApartTests(unittest.TestCase):
         gate = source[source.index("assessment.action in {\"DEFER\", \"REJECT\"}"):][:400]
         self.assertIn("is_high_confidence", gate)
         self.assertIn("trusted_outliers", gate)
+
+
+class TheScreenerRemembersTests(unittest.TestCase):
+    """The coarse screener judged every candidate as if it had never seen it.
+
+    It runs on hundreds of markets a round, and with only the candidate in front of it, a market
+    screened and decided a dozen times is screened again on the same facts and passed on again -
+    so the expensive round behind it keeps re-deciding what is already settled, and keeps reaching
+    the same answer. What it was missing is its own record: how it called this market before, what
+    the deciding model concluded, and how its verdicts have turned out on this platform at all.
+    """
+
+    def setUp(self) -> None:
+        self.directory = tempfile.TemporaryDirectory()
+        self.addCleanup(self.directory.cleanup)
+        self.memory = SessionMemory(Path(self.directory.name) / "s.sqlite3")
+        self.addCleanup(self.memory.connection.close)
+
+    def _screened(self, topic_id: str, action: str, confidence: float) -> None:
+        self.memory.record_topic_observations(platform="poly", observations=[{
+            "market_topic_id": topic_id, "title": "T", "status": "OPEN",
+            "liquidity_usdt": 1.0, "volume_usdt": 1.0, "end_time_ms": None,
+            "reference_price": None,
+            "features": {"typed_evaluation": {"action": action, "confidence": confidence}},
+        }])
+
+    def _decided(self, topic_id: str, action: str, headline: str, revisit: str) -> None:
+        decision_id = self.memory.begin_decision(
+            platform="poly", market_topic_id=topic_id, market_id="m", token_id="o",
+            strategy_name="general_agent", strategy_sha256="x", context={},
+        )
+        self.memory.complete_decision(
+            decision_id, provider="p", status="NO_ACTION",
+            final_decision={"action": action, "headline": headline, "revisit_when": revisit},
+        )
+
+    def test_every_screening_and_every_decision_is_kept_not_only_the_last(self) -> None:
+        for action in ("PRIORITIZE", "NEEDS_DATA", "PRIORITIZE"):
+            self._screened("t1", action, 0.7)
+        self._decided("t1", "HOLD", "观望一", "跌破 0.40 再问")
+        self._decided("t1", "HOLD", "观望二", "跌破 0.40 再问")
+        history = self.memory.screening_history(platform="poly")["t1"]
+        self.assertEqual(history["screen_counts"], {"PRIORITIZE": 2, "NEEDS_DATA": 1})
+        self.assertEqual(history["decision_counts"], {"HOLD": 2})
+        self.assertEqual([item["said"] for item in history["decided"]], ["观望一", "观望二"])
+        self.assertEqual(history["decided"][-1]["revisit_when"], "跌破 0.40 再问")
+
+    def test_the_screener_is_told_what_its_own_verdicts_led_to(self) -> None:
+        self._screened("t1", "PRIORITIZE", 0.8)
+        self._decided("t1", "HOLD", "观望", "跌破 0.40")
+        self._screened("t2", "PRIORITIZE", 0.8)
+        self._decided("t2", "BUY", "买入", "")
+        calibration = self.memory.screening_calibration(platform="poly")
+        self.assertEqual(calibration["by_screening_action"]["PRIORITIZE"], {"HOLD": 1, "BUY": 1})
+        self.assertEqual(calibration["topics_with_history"], 2)
+
+    def test_the_history_travels_with_the_candidate_and_the_state(self) -> None:
+        source = Path("src/prediction_market_agent/runtime/market_discovery.py").read_text()
+        self.assertIn('candidate["history"] = known', source)
+        self.assertIn('"screening_calibration": self._screening_calibration', source)
+        self.assertIn("self.memory.screening_history(platform=plugin.name)", source)
+
+    def test_the_screener_is_asked_to_use_them(self) -> None:
+        source = Path("src/prediction_market_agent/plugins/evaluators/jev.py").read_text()
+        block = source[source.index('questions[f"route_{key}"]'):][:2200]
+        for piece in ("history", "revisit_when", "already known", "screening_calibration"):
+            self.assertIn(piece, block, piece)

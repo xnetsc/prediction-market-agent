@@ -33,7 +33,7 @@ from prediction_market_agent.plugin_system.contracts import (
     TopicPage,
 )
 from prediction_market_agent.runtime.decision_strategy import DecisionEvolution
-from prediction_market_agent.runtime.market_discovery import DiscoveryEngine
+from prediction_market_agent.runtime.market_discovery import DiscoveryEngine, topic_features
 from prediction_market_agent.runtime.memory import SessionMemory
 
 
@@ -1280,3 +1280,77 @@ class TheRoundCanFetchItsOwnCandidatesTests(unittest.TestCase):
         self.assertFalse(answer["ok"])
         self.assertFalse(answer["supported"])
         self.assertIn("FIND_TOPICS", answer["error"])
+
+
+class AlreadyAnsweredTests(unittest.TestCase):
+    """A market found fairly priced stays fairly priced, and must stop taking slots for it.
+
+    Selection knew only when a topic was last picked and how often - which cannot tell "looked at
+    and left alone deliberately" from "never examined". So the same handful came back every round,
+    were decided the same way, and used up a budget meant for finding something new.
+    """
+
+    def setUp(self) -> None:
+        self.directory = tempfile.TemporaryDirectory()
+        self.addCleanup(self.directory.cleanup)
+        self.memory = SessionMemory(Path(self.directory.name) / "s.sqlite3")
+        self.addCleanup(self.memory.connection.close)
+
+    def _decide(self, topic_id: str, action: str, *, headline: str, revisit: str) -> None:
+        decision_id = self.memory.begin_decision(
+            platform="fake", market_topic_id=topic_id, market_id="m", token_id="o",
+            strategy_name="general_agent", strategy_sha256="x", context={},
+        )
+        self.memory.complete_decision(
+            decision_id, provider="p", status="NO_ACTION",
+            final_decision={"action": action, "headline": headline, "revisit_when": revisit},
+        )
+
+    def test_the_last_verdict_and_its_trigger_reach_the_round(self) -> None:
+        self._decide("t1", "HOLD", headline="观望：价差已反映", revisit="跌破 0.40 再问")
+        history = self.memory.topic_verdict_history(platform="fake")
+        self.assertEqual(history["t1"]["last_action"], "HOLD")
+        self.assertEqual(history["t1"]["revisit_when"], "跌破 0.40 再问")
+        self.assertEqual(history["t1"]["holds"], 1)
+
+    def test_repeated_holds_are_counted_and_marked(self) -> None:
+        for _ in range(3):
+            self._decide("t1", "HOLD", headline="观望", revisit="跌破 0.40 再问")
+        history = self.memory.topic_verdict_history(platform="fake")["t1"]
+        self.assertEqual(history["holds"], 3)
+        features = topic_features(
+            Topic(topic_id="t1", title="T", question="", description="", category="",
+                  status="OPEN", liquidity_usdt=1.0, volume_usdt=1.0),
+            previous=None, attention={"last_selected_at": 0, "selections": 3},
+            now_ms=int(time.time() * 1000), verdict=history,
+        )
+        self.assertEqual(features["previous_verdict"]["times_held"], 3)
+        self.assertEqual(features["previous_verdict"]["revisit_when"], "跌破 0.40 再问")
+        self.assertIn("verdict:held-repeatedly", features["buckets"])
+
+    def test_a_market_nobody_decided_says_so_rather_than_inventing_a_verdict(self) -> None:
+        features = topic_features(
+            Topic(topic_id="t2", title="T", question="", description="", category="",
+                  status="OPEN", liquidity_usdt=1.0, volume_usdt=1.0),
+            previous=None, attention=None, now_ms=int(time.time() * 1000), verdict=None,
+        )
+        self.assertNotIn("previous_verdict", features)
+        self.assertTrue(features["never_selected"])
+
+    def test_the_round_is_told_what_to_do_with_a_repeat(self) -> None:
+        from prediction_market_agent.agent.market_discovery import BuiltInMarketDiscovery
+
+        text = " ".join(BuiltInMarketDiscovery().instructions.split())
+        self.assertIn("previous_verdict", text)
+        self.assertIn("revisit_when", text)
+        self.assertIn("held twice", text)
+        self.assertIn("Recurring families", text)
+
+    def test_a_hold_has_to_name_what_would_change_it(self) -> None:
+        from prediction_market_agent.agent.decision import DECISION_SCHEMA
+        from prediction_market_agent.agent.strategy import BuiltInDecisionStrategy
+
+        self.assertIn("revisit_when", DECISION_SCHEMA["required"])
+        text = " ".join(BuiltInDecisionStrategy().instructions.split())
+        self.assertIn("revisit_when", text)
+        self.assertIn("priced about right", text)
