@@ -16,7 +16,7 @@
  */
 import { createServer } from 'node:http';
 import { mkdir, readFile, rename, stat } from 'node:fs/promises';
-import { createWriteStream, existsSync } from 'node:fs';
+import { createReadStream, createWriteStream, existsSync } from 'node:fs';
 import { once } from 'node:events';
 import { dirname, extname, join, resolve, sep } from 'node:path';
 import { spawn } from 'node:child_process';
@@ -28,13 +28,19 @@ import { chromium } from 'playwright';
  * timeout that says nothing about proxies. Re-exec once, with the flag, rather than making every
  * operator remember it. */
 if (!process.env.NODE_USE_ENV_PROXY && (process.env.HTTPS_PROXY || process.env.https_proxy)) {
-  const { spawnSync } = await import('node:child_process');
-  const again = spawnSync(process.execPath, process.argv.slice(1), {
+  const { spawn } = await import('node:child_process');
+  const again = spawn(process.execPath, process.argv.slice(1), {
     stdio: 'inherit',
     env: { ...process.env, NODE_USE_ENV_PROXY: '1' },
   });
-  process.exit(again.status ?? 1);
-}
+  // Signals are forwarded and the exit is mirrored, so that this stays one process to whoever
+  // started it. Without this, stopping the parent leaves the child holding the port, and the next
+  // start fails with EADDRINUSE against a service nobody can see.
+  for (const signal of ['SIGINT', 'SIGTERM', 'SIGHUP']) {
+    process.on(signal, () => again.kill(signal));
+  }
+  again.on('exit', (code, signal) => process.exit(signal ? 1 : (code ?? 0)));
+} else {
 
 const argv = process.argv.slice(2);
 const option = (name, fallback) => {
@@ -156,13 +162,42 @@ async function serveStatic(request, response, url) {
   try {
     const info = await stat(path);
     if (info.isDirectory()) throw new Error('directory');
+    const type = TYPES[extname(path)] || 'application/octet-stream';
+    // Ranged reads are how this SDK works, not an optimisation. It decides what a checkpoint IS by
+    // reading the first few bytes of its safetensors index, and it streams multi-hundred-megabyte
+    // shards the same way. A server that answers every range with the whole file breaks the first
+    // of those silently: the decision model was not recognised, so it was loaded as a language
+    // model and failed on a tensor it never had.
+    const range = /^bytes=(\d*)-(\d*)$/.exec(String(request.headers.range || ''));
+    if (range) {
+      const size = info.size;
+      const start = range[1] ? Number(range[1]) : Math.max(0, size - Number(range[2] || 0));
+      const end = range[1] ? (range[2] ? Math.min(Number(range[2]), size - 1) : size - 1) : size - 1;
+      if (!(start >= 0 && start <= end && end < size)) {
+        response.writeHead(416, { 'Content-Range': `bytes */${size}`, ...ISOLATION }).end();
+        return;
+      }
+      response.writeHead(206, {
+        'Content-Type': type,
+        'Content-Length': end - start + 1,
+        'Content-Range': `bytes ${start}-${end}/${size}`,
+        'Accept-Ranges': 'bytes',
+        ...ISOLATION,
+      });
+      createReadStream(path, { start, end }).pipe(response);
+      return;
+    }
     const body = await readFile(path);
     response.writeHead(200, {
-      'Content-Type': TYPES[extname(path)] || 'application/octet-stream',
+      'Content-Type': type,
       'Content-Length': body.length,
+      'Accept-Ranges': 'bytes',
       ...ISOLATION,
     }).end(body);
   } catch {
+    // Logged, not swallowed: a load that fails inside Pyodide reports "HTTP 404" with no URL, and
+    // without this line there is no way to tell which file it went looking for.
+    console.log('[404]', url.pathname);
     response.writeHead(404, ISOLATION).end('not found');
   }
 }
@@ -229,7 +264,7 @@ async function browser() {
     const instance = await ensureBrowser();
     page = await instance.newPage();
     page.on('console', (message) => console.log('[page]', message.text()));
-    await page.goto(`http://127.0.0.1:${PORT}/laya/page.html?local=${encodeURIComponent('/models/laya')}`);
+    await page.goto(`http://127.0.0.1:${PORT}/laya/page.html?local=${encodeURIComponent('/models/laya/')}`);
     await page.waitForFunction(
       () => window.__laya && (window.__laya.status().ready || window.__laya.status().error),
       null,
@@ -315,6 +350,7 @@ async function completions(request, response, body) {
 
 const server = createServer(async (request, response) => {
   const url = new URL(request.url, `http://127.0.0.1:${PORT}`);
+  if (process.env.LAYA_TRACE) console.log('[req]', request.method, url.pathname);
   try {
     if (request.method === 'GET' && url.pathname === '/health') {
       const status = page ? await page.evaluate(() => window.__laya.status()) : { ready: false };
@@ -348,6 +384,16 @@ const server = createServer(async (request, response) => {
   }
 });
 
+// A port already in use is an ordinary situation - an older copy of this service is still up -
+// and it deserves a sentence, not an unhandled 'error' event and a stack trace about net.js.
+server.on('error', (error) => {
+  if (error && error.code === 'EADDRINUSE') {
+    console.error(`端口 ${PORT} 已被占用：可能上一份服务还在跑。停掉它，或用 --port 换一个。`);
+    process.exit(1);
+  }
+  throw error;
+});
+
 server.listen(PORT, '127.0.0.1', async () => {
   console.log(`laya service on http://127.0.0.1:${PORT}  (webtorch: ${WEBTORCH})`);
   try {
@@ -357,3 +403,4 @@ server.listen(PORT, '127.0.0.1', async () => {
     console.error('模型没能就绪：', (error && error.message) || error);
   }
 });
+}

@@ -19,6 +19,19 @@ bash start.sh
 第一次会做三件事，之后都不再做：装 Playwright、按需装一个无头 Chromium、把模型（约 800MB）下载到
 `models/laya/`。之后每次启动都从本地读，不再联网取模型。
 
+模型按仓库自己的布局存在 `models/laya/`：
+
+```
+model.safetensors
+rl_agent_config.json
+encoder/config.json
+tokenizer/tokenizer.json
+```
+
+**不要把它摊平。** SDK 是靠读 `model.safetensors` 的头来认出"这是决策模型"的，嵌套目录是它支持的形状；
+在根目录另放一份 `config.json` 反而会让它当成语言模型去加载，然后在一个根本不存在的张量上失败。
+同理，服务必须支持 Range 请求——那次"认不出模型"就是因为范围读被当成整文件返回了。
+
 看到这行就是好了：
 
 ```
