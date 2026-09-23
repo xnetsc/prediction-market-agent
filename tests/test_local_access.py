@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import tempfile
 import unittest
+import io
+import urllib.error
 from pathlib import Path
 from unittest.mock import patch
 
@@ -13,6 +15,26 @@ from prediction_market_agent.runtime.dashboard import create_app
 
 
 class LocalAccessTests(unittest.TestCase):
+    def test_laya_probe_distinguishes_loading_from_disconnected(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config = Config(working_directory=root, session_db=root / "sessions.sqlite3",
+                auth_db=root / "auth.sqlite3", management_file=root / "selection.json",
+                plugin_directories_file=root / "directories.json")
+            endpoint = "http://host.docker.internal:8899/v1"
+            health = "http://host.docker.internal:8899/health"
+            loading = urllib.error.HTTPError(health, 503, "Service Unavailable", None,
+                io.BytesIO(b'{"ready":false,"status":"loading model"}'))
+            with TestClient(create_app(config, start_robot=False), base_url="http://localhost") as client:
+                with patch("prediction_market_agent.runtime.dashboard.urllib.request.urlopen",
+                           side_effect=loading) as urlopen:
+                    response = client.post("/api/local", json={"url": "/api/laya/probe",
+                        "body": {"endpoint": endpoint}})
+                self.assertEqual(response.status_code, 200)
+                self.assertEqual(response.json(), {"reachable": True, "ready": False,
+                    "backend": "", "model": "", "status": "loading model"})
+                urlopen.assert_called_once_with(health, timeout=8)
+
     def test_responsive_assets_are_public_but_only_allowlisted(self):
         with tempfile.TemporaryDirectory() as directory:
             root=Path(directory)

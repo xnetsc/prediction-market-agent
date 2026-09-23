@@ -12,15 +12,16 @@
  * request carries the state and the questions, the reply carries the answers, and nothing here
  * decides anything - no threshold is applied and no probability is turned into a verdict.
  *
- *   node server.mjs --webtorch /path/to/webtorch [--port 8899] [--model convaiinnovations/laya]
+ *   node server.mjs --webtorch /path/to/webtorch [--port 8899]
  */
 import { createServer } from 'node:http';
-import { mkdir, readFile, rename, stat } from 'node:fs/promises';
+import { mkdir, readFile, rename, rm, stat } from 'node:fs/promises';
 import { createReadStream, createWriteStream, existsSync } from 'node:fs';
 import { once } from 'node:events';
 import { dirname, extname, join, resolve, sep } from 'node:path';
 import { spawn } from 'node:child_process';
 import { chromium } from 'playwright';
+import { syncWebtorch } from './sync-webtorch.mjs';
 
 /* Node's own fetch ignores HTTPS_PROXY unless it is told not to, and it is told with an environment
  * variable read before any of this runs. On a machine that reaches the model host through a proxy -
@@ -206,6 +207,37 @@ async function serveStatic(request, response, url) {
 
 let page = null;
 let booted = null;
+let modelWork = Promise.resolve();
+const SDK_CHECK_MS = 6 * 60 * 60 * 1000;
+
+function exclusive(task) {
+  const result = modelWork.catch(() => {}).then(task);
+  modelWork = result.catch(() => {});
+  return result;
+}
+
+async function refreshSdk() {
+  const result = await syncWebtorch({ target: WEBTORCH, keepPrevious: true });
+  if (!result.changed) return;
+  try {
+    if (booted) await (await booted).close();
+    page = null;
+    booted = null;
+    await ensureLocalModel();
+    await browser();
+    if (result.previous) await rm(result.previous, { recursive: true, force: true });
+  } catch (error) {
+    if (result.previous) {
+      if (booted) await booted.then((instance) => instance.close(), () => {});
+      page = null;
+      booted = null;
+      await rm(WEBTORCH, { recursive: true, force: true });
+      await rename(result.previous, WEBTORCH);
+      await browser();
+    }
+    throw new Error(`新版 webtorch SDK 未能启动，已恢复上一版：${error.message || error}`);
+  }
+}
 
 /* Launch options that matter: Playwright turns the GPU off by default, which is the one thing this
  * service needs on, and WebGPU is only exposed to a secure context - which the loopback origin in
@@ -227,8 +259,8 @@ function run(command, args) {
 /** A browser to run the model in, installing one if this machine has none.
  *
  * The service is useless without it, and "install a browser" is a worse thing to put in a README
- * than to do: on a fresh machine, a container image or a function-compute sandbox, nobody is there
- * to read the instruction. The installed Chromium ships with Playwright and supports WebGPU the
+ * than to do: on a fresh GPU-equipped host, the downloaded bundle should be self-contained. The
+ * installed Chromium ships with Playwright and supports WebGPU the
  * same way; the system Chrome is tried first only because it is already there. */
 async function ensureBrowser(log = console.log) {
   const attempts = [
@@ -372,7 +404,8 @@ const server = createServer(async (request, response) => {
     if (request.method === 'POST' && /chat\/completions$/.test(url.pathname)) {
       const chunks = [];
       for await (const chunk of request) chunks.push(chunk);
-      await completions(request, response, JSON.parse(Buffer.concat(chunks).toString('utf8') || '{}'));
+      const body = JSON.parse(Buffer.concat(chunks).toString('utf8') || '{}');
+      await exclusive(() => completions(request, response, body));
       return;
     }
     await serveStatic(request, response, url);
@@ -396,11 +429,16 @@ server.on('error', (error) => {
 
 server.listen(PORT, '127.0.0.1', async () => {
   console.log(`laya service on http://127.0.0.1:${PORT}  (webtorch: ${WEBTORCH})`);
-  try {
+  await exclusive(async () => {
+    try { await refreshSdk(); }
+    catch (error) { console.error('GitHub SDK 更新检查失败，继续使用已打包版本：', error.message || error); }
     await ensureLocalModel();
     await browser();
-  } catch (error) {
+  }).catch((error) => {
     console.error('模型没能就绪：', (error && error.message) || error);
-  }
+  });
 });
+setInterval(() => {
+  exclusive(refreshSdk).catch((error) => console.error('定时检查 webtorch SDK 失败：', error.message || error));
+}, SDK_CHECK_MS);
 }

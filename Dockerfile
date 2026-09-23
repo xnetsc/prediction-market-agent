@@ -17,9 +17,9 @@ WORKDIR /app
 COPY pyproject.toml LICENSE README.md /app/
 COPY src /app/src
 COPY deploy/container-entrypoint.sh deploy/container-with-worker.sh /app/deploy/
-# The local decision model's service, carried as a resource rather than run here: it needs a GPU,
-# and a container on macOS has none - Docker Desktop does not pass the Metal device through. The
-# console offers this directory as a zip so an operator can run it where there is one.
+# The local decision model's service is a downloadable resource, not a process run in this image.
+# The operator runs it separately where browser WebGPU is available; GPU access to containers
+# depends on the host and runtime configuration, which this image does not assume.
 COPY deploy/laya-service /opt/laya-service
 RUN python -m pip install --no-cache-dir . && chmod +x /app/deploy/container-entrypoint.sh /app/deploy/container-with-worker.sh
 

@@ -19,6 +19,8 @@ const fs = require('node:fs');
             const context = await browser.newContext({viewport:{width,height:1000},reducedMotion:'reduce'});
             const page = await context.newPage();
             let remoteModel=null;
+            let layaReady=false;
+            let layaEndpoint='http://host.docker.internal:8899/v1';
             const passiveReads=[];
             await page.route('**/api/local',async route=>{
                 const message=route.request().postDataJSON();
@@ -30,6 +32,12 @@ const fs = require('node:fs');
                         {kind:'decision_provider',name:'claude',status:{control_type:'client',state:'authenticated',message:'已登录',installed_version:'1.0.0',model:'fixture-claude',usage:{checked_at:checked,available:false,source:'fixture',windows:[{label:'5 小时窗口',used_percent:100,resets_at:checked+3600},{label:'周额度',used_percent:82,resets_at:checked+172800}]},actions:[{id:'refresh_usage',label:'刷新账号状态',group:'账号状态'},{id:'login',label:'登录 / 重新登录'}]}},
                         {kind:'decision_provider',name:'openrouter',status:{control_type:'openrouter',state:'configured',message:'已配置',model:'fixture/structured-a',agent_cli:{requested:'AUTO',selected:'CODEX',available:['CODEX','CLAUDE'],unavailable:{}},usage:{checked_at:checked,available:true,source:'fixture',account:{total_credits:100.5,total_usage:25.75,balance:74.75},key:{usage:25.5,usage_daily:1.5,usage_weekly:7.5,usage_monthly:20.5,limit:100,limit_remaining:74.5,limit_reset:'monthly'}},actions:[{id:'refresh_usage',label:'刷新余额与用量',group:'账号与额度'}]}}
                     ]}});return;
+                }
+                if(message.url==='/api/laya/probe'){
+                    assert.equal(message.body.endpoint,layaEndpoint);
+                    await route.fulfill({json:layaReady
+                        ?{reachable:true,ready:true,backend:'webgpu',model:'convaiinnovations/laya'}
+                        :{reachable:true,ready:false,status:'loading model'}});return;
                 }
                 if(message.url==='/api/plugins/config/choices'&&message.body.name==='openrouter'){
                     await route.fulfill({json:{items:publicCatalog}});return;
@@ -99,6 +107,16 @@ const fs = require('node:fs');
                     assert.equal(await page.locator('#pnlTotals').count(),1);
                     assert.equal(await page.locator('#pnlAccounts').count(),1);
                     assert.equal(await page.locator('#pnlEvents').count(),1);
+                }
+                if(view==='models'){
+                    await page.locator('#layaPanel button').click();
+                    await page.waitForFunction(()=>document.getElementById('layaStatus').textContent.includes('服务已连接，模型尚未就绪'));
+                    layaReady=true;
+                    layaEndpoint='http://gpu-host.example:8899/v1';
+                    await page.locator('#layaEndpoint').fill(layaEndpoint);
+                    await page.locator('#layaPanel button').click();
+                    await page.waitForFunction(()=>document.getElementById('layaStatus').textContent.includes('跑在 GPU 上'));
+                    assert((await page.locator('#layaStatus').innerText()).includes('跑在 GPU 上'));
                 }
             }
             if(width<801){

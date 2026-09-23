@@ -1,14 +1,15 @@
 # 本地决策模型服务（laya）
 
-粗筛用的决策模型，跑在你自己的机器上，**不花钱、不出网**（除了第一次下载模型）。
+粗筛用的决策模型，跑在你自己的机器上，**不产生模型调用费用**。模型推理在本机完成；首次启动下载模型，服务启动及此后每 6 小时会向 GitHub 检查 webtorch SDK 更新。
 
-## 为什么不在容器里跑
+## 为什么不在当前机器人容器里跑
 
-它需要 GPU。webtorch 是编译成 WebAssembly 的 CPython，用 WebGPU 算；而 macOS 上的 Docker
-不把 Metal 显卡透传给容器（容器里没有 `/dev/dri`），所以在容器里只能退回 CPU——800MB 的编码器
-在 CPU 上逐个候选地跑，不是"慢一点"，是不可用。
+它需要浏览器 WebGPU。当前机器人镜像没有配置这套 GPU 推理环境，也不会启动 Laya。
+Docker 容器能否使用 GPU，取决于宿主系统、显卡和容器运行配置；不能说所有容器都不支持。
+本方案把它作为独立服务，供用户在确认 WebGPU 可用的机器上自行运行。
 
-所以：**服务跑在宿主机，机器人在容器里通过 `http://host.docker.internal:8899/v1` 调用它。**
+管理页只提供说明、下载和连接测试。`http://host.docker.internal:8899/v1` 是一种示例地址，
+**不是对当前机器的检测结果**；请在页面填写机器人容器实际能访问的地址。
 
 ## 怎么启动
 
@@ -16,8 +17,12 @@
 bash start.sh
 ```
 
-第一次会做三件事，之后都不再做：装 Playwright、按需装一个无头 Chromium、把模型（约 800MB）下载到
-`models/laya/`。之后每次启动都从本地读，不再联网取模型。
+第一次会装 Playwright、按需装一个无头 Chromium、把模型（约 800MB）下载到 `models/laya/`。
+之后每次启动都从本地读取模型权重，不再重复下载权重。
+
+服务启动及此后每 6 小时会检查 [GitHub 的 webpytorch 主分支](https://github.com/xnetsc/webpytorch)。
+只有版本变化或资源包缺文件时，才下载本服务使用的 `webtorch/`、浏览器运行文件 `dist/`、`LICENSE` 和 `NOTICE`，逐文件校验 Git blob 哈希后整包替换并重新载入模型；如果新版载入失败，则恢复上一版 SDK。网络检查失败也不会阻止已打包版本启动。`models/`、浏览器数据和机器人凭据不在更新范围内。
+仓库另有每日定时的同步工作流；它把相同的依赖更新提交到仓库，再触发容器镜像重建。运行中的服务与新镜像分别按 GitHub 版本检查，不依赖本地源码目录。
 
 模型按仓库自己的布局存在 `models/laya/`：
 
@@ -43,12 +48,15 @@ laya ready: convaiinnovations/laya on webgpu
 
 ## 怎么接到机器人
 
-在机器人界面的模型配置里，把粗筛评估器的地址填成：
+在机器人界面填写 Laya 服务地址并测试。下面只是常见示例，不是自动检测：
 
 ```
-http://host.docker.internal:8899/v1     # 机器人在容器里
-http://127.0.0.1:8899/v1                # 机器人和它在同一台机器上
+http://host.docker.internal:8899/v1     # 适用于能解析并连接此宿主机名的容器环境
+http://127.0.0.1:8899/v1                # 仅适用于调用方与服务共享网络命名空间
 ```
+
+服务默认只监听本机回环地址。若容器或另一台机器无法访问，不要直接把无认证接口暴露到公网；
+应按部署环境配置受控的网络转发，再把可访问地址填到页面。
 
 API 是 OpenRouter 的 chat-completions 形状，所以任何能调 OpenRouter 的东西都能调它：
 
@@ -68,4 +76,4 @@ curl -s http://127.0.0.1:8899/v1/chat/completions -H 'content-type: application/
 | `--endpoint` | `https://huggingface.co` | 首次下载模型的来源，可换镜像 |
 | `--headless false` | 无头 | 想看看浏览器里发生了什么时用 |
 
-代理：服务会读 `HTTPS_PROXY` / `HTTP_PROXY`（Node 默认不读，这里替你处理了）。
+需要 `curl` 访问 GitHub 检查 SDK；模型只在首次缺失时下载。代理：SDK 检查使用 curl 的代理环境变量；服务也会读 `HTTPS_PROXY` / `HTTP_PROXY`。

@@ -1978,14 +1978,15 @@ function discoveryTitle(r){
 // 以及答的是不是 GPU 那条路径。连不上和跑在 CPU 上是两种不同的坏，要分开说。
 async function checkLaya(){
     const note=document.getElementById('layaStatus');
-    const endpoint=(document.getElementById('layaEndpoint')?.textContent||'').trim();
+    const endpoint=(document.getElementById('layaEndpoint')?.value||'').trim();
     note.className='status pending';note.textContent='正在问 '+endpoint+' …';
     try{
-        const result=await post('/api/secure',{path:'/api/laya/probe',endpoint:endpoint});
-        if(!result.reachable){note.className='status danger';note.textContent='连不上：'+esc(result.detail||'没有响应');return}
+        const result=await post('/api/laya/probe',{endpoint});
+        if(!result.reachable){note.className='status danger';note.textContent='连不上：'+(result.detail||'没有响应');return}
+        if(!result.ready){note.className='status pending';note.textContent='服务已连接，模型尚未就绪：'+(result.status||'正在加载或启动失败，请查看服务终端日志');return}
         note.className=result.backend==='webgpu'?'status good':'status danger';
         note.textContent=result.backend==='webgpu'
-            ?'已就绪：'+esc(result.model||'')+'，跑在 GPU 上'
-            :'能连上，但跑在 '+esc(result.backend||'未知')+' 上——粗筛会慢到不可用，检查那台机器的显卡和浏览器';
+            ?'已就绪：'+(result.model||'')+'，跑在 GPU 上'
+            :'能连上，但跑在 '+(result.backend||'未知')+' 上——粗筛会慢到不可用，检查那台机器的显卡和浏览器';
     }catch(e){note.className='status danger';note.textContent=e.message}
 }

@@ -16,6 +16,7 @@ __pycache__/
 .pytest_cache/
 build/
 dist/
+!deploy/laya-service/vendor/webtorch/dist/
 deploy/aliyun/build/
 deploy/aliyun/.build.*/
 deploy/aliyun/.wheel.*/

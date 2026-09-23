@@ -378,6 +378,9 @@ class TheLocalDecisionModelIsShippedTests(unittest.TestCase):
             self.assertTrue((root / name).exists(), name)
         self.assertTrue((root / "vendor" / "webtorch" / "webtorch" / "js" / "webtorch-main.js").exists(),
                         "the SDK travels with it; a package that needs another checkout is not one")
+        for name in ("wgpy-main.js", "wgpy-worker.js", "wgpy_webgpu-1.0.0-py3-none-any.whl",
+                     "wgpy_webgl-1.0.0-py3-none-any.whl"):
+            self.assertTrue((root / "vendor" / "webtorch" / "dist" / name).exists(), name)
         self.assertIn("models/", (root / ".gitignore").read_text(),
                       "800 MB of weights are fetched once on the machine that uses them")
 
@@ -386,7 +389,9 @@ class TheLocalDecisionModelIsShippedTests(unittest.TestCase):
         self.assertIn('"/laya-service.zip"', source)
         self.assertIn('"/api/laya/probe"', source)
         panel = source[source.index('id="layaPanel"'):][:2000]
-        self.assertIn("不会把显卡透传给容器", panel)
+        self.assertIn("Docker 能否使用 GPU 取决于宿主系统和容器配置", panel)
+        self.assertIn("不会在容器内启动 Laya", panel)
+        self.assertIn('id="layaEndpoint" type="url"', panel)
         self.assertIn("bash laya-service/start.sh", panel)
         self.assertIn("host.docker.internal:8899", panel)
 
