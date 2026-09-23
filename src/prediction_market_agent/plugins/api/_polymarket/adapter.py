@@ -74,6 +74,7 @@ class PolymarketApiPlugin:
     """Polymarket Gamma discovery + CLOB V2 market data and trading adapter."""
 
     name = "polymarket"
+    supports_lightweight_search = True
     capabilities = ApiCapabilities(
         realtime_order_book=True,
         candles=True,
@@ -756,7 +757,9 @@ class PolymarketApiPlugin:
     def close(self) -> None:
         self._write_transport.close()
 
-    def search_market_candidates(self, query: str, limit: int) -> list[MarketCandidate]:
+    def search_market_candidates(
+        self, query: str, limit: int, *, lightweight: bool = False
+    ) -> list[MarketCandidate]:
         query_tokens = _tokens(query)
         ranked: list[tuple[float, dict[str, Any]]] = []
         for event in self._events:
@@ -772,20 +775,21 @@ class PolymarketApiPlugin:
             topic = self._topic(raw)
             detail: TopicDetail | None = None
             books: dict[str, OrderBook] = {}
-            try:
-                detail = self.get_topic(topic.topic_id)
-                for market in detail.markets[:4]:
-                    yes = next(
-                        (outcome for outcome in market.outcomes if outcome.name.upper() == "YES"),
-                        None,
-                    )
-                    if yes and yes.outcome_id:
-                        books[yes.outcome_id] = self.get_order_book(
-                            market.market_id, yes.outcome_id
+            if not lightweight:
+                try:
+                    detail = self.get_topic(topic.topic_id)
+                    for market in detail.markets[:4]:
+                        yes = next(
+                            (outcome for outcome in market.outcomes if outcome.name.upper() == "YES"),
+                            None,
                         )
-            except (KeyError, TypeError, ValueError, RuntimeError):
-                detail = None
-                books = {}
+                        if yes and yes.outcome_id:
+                            books[yes.outcome_id] = self.get_order_book(
+                                market.market_id, yes.outcome_id
+                            )
+                except (KeyError, TypeError, ValueError, RuntimeError):
+                    detail = None
+                    books = {}
             results.append(
                 MarketCandidate(
                     platform=self.name,

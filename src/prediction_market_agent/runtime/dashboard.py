@@ -82,10 +82,11 @@ HTML = r"""<!doctype html><html lang="zh-CN"><head><meta charset="utf-8">
 <section data-view="plugins" hidden><details><summary>安装新的自定义插件</summary><p class="muted">把受信任的 Python 插件源码写入已配置的类别目录。新插件安装后保持禁用，只扫描文件名；启用后才会导入并调用初始化函数。</p><div class="plugin-grid"><label class="field"><b>类别</b><select id="installKind" onchange="renderInstallTargets()"></select></label><label class="field"><b>安装目录</b><select id="installTarget"></select></label><label class="field"><b>插件名</b><input id="installName" placeholder="example_plugin"></label></div><label class="field"><b>Python 源码</b><textarea id="installSource" rows="14" placeholder="def initialize_plugin(context): ..."></textarea></label><div class="toolbar"><button class="primary" onclick="installPlugin()">安装并刷新</button><span id="installStatus" class="status muted"></span></div></details></section>
 <section data-view="decisions" hidden><h3>查看机器人为什么这样做</h3><details class="page-guide"><summary>这个页面怎么看</summary><p class="muted">一条记录是一次判断，不等于一笔成交。点开一条先看四项：发现了什么、怎么分析的、结论（观望 / 买入 / 卖出）、结果（下单成交情况，揭标后的盈亏）；需要时再看“细节”和“原始数据”。</p><ol class="process-strip"><li>发现市场</li><li>收集证据</li><li>模型判断</li><li>风险检查</li><li>执行与跟踪</li></ol></details><div class="toolbar ledger-toolbar"><button class="primary" onclick="refreshAudit()" title="重新读取决策记录">↻ 刷新</button><span class="muted" id="ledgerStamp">尚未读取</span><span class="muted">这里不自动刷新——展开的记录不会在你读的时候被收起。</span><label class="ledger-language">决策依据语言 <select id="ledgerLanguage" onchange="saveLedgerLanguage(this.value)"><option value="zh">中文</option><option value="en">English</option></select></label><span class="status" id="ledgerLanguageStatus" role="status"></span></div><div class="ledger-tabs" role="tablist"><button role="tab" data-group="concluded" aria-selected="true" onclick="selectLedgerTab('concluded')">有结论 <span class="tab-count" id="tabCount_concluded"></span></button><button role="tab" data-group="running" aria-selected="false" onclick="selectLedgerTab('running')">分析中 <span class="tab-count" id="tabCount_running"></span></button><button role="tab" data-group="failed" aria-selected="false" onclick="selectLedgerTab('failed')">出错 <span class="tab-count" id="tabCount_failed"></span></button></div><p class="muted" id="ledgerTabNote"></p><div class="result-chips" id="ledgerResultChips" role="group" aria-label="按结果筛选"></div><div class="ledger-bulk" id="ledgerBulk"><label class="ledger-pick-all"><input type="checkbox" id="ledgerPickAll" onchange="pickAllShown(this.checked)"> 全选当前显示的</label><span class="muted" id="ledgerPickCount">勾选记录可以一起删除</span><button id="ledgerForgetPicked" onclick="forgetPicked()" disabled>删除所选</button><button class="ledger-forget-category" id="ledgerForgetCategory" onclick="forgetCategory()">删除本类全部…</button></div><div class="filter-bar"><label>平台<input id="platform" placeholder="全部平台"></label><label>模型服务<input id="providerFilter" placeholder="全部服务"></label><label>记录状态<select id="statusFilter"><option value="">全部状态</option><option value="STARTED">分析中</option><option value="PROVIDER_ERROR">模型调用失败</option><option value="RISK_REJECTED">规则拒绝，未执行</option><option value="EXECUTION_ERROR">执行失败</option><option value="COMPLETED">流程已完成</option></select></label><button class="primary" onclick="refreshAudit()">查询记录</button></div></section>
 <section data-view="decisions" hidden><div class="section-heading"><div><h3>决策记录</h3><p>先显示最近 10 条，向下滚动每次再加载 5 条。点开一条记录才会读取它的完整证据。</p></div></div><div id="decisions"></div></section>
-<section data-view="decisions" hidden><div class="section-heading"><div><h3>市场采集与候选分析</h3><p>这部分来自独立的采集、粗筛和候选选择证据，不会因为删除决策记录而消失；模型失败后采用了什么降级路径也会在这里显示。</p></div></div><div id="discoveryActivity"><p class="muted">正在读取采集记录…</p></div></section>
+<section data-view="decisions" hidden><div class="section-heading"><div><h3>市场采集与候选分析</h3><p>这里显示已经完成并保存的采集，不代表当前轮次正在取得新数据。删除决策记录不会清除采集证据；模型失败的降级路径也会在这里显示。</p></div></div><div id="discoveryActivity"><p class="muted">正在读取采集记录…</p></div><details id="evaluatorScreeningsPanel" class="diagnostic-detail"><summary>评估器粗筛明细 <span>逐候选记录，展开后读取</span></summary><p class="muted">只列出已返回并保存的粗筛结果；未粗筛候选不会冒充评估结果，失败调用见上方异常。原始模型请求未单独保存。</p><div id="evaluatorScreenings"></div></details></section>
+<section data-view="decisions" hidden class="advanced-section"><details><summary>决策记录删除审计 <span>管理操作，不是市场采集</span></summary><div id="deletionAudit"></div></details></section>
 <section data-view="decisions" hidden class="advanced-section"><details><summary>平台操作明细 <span>排查问题时展开</span></summary><p class="muted">发送给平台的操作和返回结果；请求失败不代表成交。</p><div id="actions"></div></details></section>
-<section data-view="decisions" hidden class="advanced-section"><details><summary>模型对话明细 <span>排查问题时展开</span></summary><p class="muted">一次决策可能多次询问模型。这里用于排查模型调用失败。</p><div id="turns"></div></details></section>
-<section data-view="decisions" hidden class="advanced-section"><details><summary>信息收集明细 <span>排查问题时展开</span></summary><p class="muted">模型为收集信息而调用的工具及结果。通常无需查看。</p><div id="steps"></div></details></section>
+<section data-view="decisions" hidden class="advanced-section"><details><summary>模型对话明细 <span>排查问题时展开</span></summary><p class="muted">发现阶段的续扫和候选选择、交易决策的模型调用与失败都会记录；删除关联决策时，其模型往返也会删除。</p><div id="turns"></div></details></section>
+<section data-view="decisions" hidden class="advanced-section"><details><summary>信息收集明细 <span>排查问题时展开</span></summary><p class="muted">只记录模型实际调用的工具及结果；本轮没用工具就不会产生步骤。删除关联决策时，其工具步骤也会删除。</p><div id="steps"></div></details></section>
 <section data-view="settings" hidden class="advanced-section"><details><summary>技术运行清单 <span>排查问题时查看</span></summary><pre id="manifest"></pre></details></section></main><button id="globalFeedback" hidden aria-label="关闭操作提示" role="status"></button>
 <script src="/assets/login-probe.js?v=__CONSOLE_VERSION__"></script>
 <script src="/assets/dashboard-views.js?v=__CONSOLE_VERSION__"></script>
@@ -203,7 +204,7 @@ async function refreshPlugins(){let s=managementFeedback();setOperationStatus(s,
 async function savePluginConfig(kind,name){let root=document.getElementById('plugin_'+kind+'_'+name),values={},clear_secrets=[];for(let e of root.querySelectorAll('[data-field]')){if(e.dataset.clearSecret==='true')clear_secrets.push(e.dataset.field);let v=e.type==='checkbox'?e.checked:e.value;if(e.dataset.type==='integer')v=Number.parseInt(v,10);if(e.dataset.type==='number')v=Number(v);values[e.dataset.field]=v}setOperationStatus(pluginFeedback(kind,name),'正在保存 '+name+' 配置…','pending');try{await post('/api/plugins/config',{kind,name,values,clear_secrets});await refreshManager();setOperationStatus(pluginFeedback(kind,name),name+' 配置已保存，运行条件已重新检查')}catch(e){setOperationStatus(pluginFeedback(kind,name),e.message,'danger')}}
 async function deletePluginConfig(kind,name){if(!confirm('删除 '+kind+':'+name+' 的私有配置并恢复默认值？'))return;setOperationStatus(pluginFeedback(kind,name),'正在删除 '+name+' 配置…','pending');try{await post('/api/plugins/config/delete',{kind,name});await refreshManager();setOperationStatus(pluginFeedback(kind,name),kind+':'+name+' 配置已删除')}catch(e){setOperationStatus(pluginFeedback(kind,name),e.message,'danger')}}
 async function resetPluginField(kind,name,field){setOperationStatus(pluginFeedback(kind,name),'正在恢复 '+field+'…','pending');try{await post('/api/plugins/config/reset',{kind,name,fields:[field]});await refreshManager();setOperationStatus(pluginFeedback(kind,name),kind+':'+name+' 的 '+field+' 已恢复默认值')}catch(e){setOperationStatus(pluginFeedback(kind,name),e.message,'danger')}}
-async function saveSelection(){let enabled={};for(let kind of KINDS)enabled[kind]=[];for(let kind of PLUGIN_CENTER_KINDS.filter(x=>x!=='decision_strategy')){let rows=[...document.querySelectorAll('.enable[data-kind="'+kind+'"]:checked')].map(e=>({name:e.dataset.name,priority:Number(document.querySelector('.priority[data-kind="'+kind+'"][data-name="'+e.dataset.name+'"]').value)||99})).sort((a,b)=>a.priority-b.priority);enabled[kind]=rows.map(x=>x.name)}enabled.decision_provider=[...document.querySelectorAll('.model-enable:checked')].map(e=>({name:e.dataset.name,priority:Number(document.querySelector('.model-priority[data-name="'+e.dataset.name+'"]').value)||99})).sort((a,b)=>a.priority-b.priority).map(x=>x.name);let strategy=document.querySelector('input[name="strategy"]:checked')?.value||'';enabled.decision_strategy=strategy?[strategy]:[];let status=managementFeedback();setOperationStatus(status,'正在保存启用状态与顺序…','pending');try{await post('/api/plugins/selection',{enabled,decision_strategy:strategy,strategy_evolution:document.getElementById('evolutionToggle')?.checked!==false});await refreshManager();setOperationStatus(managementFeedback(),'启用状态和优先级已保存；启动向导已按新状态更新')}catch(e){setOperationStatus(status,e.message,'danger')}}
+async function saveSelection(){let enabled={};for(let kind of KINDS)enabled[kind]=[];for(let kind of PLUGIN_CENTER_KINDS.filter(x=>x!=='decision_strategy')){let rows=[...document.querySelectorAll('.enable[data-kind="'+kind+'"]:checked')].map(e=>({name:e.dataset.name,priority:Number(document.querySelector('.priority[data-kind="'+kind+'"][data-name="'+e.dataset.name+'"]').value)||99})).sort((a,b)=>a.priority-b.priority);enabled[kind]=rows.map(x=>x.name)}enabled.decision_provider=[...document.querySelectorAll('.model-enable:checked')].map(e=>({name:e.dataset.name,priority:Number(document.querySelector('.model-priority[data-name="'+e.dataset.name+'"]').value)||99})).sort((a,b)=>a.priority-b.priority).map(x=>x.name);let strategy=document.querySelector('input[name="strategy"]:checked')?.value||'';enabled.decision_strategy=strategy?[strategy]:[];let status=managementFeedback();setOperationStatus(status,'正在保存启用状态与顺序…','pending');try{let saved=await post('/api/plugins/selection',{enabled,decision_strategy:strategy,strategy_evolution:document.getElementById('evolutionToggle')?.checked!==false});renderManager(saved);setOperationStatus(managementFeedback(),'启用状态和优先级已保存；运行中的插件将在当前工作结束后切换')}catch(e){setOperationStatus(status,e.message,'danger')}}
 function appFieldHtml(f){let attrs=' data-app-field="'+esc(f.name)+'" data-type="'+esc(f.type)+'"';let input=f.type==='enum'?'<select'+attrs+'>'+f.options.map(o=>'<option'+(o===f.value?' selected':'')+'>'+esc(o)+'</option>').join('')+'</select>':'<input type="'+(f.type==='integer'?'number':'text')+'"'+attrs+' value="'+esc(f.value)+'"'+(f.minimum!==null?' min="'+f.minimum+'"':'')+(f.maximum!==null?' max="'+f.maximum+'"':'')+'>';return '<div class="plugin"><label class="field"><b>'+esc(f.label)+'</b>'+input+'<span class="description">'+esc(f.description)+' 默认值：'+esc(JSON.stringify(f.default))+'；'+(f.configured?'当前为用户覆盖值':'当前使用默认值')+'</span></label><button onclick="resetApplicationSetting(\''+f.name+'\')">删除此覆盖值</button></div>'}
 async function refreshConfiguration(){let [settings,manager]=await Promise.all([get('/api/settings'),get('/api/plugins/manage')]);if(await adoptBrowserLanguageIfUnchosen(settings))settings=await get('/api/settings');syncLedgerLanguage();let proxyNames=new Set(['shared_http_proxy','shared_no_proxy','host_proxy_file']);let styleNames=new Set(['strategy_horizon_days','strategy_max_trade_usdt']);document.getElementById('sharedProxySettings').innerHTML=settings.fields.filter(f=>proxyNames.has(f.name)).map(appFieldHtml).join('');document.getElementById('strategySettings').innerHTML=settings.fields.filter(f=>styleNames.has(f.name)).map(appFieldHtml).join('');document.getElementById('applicationSettings').innerHTML=settings.fields.filter(f=>!proxyNames.has(f.name)&&!styleNames.has(f.name)&&f.name!=='model_selection_mode').map(appFieldHtml).join('');let d=manager.plugin_directories;document.getElementById('pluginDirectories').innerHTML=KINDS.map(k=>'<label class="field plugin"><b>'+LABELS[k]+'</b><textarea rows="3" data-dir-kind="'+k+'">'+esc((d.categories[k]||[]).join('\n'))+'</textarea></label>').join('')}
 async function saveApplicationSettings(){let values={};for(let e of document.querySelectorAll('[data-app-field]')){values[e.dataset.appField]=e.dataset.type==='integer'?Number.parseInt(e.value,10):e.value}let s=document.getElementById('settingsStatus');try{await post('/api/settings',{values});s.className='status good';s.textContent='程序配置已保存，重启后生效';await refreshConfiguration()}catch(e){s.className='status danger';s.textContent=e.message}}
@@ -227,7 +228,7 @@ async function refreshAudit(){
   dq+='&group='+encodeURIComponent(LEDGER_TAB);LEDGER_QUERY=dq;LEDGER_PLATFORM_QUERY=q;
   let [s,d,m,discovery]=await Promise.all([get('/api/summary'),get('/api/decisions?limit='+LEDGER_FIRST_PAGE+'&offset=0'+dq+ledgerResultsQuery()),get('/api/manifest'),get('/api/discovery/activity?'+q.replace(/^&/,''))]);
   renderOverviewSummary(s);
-  renderDiscoveryActivity(discovery);renderDecisionLedger(d.items);refreshLedgerTabCounts(q);resetDiagnosticPanels();document.getElementById('manifest').textContent=JSON.stringify(m,null,2);document.getElementById('stamp').textContent='更新 '+new Date().toLocaleTimeString();document.getElementById('ledgerStamp').textContent='读取于 '+new Date().toLocaleTimeString();
+  renderDiscoveryActivity(discovery);resetEvaluatorScreenings();renderDecisionLedger(d.items);refreshLedgerTabCounts(q);resetDiagnosticPanels();document.getElementById('manifest').textContent=JSON.stringify(m,null,2);document.getElementById('stamp').textContent='更新 '+new Date().toLocaleTimeString();document.getElementById('ledgerStamp').textContent='读取于 '+new Date().toLocaleTimeString();
  }catch(e){document.getElementById('stamp').textContent='错误: '+e;document.getElementById('decisions').innerHTML='<div class="empty-state"><strong>没能读到决策记录</strong><p>'+esc(String(e&&e.message||e))+'</p></div>';let discovery=document.getElementById('discoveryActivity');if(discovery)discovery.innerHTML='<div class="empty-state"><strong>没能读到采集记录</strong><p>'+esc(String(e&&e.message||e))+'</p></div>'}
  finally{setLedgerLoading(false)}
 }
@@ -575,6 +576,47 @@ class AuditData:
             currency=currency,
             event_type=event_type,
         )
+
+    def evaluator_screenings(
+        self, platform: str = "", limit: int = 50, offset: int = 0
+    ) -> dict[str, Any]:
+        """Page through persisted per-candidate verdicts without loading full market history."""
+        connection = sqlite3.connect(self.config.session_db)
+        try:
+            predicate = "features_json LIKE '%\"typed_evaluation\"%'"
+            parameters: list[Any] = []
+            if platform:
+                predicate += " AND platform = ?"
+                parameters.append(platform)
+            total = int(connection.execute(
+                f"SELECT COUNT(*) FROM topic_observations WHERE {predicate}", parameters,
+            ).fetchone()[0])
+            rows = connection.execute(
+                f"""
+                SELECT id, observed_at, platform, market_topic_id, title, status,
+                       liquidity_usdt, volume_usdt, features_json
+                FROM topic_observations WHERE {predicate}
+                ORDER BY observed_at DESC, id DESC LIMIT ? OFFSET ?
+                """,
+                [*parameters, max(1, min(100, limit)), max(0, offset)],
+            ).fetchall()
+        finally:
+            connection.close()
+        items = []
+        for row in rows:
+            features = _json_value(row[8]) or {}
+            typed = features.get("typed_evaluation") if isinstance(features, dict) else None
+            if not isinstance(typed, dict):
+                continue
+            items.append({
+                "id": int(row[0]), "observed_at": int(row[1]),
+                "platform": str(row[2]), "market_topic_id": str(row[3]),
+                "title": str(row[4]), "status": str(row[5]),
+                "liquidity_usdt": float(row[6] or 0), "volume_usdt": float(row[7] or 0),
+                "assessment": typed,
+            })
+        return {"total": total, "limit": max(1, min(100, limit)),
+                "offset": max(0, offset), "items": items}
 
     def discovery_activity(self, platform: str = "") -> dict[str, Any]:
         """Show collection and candidate analysis independently of deletable decisions."""
@@ -1478,7 +1520,19 @@ def create_app(config: Config, *, start_robot: bool = True) -> FastAPI:
                 query_value(query, "event_type"),
             )
         if path == "/api/discovery/activity":
-            return data.discovery_activity(query_value(query, "platform"))
+            activity = data.discovery_activity(query_value(query, "platform"))
+            status = runtime.status()
+            activity["runtime_platforms"] = {
+                name: {"running": state.get("running"), "runtime": state.get("runtime", {})}
+                for name, state in status.get("platforms", {}).items()
+            }
+            return activity
+        if path == "/api/discovery/screenings":
+            return data.evaluator_screenings(
+                query_value(query, "platform"),
+                int(query_value(query, "limit", "50")),
+                int(query_value(query, "offset", "0")),
+            )
         if path == "/api/manifest":
             return data.manifest()
         if path == "/api/plugins/manage":
@@ -1646,10 +1700,9 @@ def create_app(config: Config, *, start_robot: bool = True) -> FastAPI:
                 runtime.reconcile()
             return result
         if path == "/api/plugins/selection":
-            runtime.stop()
             result = management.save_enabled(payload)
             if start_robot:
-                runtime.reconcile()
+                runtime.reconcile_async()
             return result
         if path == "/api/plugins/refresh":
             runtime.stop()

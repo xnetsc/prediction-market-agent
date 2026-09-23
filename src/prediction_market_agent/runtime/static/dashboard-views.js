@@ -4,7 +4,7 @@ const CATEGORY_HELP = {
     decision_provider: {title:'AI 模型服务', role:'让模型理解信息并做判断', description:'提供实际执行推理的模型。客户端账号和 OpenRouter 配置是并列方式，与“采用什么交易策略”不是一回事。', steps:['接收策略与证据','调用所选模型','返回判断或工具请求'], next:'至少配置一种可用服务。默认质量优先、同分按设置顺序；可在模型服务页强制按顺序。失败时回退，不会同时向所有服务发请求。'},
     decision_strategy: {title:'决策策略', role:'可选地告诉模型如何分析', description:'定义模型需要关注的证据、判断过程和输出要求。它是可选分析方法，不是模型账号，也不是机器人启动条件。', steps:['选择插件或使用内置策略','读取策略文本与实测叠加层','形成交易建议'], next:'可安装并选择一项策略插件；不选时由内置决策策略工作，它的当前全文可在下方导出。'},
     market_discovery: {title:'标的发现策略', role:'决定每轮先看哪些标的', description:'机器人每轮只能深入分析少数标的。发现策略决定把这几个名额给谁：宽扫平台、按实测结果排序、再由模型挑最终名单。未安装插件时使用内置策略。', steps:['宽扫平台全部标的','按实测优先级排序','模型挑出本轮名单'], next:'不装插件也在工作。要用自己的发现逻辑再安装插件；内置策略的当前全文可在下方导出查看。'},
-    decision_evaluator: {title:'决策评估器', role:'在发现阶段低成本压缩候选输入', description:'评估器只接收已提供的发现状态，返回固定选项、评分与概率，用于候选粗筛和继续扫描判断。它不进入逐标的交易决策、不复核提案、不生成交易动作。', steps:['候选分批评分','高置信粗筛并保留质量抽样','不确定时交给发现 Agent'], next:'Jev 与 Laya 是两个独立实例；可分别启用。每次只用排序首位，失败才回退；质量优先/强制顺序由模型服务页控制。'},
+    decision_evaluator: {title:'决策评估器', role:'粗筛候选，也可供 Agent 按需调用', description:'评估器可独立粗筛；支持结构化问答的实例还可作为 EVALUATE_FACTS 工具，只根据已提供的事实回答固定选项、评分或 0–1 条件问题。它不搜索或核验行情，不代替 Agent 作交易决策，也不生成交易动作。', steps:['候选分批评分','高置信粗筛并保留质量抽样','按需做低成本事实分类'], next:'Jev 与 Laya 是两个独立实例；可分别启用。每次只用排序首位，失败才回退；质量优先/强制顺序由模型服务页控制。'},
     research_tool: {title:'信息与研究', role:'注入预测市场专用工具', description:'补充跨市场查询、行情刷新、K线和业务历史等领域能力。通用搜索、网页、文件、命令和 skills 由官方 Codex/Claude CLI 自己完成。', steps:['模型提出业务问题','工具读取市场或账本','结果回到同一 CLI 会话'], next:'只启用需要的领域工具。官方 CLI 的通用能力不在这里重复配置。'},
     agent_policy: {title:'Agent 行为风控', role:'管住框架执行的业务工具', description:'模型通过本框架协议发起的预测市场业务工具会经过这里。Codex/Claude 自己的搜索、文件、命令、skills 和插件由官方 CLI 权限与 sandbox 管理，本框架不会假装能够拦截。', steps:['模型提出业务调用','逐个询问已启用的插件','任意一个拒绝即整体失败'], next:'出厂不启用。可以同时启用多个，它们按启用顺序串成一条链：全部通过才放行；任意一个拒绝、或者它自己抛异常，这次业务调用就失败。'},
     risk: {title:'业务风控', role:'管住一切市场 API 动作', description:'审核每一次市场 API 调用——下单、撤单、赎回、转账这些写动作，以及查行情、查订单簿这些只读调用，与是谁发起的无关：模型提的、结算扫单产生的、手动触发的都一样。同一笔下单会先后经过 Agent 行为风控和业务风控两道检查，这是有意的重复。', steps:['接收市场 API 动作','逐个询问已启用的插件','任意一个拒绝即整体失败'], next:'出厂不启用任何业务风控，而且框架里根本没有内置的仓位上限或止损——要限额，要么在这里启用你自己的规则插件，要么把标准写进决策策略文本让模型读账执行。可以同时启用多个，它们按启用顺序串成一条链：全部通过才放行；任意一个拒绝、或者它自己抛异常，这次动作就失败。不要把“已启用”理解成已经配置了止损或保证不会亏损。'},
@@ -213,21 +213,73 @@ async function refreshAttention(m){
 }
 
 const DISCOVERY_STAGE_LABELS={discovery_continuation:'继续扫描判断',market_selection:'候选选择'};
-const DISCOVERY_ACTION_LABELS={CONTINUE:'继续深入',DEFER:'暂缓',DROP:'淘汰',UNKNOWN:'未知'};
+const DISCOVERY_ACTION_LABELS={CONTINUE:'继续深入',PRIORITIZE:'优先',NEEDS_DATA:'需要更多数据',DEFER:'暂缓',REJECT:'拒绝',DROP:'淘汰',UNKNOWN:'未知'};
+let RECENT_DELETION_AUDIT=[];
 function renderDiscoveryActivity(data){
     const host=document.getElementById('discoveryActivity');if(!host)return;
     const blocks=[];
-    if(data.legacy_deletion_detected)blocks.push('<div class="info-banner danger"><strong>检测到旧版删除留下的证据缺口</strong><p>有 '+data.orphaned_action_decisions+' 个执行动作仍引用已经不存在的决策记录。旧版没有记录删除操作，因此无法从现有数据确认删除时间或操作者；市场采集与候选记录仍在。</p></div>');
-    if((data.decision_deletions||[]).length)blocks.push('<details class="diagnostic-detail"><summary>决策记录删除审计 · '+data.decision_deletions.length+' 条</summary>'+(data.decision_deletions||[]).map(row=>'<p><strong>'+esc(new Date(row.deleted_at).toLocaleString())+'</strong> · '+esc(row.source)+'<br><span class="muted">范围 '+esc(JSON.stringify(row.scope))+'；结果 '+esc(JSON.stringify(row.result))+'</span></p>').join('')+'</details>');
+    RECENT_DELETION_AUDIT=data.decision_deletions||[];
+    const deletionHost=document.getElementById('deletionAudit');
+    if(deletionHost)deletionHost.innerHTML=(data.legacy_deletion_detected?'<div class="info-banner danger"><strong>检测到旧版删除留下的证据缺口</strong><p>有 '+data.orphaned_action_decisions+' 个执行动作仍引用已经不存在的决策记录。旧版没有记录删除操作，因此无法从现有数据确认删除时间或操作者；市场采集与候选记录仍在。</p></div>':'')+(RECENT_DELETION_AUDIT.length?'<p class="muted">以下时间是删除决策及其模型往返、工具步骤的时间，不是市场采集时间。</p>'+RECENT_DELETION_AUDIT.map(row=>'<p><strong>'+esc(new Date(row.deleted_at).toLocaleString())+'</strong> · '+esc(row.source)+'<br><span class="muted">范围 '+esc(JSON.stringify(row.scope))+'；结果 '+esc(JSON.stringify(row.result))+'</span></p>').join(''):'<p class="muted">没有保留的删除审计。</p>');
     if((data.incidents||[]).length)blocks.push('<details class="discovery-incidents"><summary>采集与分析异常 '+data.incidents.length+' 条 <button class="danger" onclick="forgetIncidents(event,'+data.incidents[0].id+')">清除已读</button></summary>'+(data.incidents||[]).map(row=>'<details class="runtime-incident '+(row.severity==='error'?'danger':'pending')+'"><summary><span><strong>'+esc(DISCOVERY_STAGE_LABELS[row.stage]||row.stage)+'</strong> · '+esc(row.platform)+'</span><span>'+esc(new Date(row.created_at).toLocaleString())+'</span></summary><p>'+esc(row.message)+'</p><p><strong>降级处理：</strong>'+esc(row.fallback||'未执行降级')+'</p>'+(row.details?.raw_output?'<details class="diagnostic-detail"><summary>模型 / CLI 原始诊断</summary><pre>'+esc(row.details.raw_output)+'</pre></details>':'')+'</details>').join('')+'</details>');
     for(const platform of data.platforms||[]){
         const evaluator=Object.entries(platform.evaluator_counts||{}).map(([name,count])=>esc(DISCOVERY_ACTION_LABELS[name]||name)+' '+count).join(' · ')||'本批没有评估器结果';
         const plan=platform.plan||{};
-        blocks.push('<article class="discovery-platform"><div class="section-heading"><div><h4>'+esc(platform.platform)+'</h4><p class="muted">最近采集 '+esc(new Date(platform.latest_observed_at).toLocaleString())+' · 本批 '+platform.latest_batch_count+' 个 · 累计 '+platform.batches+' 批 / '+platform.observations+' 条观察</p></div><span class="badge ready">已采集</span></div><div class="summary-line"><strong>粗筛：</strong>'+evaluator+(platform.evaluator_providers?.length?' · 服务 '+esc(platform.evaluator_providers.join(', ')):'')+'</div>'+((plan.reason||plan.queries?.length)?'<details class="discovery-detail"><summary>续扫计划与下轮检索</summary>'+(plan.reason?'<p><strong>续扫计划：</strong>'+esc(plan.reason)+'；'+(plan.next_scan_seconds?'约 '+plan.next_scan_seconds+' 秒后':'按平台最短间隔')+'</p>':'')+(plan.queries?.length?'<p class="muted">下轮检索：'+esc(plan.queries.join('；'))+'</p>':'')+'</details>':'')+(platform.top_candidates?.length?'<details class="discovery-detail"><summary>最近候选 '+platform.top_candidates.length+' 个</summary>'+table(platform.top_candidates,[['最近候选',row=>'<strong>'+esc(row.title)+'</strong><br><span class="muted">'+esc(row.market_topic_id)+'</span>'],['流动性 / 成交量',row=>pnlNumber(row.liquidity_usdt)+' / '+pnlNumber(row.volume_usdt)],['评估器',row=>row.typed_evaluation?esc(DISCOVERY_ACTION_LABELS[row.typed_evaluation.action]||row.typed_evaluation.action)+' · 置信度 '+esc(row.typed_evaluation.confidence??'未知'):'未粗筛']])+'</details>':'')+'</article>');
+        const live=data.runtime_platforms?.[platform.platform]||{};
+        const current=live.runtime||{};
+        const started=Number(current.last_started_at||0)*1000;
+        const inProgress=Boolean(live.running&&started>Number(platform.latest_observed_at||0));
+        const stage={discovery:'采集与粗筛',decision:'深度分析与决策',pacing:'安排下轮扫描'}[current.current_stage]||'处理中';
+        const progress=inProgress?'<p class="pending">平台当前轮次自 '+esc(new Date(started).toLocaleString())+' 开始，当前阶段：'+stage+'；尚未写入新采集。下方数字属于上一次完成的批次。</p>':'';
+        blocks.push('<article class="discovery-platform"><div class="section-heading"><div><h4>'+esc(platform.platform)+'</h4><p class="muted">上次完成采集 '+esc(new Date(platform.latest_observed_at).toLocaleString())+' · 当批 '+platform.latest_batch_count+' 个 · 累计 '+platform.batches+' 批 / '+platform.observations+' 条观察</p></div><span class="badge '+(inProgress?'pending':'ready')+'">'+(inProgress?'本轮未完成':'历史记录')+'</span></div>'+progress+'<div class="summary-line"><strong>上次粗筛：</strong>'+evaluator+(platform.evaluator_providers?.length?' · 服务 '+esc(platform.evaluator_providers.join(', ')):'')+'</div>'+((plan.reason||plan.queries?.length)?'<details class="discovery-detail"><summary>续扫计划与下轮检索</summary>'+(plan.reason?'<p><strong>续扫计划：</strong>'+esc(plan.reason)+'；'+(plan.next_scan_seconds?'约 '+plan.next_scan_seconds+' 秒后':'按平台最短间隔')+'</p>':'')+(plan.queries?.length?'<p class="muted">下轮检索：'+esc(plan.queries.join('；'))+'</p>':'')+'</details>':'')+(platform.top_candidates?.length?'<details class="discovery-detail"><summary>最近候选 '+platform.top_candidates.length+' 个</summary>'+table(platform.top_candidates,[['最近候选',row=>'<strong>'+esc(row.title)+'</strong><br><span class="muted">'+esc(row.market_topic_id)+'</span>'],['流动性 / 成交量',row=>pnlNumber(row.liquidity_usdt)+' / '+pnlNumber(row.volume_usdt)],['评估器',row=>row.typed_evaluation?esc(DISCOVERY_ACTION_LABELS[row.typed_evaluation.action]||row.typed_evaluation.action)+' · 置信度 '+esc(row.typed_evaluation.confidence??'未知'):'未粗筛']])+'</details>':'')+'</article>');
     }
     if((data.recent_selections||[]).length)blocks.push('<details class="diagnostic-detail" open><summary>最近进入深度决策的候选 · '+data.recent_selections.length+' 条</summary>'+table(data.recent_selections,[['时间 / 平台',row=>esc(new Date(row.selected_at).toLocaleString())+'<br>'+esc(row.platform)],['候选',row=>'<strong>'+esc(row.title)+'</strong><br><span class="muted">'+esc(row.market_topic_id)+'</span>'],['入选原因',row=>esc(row.reason)],['策略 / 顺位',row=>esc(row.strategy)+' / '+row.position]])+'</details>');
     host.innerHTML=blocks.length?blocks.join(''):'<div class="empty-state"><strong>还没有市场采集记录</strong><p>平台完成第一次扫描后，这里会显示采集批次、评估器粗筛和候选选择；这不等同于交易决策。</p></div>';
 }
+
+let SCREENING_ROWS=[],SCREENING_TOTAL=0,SCREENING_GENERATION=0,SCREENING_LOADING=false;
+function resetEvaluatorScreenings(){
+    SCREENING_GENERATION++;SCREENING_ROWS=[];SCREENING_TOTAL=0;SCREENING_LOADING=false;
+    const host=document.getElementById('evaluatorScreenings');
+    if(host)host.innerHTML='';
+    if(document.getElementById('evaluatorScreeningsPanel')?.open)loadEvaluatorScreenings();
+}
+function renderEvaluatorScreenings(){
+    const host=document.getElementById('evaluatorScreenings');if(!host)return;
+    if(!SCREENING_ROWS.length){host.innerHTML='<div class="empty-state"><strong>没有保存的评估器粗筛记录</strong><p>候选可能未经过评估器，或模型调用尚未返回；请查看上方采集异常。</p></div>';return}
+    const confidence=value=>value!==null&&value!==undefined&&value!==''&&Number.isFinite(Number(value))?Math.round(Number(value)*100)+'%':'—';
+    host.innerHTML='<p class="muted">已显示 '+SCREENING_ROWS.length+' / '+SCREENING_TOTAL+' 条；按采集时间由新到旧。</p>'
+        +table(SCREENING_ROWS,[
+            ['采集时间 / 平台',row=>esc(new Date(row.observed_at).toLocaleString())+'<br>'+esc(row.platform)],
+            ['候选',row=>'<strong>'+esc(row.title)+'</strong><br><span class="muted">'+esc(row.market_topic_id)+'</span>'],
+            ['评估器 / 服务',row=>esc(row.assessment.evaluator_name||'未记录')+' / '+esc(row.assessment.provider||'未记录')],
+            ['粗筛结论',row=>esc(DISCOVERY_ACTION_LABELS[row.assessment.action]||row.assessment.action||'未知')],
+            ['质量 / 置信度',row=>esc(row.assessment.quality??'—')+' / '+confidence(row.assessment.confidence)],
+            ['原始评估字段',row=>'<details class="diagnostic-detail"><summary>查看</summary><pre>'+esc(JSON.stringify(row.assessment,null,2))+'</pre></details>'],
+        ])
+        +(SCREENING_ROWS.length<SCREENING_TOTAL?'<button onclick="loadEvaluatorScreenings()">再加载 50 条</button>':'');
+}
+async function loadEvaluatorScreenings(){
+    const host=document.getElementById('evaluatorScreenings');
+    if(!host||SCREENING_LOADING)return;
+    SCREENING_LOADING=true;
+    const generation=SCREENING_GENERATION,offset=SCREENING_ROWS.length;
+    if(!offset)host.innerHTML=skeletonRowsHtml(3);
+    try{
+        const answer=await get('/api/discovery/screenings?limit=50&offset='+offset+LEDGER_PLATFORM_QUERY);
+        if(generation!==SCREENING_GENERATION)return;
+        SCREENING_TOTAL=Number(answer.total||0);
+        SCREENING_ROWS.push(...(answer.items||[]));
+        renderEvaluatorScreenings();
+    }catch(error){
+        if(generation===SCREENING_GENERATION)host.innerHTML='<p class="danger">粗筛记录读取失败：'+esc(error&&error.message||error)+'</p><button onclick="loadEvaluatorScreenings()">重试</button>';
+    }finally{if(generation===SCREENING_GENERATION)SCREENING_LOADING=false}
+}
+if(typeof document!=='undefined'&&document.addEventListener)
+    document.addEventListener('toggle',event=>{
+        if(event.target?.id==='evaluatorScreeningsPanel'&&event.target.open&&!SCREENING_ROWS.length)
+            loadEvaluatorScreenings();
+    },true);
 
 function renderManager(m) {
     LAST_MANAGER=m;
@@ -1141,7 +1193,10 @@ async function loadDiagnosticPanel(id){
     host.innerHTML=skeletonRowsHtml(3);
     try{
         const answer=await get('/api/records?kind='+spec.kind+'&limit=20'+LEDGER_PLATFORM_QUERY);
-        host.innerHTML=table(answer.items||[],spec.columns());
+        const items=answer.items||[];
+        if(items.length){host.innerHTML=table(items,spec.columns());return}
+        const deleted=RECENT_DELETION_AUDIT.reduce((count,row)=>count+Number(row.result?.[id==='turns'?'provider_turns':'agent_steps']||0),0);
+        host.innerHTML='<div class="empty-state"><strong>目前没有保留的'+(id==='turns'?'模型对话':'信息收集')+'明细</strong><p>'+(id==='actions'?'尚无平台操作记录。':deleted?'最近的决策记录删除操作也删除了 '+deleted+' 条此类明细；删除审计可在本页下方查看。':'尚未产生此类记录，或早期记录已被删除。')+'</p></div>';
     }catch(e){
         delete host.dataset.loaded;
         host.innerHTML='<p class="danger">没能读取：'+esc(String(e&&e.message||e))+'</p>';

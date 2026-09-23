@@ -35,12 +35,14 @@ Prediction 与 Polymarket API 插件，以及 Codex、Claude、OpenRouter Provid
   校准（Brier）、以及由**另一个**服务给出的评分；模型给自己打的分不计入。任何 Provider 都使用相同的
   多步工具 Agent。故障转移只在用户已启用的 Provider 之间进行；每个 Provider 始终使用该服务中用户选定的模型，
   不会为求可用而暗中换型号。Codex/Claude 留空是用户明确选择客户端默认；OpenRouter 不允许留空。
-- 当前随仓库提供并默认选择的 `jev` evaluator 插件只负责发现阶段的低成本粗筛：选 Jev 时直接向 OpenRouter Decisions
+- 当前随仓库提供并默认选择的 `jev` evaluator 插件可独立执行发现阶段的低成本粗筛：选 Jev 时直接向 OpenRouter Decisions
   发送 `state/questions`；选择其它 OpenRouter 模型时，只显示明确支持 structured output 的型号并强制
   `answers` JSON schema；自定义方式也可接普通聊天模型，先使用其原生 JSON schema，端点拒绝或忽略约束时
   再由该 evaluator 插件的兼容层改用强制函数参数承载同一 schema。三条路径都自行解析 Choice、
-  Score、Noul，不通过 Agent。它压缩交给发现 LLM 的候选 JSON，但不参与逐标的交易决策、不复核提案、
-  不生成交易动作；0.90 起始置信阈值按质量抽样结果动态校准且不低于 0.80。Jev 模型原生只接受这套协议，
+  Score、Noul，独立粗筛不通过 Agent。它压缩交给发现 LLM 的候选 JSON；同时，启用的 Jev/Laya 可作为
+  `EVALUATE_FACTS` 工具，由发现或逐标的 Agent 按需调用，对已核实事实回答有界的低成本分类/评分问题。
+  工具输入为 `state/questions`，输出为严格校验的 `answers`，不负责搜索、补证据、复核提案或生成交易动作，
+  最终决策仍由 Agent 完成。粗筛的 0.90 起始置信阈值按质量抽样结果动态校准且不低于 0.80。Jev 模型原生只接受这套协议，
   普通聊天模型则由插件约束成同一协议。
   OpenRouter 方式自动使用官方 Base URL 并默认复用主 OpenRouter Key；
   自定义方式填写自己的 Base URL、模型名和可选 Key。代理始终属于 Jev 插件自己。

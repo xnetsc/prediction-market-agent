@@ -11,6 +11,7 @@ from typing import Any
 from prediction_market_agent.agent.decision_evaluator import (
     CandidateAssessment,
     ContinuationAssessment,
+    DecisionEvaluatorBudgetExhausted,
     DecisionEvaluatorError,
 )
 from prediction_market_agent.plugin_system.config_io import json_file_callbacks
@@ -228,6 +229,21 @@ class SchemaDecisionEvaluator:
         self.require_parameters = require_parameters
 
     def _evaluate(self, state: Any, questions: dict[str, Any]) -> dict[str, Any]:
+        deadline = None
+        if isinstance(state, dict) and "_scan_deadline_monotonic" in state:
+            deadline = float(state["_scan_deadline_monotonic"])
+            state = {key: value for key, value in state.items() if key != "_scan_deadline_monotonic"}
+        elif isinstance(state, dict) and isinstance(state.get("run_state"), dict) and (
+            "_scan_deadline_monotonic" in state["run_state"]
+        ):
+            deadline = float(state["run_state"]["_scan_deadline_monotonic"])
+            state = {
+                **state,
+                "run_state": {
+                    key: value for key, value in state["run_state"].items()
+                    if key != "_scan_deadline_monotonic"
+                },
+            }
         request_payload = {"state": state, "model": self.model, "questions": questions}
         active_protocol = self.protocol
 
@@ -294,6 +310,10 @@ class SchemaDecisionEvaluator:
 
         last_error = ""
         for attempt in range(3):
+            remaining = deadline - time.monotonic() if deadline is not None else None
+            if remaining is not None and remaining <= 0:
+                raise DecisionEvaluatorBudgetExhausted("scan screening time budget exhausted")
+            timeout = min(self.timeout, max(0.1, remaining)) if remaining is not None else self.timeout
             request = urllib.request.Request(
                 self.endpoint,
                 data=json.dumps(
@@ -311,7 +331,7 @@ class SchemaDecisionEvaluator:
                 method="POST",
             )
             try:
-                with _opener(self.proxy).open(request, timeout=self.timeout) as response:
+                with _opener(self.proxy).open(request, timeout=timeout) as response:
                     payload = json.loads(response.read(8 * 1024 * 1024))
                 if active_protocol.startswith("chat_"):
                     message = payload["choices"][0]["message"]
@@ -371,6 +391,10 @@ class SchemaDecisionEvaluator:
                 raise DecisionEvaluatorError(f"typed evaluator failed: {error}") from error
             time.sleep(0.25 * (2 ** attempt))
         raise DecisionEvaluatorError(f"typed evaluator failed: {last_error}")
+
+    def answer_questions(self, state: dict[str, Any], questions: dict[str, Any]) -> dict[str, Any]:
+        """Answer a bounded Agent-supplied fact check using the same typed protocol."""
+        return self._evaluate({"workflow": "agent_fact_check", "facts": state}, questions)
 
     def evaluate_candidates(
         self, state: dict[str, Any], candidates: list[dict[str, Any]]
@@ -776,7 +800,7 @@ def initialize_plugin(context: PluginInitializationContext) -> PluginSpec:
 
     return PluginSpec(
         "decision_evaluator", "jev",
-        "发现阶段粗筛插件：默认以 Jev 原生 Decisions 工作，也可把支持 structured output 的 OpenRouter/自定义聊天模型约束为同一 state/questions → answers 协议；不参与交易决策。",
+        "发现阶段粗筛，也可作为 Agent 按需调用的事实分类工具：默认以 Jev 原生 Decisions 工作，或把支持 structured output 的 OpenRouter/自定义聊天模型约束为同一 state/questions → answers 协议；不代替交易决策。",
         str(context.module_path), factory, configuration, lambda: None,
         readiness_callback=readiness,
         network_routes_callback=lambda: configured_proxy_route(

@@ -30,6 +30,7 @@ class PolymarketEventLoop:
             "last_finished_at": None,
             "last_error": "",
             "next_delay_seconds": None,
+            "current_stage": "idle",
             "holding": False,
             "holding_because": "",
         }
@@ -84,8 +85,11 @@ class PolymarketEventLoop:
             while not self._stop.is_set():
                 with self._lock:
                     self._status["last_started_at"] = int(time.time())
+                    self._status["current_stage"] = "discovery"
                 try:
                     topics = discover()
+                    with self._lock:
+                        self._status["current_stage"] = "decision"
                     callback(topics)
                     consecutive_failures = 0
                     # The configured interval is how often this plugin is willing to be asked, not
@@ -95,6 +99,8 @@ class PolymarketEventLoop:
                     # this plugin's to keep.
                     delay = settings.scan_interval_seconds
                     if callable(pacing):
+                        with self._lock:
+                            self._status["current_stage"] = "pacing"
                         try:
                             answer = pacing(settings.scan_interval_seconds)
                             delay = max(
@@ -117,6 +123,7 @@ class PolymarketEventLoop:
                 with self._lock:
                     self._status["last_finished_at"] = int(time.time())
                     self._status["next_delay_seconds"] = delay
+                    self._status["current_stage"] = "waiting"
                 if self._stop.wait(delay):
                     break
                 self._wait_until_decisions_are_possible()
@@ -124,6 +131,7 @@ class PolymarketEventLoop:
             with self._lock:
                 self._status["running"] = False
                 self._status["next_delay_seconds"] = None
+                self._status["current_stage"] = "idle"
 
     def _wait_until_decisions_are_possible(self) -> None:
         while not self._stop.is_set() and not self._may_decide.is_set():

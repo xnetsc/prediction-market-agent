@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
+import math
 import time
 from typing import Any, Protocol
 
@@ -23,6 +24,23 @@ OUTLIER_REVIEW_MINIMUM = 4
 
 class DecisionEvaluatorError(RuntimeError):
     """A typed evaluator could not produce a usable answer."""
+
+
+class DecisionEvaluatorBudgetExhausted(DecisionEvaluatorError):
+    """The scan ended by its own budget, not because a model service failed."""
+
+
+def _bounded_number(value: Any, minimum: float, maximum: float) -> bool:
+    return (
+        isinstance(value, (int, float))
+        and not isinstance(value, bool)
+        and math.isfinite(value)
+        and minimum <= value <= maximum
+    )
+
+
+def _unit_number(value: Any) -> bool:
+    return _bounded_number(value, 0, 1)
 
 
 @dataclass(frozen=True)
@@ -200,6 +218,67 @@ class DecisionEvaluatorPool:
     def available(self) -> bool:
         return bool(self.evaluators)
 
+    @property
+    def per_candidate_requests(self) -> bool:
+        """Whether any selected fallback may need a network call per candidate."""
+        return any(getattr(item, "per_candidate_requests", False) for item in self.evaluators)
+
+    @property
+    def accepts_agent_questions(self) -> bool:
+        return any(callable(getattr(item, "answer_questions", None)) for item in self.evaluators)
+
+    def answer_questions(
+        self, state: dict[str, Any], questions: dict[str, Any]
+    ) -> dict[str, Any]:
+        """One advisory tool call, with the usual enabled-instance order and failure fallback."""
+        self.errors = {}
+        self.fallback_errors = {}
+        for evaluator in self._ordered():
+            answer = getattr(evaluator, "answer_questions", None)
+            if not callable(answer):
+                continue
+            try:
+                result = answer(state, questions)
+                answers = result.get("answers") if isinstance(result, dict) else None
+                if not isinstance(answers, dict) or set(answers) != set(questions):
+                    raise DecisionEvaluatorError("evaluator returned incomplete typed answers")
+                for name, question in questions.items():
+                    item = answers[name]
+                    kind = question["type"]
+                    if not isinstance(item, dict) or item.get("type") != kind:
+                        raise DecisionEvaluatorError(f"evaluator returned an invalid type for {name}")
+                    confidence = item.get("confidence")
+                    if confidence is not None and not _unit_number(confidence):
+                        raise DecisionEvaluatorError(f"evaluator returned invalid confidence for {name}")
+                    if kind == "choice":
+                        if item.get("choice") not in question["criteria"]:
+                            raise DecisionEvaluatorError(f"evaluator returned invalid choice for {name}")
+                        probabilities = item.get("probabilities")
+                        if not isinstance(probabilities, dict) or any(
+                            key not in question["criteria"] or not _unit_number(value)
+                            for key, value in probabilities.items()
+                        ):
+                            raise DecisionEvaluatorError(f"evaluator returned invalid probabilities for {name}")
+                    elif kind == "score":
+                        if not _bounded_number(item.get("score"), 0, len(question["criteria"]) - 1):
+                            raise DecisionEvaluatorError(f"evaluator returned invalid score for {name}")
+                    elif kind == "noul":
+                        if not _unit_number(item.get("noul")):
+                            raise DecisionEvaluatorError(f"evaluator returned invalid noul for {name}")
+                    else:
+                        raise DecisionEvaluatorError(f"unsupported typed question: {kind}")
+            except Exception as error:
+                self._record_failure(evaluator.name, error)
+                continue
+            self._succeeded(evaluator.name)
+            return {"answers": answers, "evaluator_name": evaluator.name,
+                    "model": str(result.get("model", "")), "usage": result.get("usage") or {}}
+        raise DecisionEvaluatorError(
+            "all available evaluators failed: "
+            + ("; ".join(f"{name}: {error}" for name, error in self.errors.items())
+               or "no enabled evaluator supports typed questions")
+        )
+
     def evaluate_candidates(
         self, state: dict[str, Any], candidates: list[dict[str, Any]]
     ) -> list[CandidateAssessment]:
@@ -217,6 +296,8 @@ class DecisionEvaluatorPool:
                 if set(received) != expected or len(received) != len(set(received)):
                     raise DecisionEvaluatorError("evaluator returned incomplete candidate assessments")
                 result = [replace(answer, evaluator_name=evaluator.name) for answer in answers]
+            except DecisionEvaluatorBudgetExhausted:
+                return []
             except Exception as error:
                 self._record_failure(evaluator.name, error)
                 continue
@@ -312,6 +393,8 @@ class DecisionEvaluatorPool:
                 answer = evaluator.assess_continuation(state, frontier, page)
                 if not isinstance(answer, ContinuationAssessment):
                     raise DecisionEvaluatorError("evaluator returned no continuation assessment")
+            except DecisionEvaluatorBudgetExhausted:
+                return None
             except Exception as error:
                 self._record_failure(evaluator.name, error)
                 continue

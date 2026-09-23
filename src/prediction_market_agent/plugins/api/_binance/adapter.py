@@ -46,6 +46,7 @@ class BinancePredictionApiPlugin:
     """Binance production read and write API adapter."""
 
     name = "binance"
+    supports_lightweight_search = True
     capabilities = ApiCapabilities(
         realtime_order_book=True,
         candles=True,
@@ -535,7 +536,9 @@ class BinancePredictionApiPlugin:
         if callable(close):
             close()
 
-    def search_market_candidates(self, query: str, limit: int) -> list[MarketCandidate]:
+    def search_market_candidates(
+        self, query: str, limit: int, *, lightweight: bool = False
+    ) -> list[MarketCandidate]:
         query_tokens = _tokens(query)
         ranked: list[tuple[float, dict[str, Any]]] = []
         for topic in self._topics:
@@ -550,17 +553,18 @@ class BinancePredictionApiPlugin:
             topic = self._topic(item)
             detail: TopicDetail | None = None
             books: dict[str, OrderBook] = {}
-            try:
-                detail = self.get_topic(topic.topic_id)
-                for market in detail.markets[:4]:
-                    yes = next(
-                        (outcome for outcome in market.outcomes if outcome.name.upper() == "YES"), None
-                    )
-                    if yes:
-                        books[yes.outcome_id] = self.get_order_book(market.market_id, yes.outcome_id)
-            except (KeyError, TypeError, ValueError, RuntimeError):
-                detail = None
-                books = {}
+            if not lightweight:
+                try:
+                    detail = self.get_topic(topic.topic_id)
+                    for market in detail.markets[:4]:
+                        yes = next(
+                            (outcome for outcome in market.outcomes if outcome.name.upper() == "YES"), None
+                        )
+                        if yes:
+                            books[yes.outcome_id] = self.get_order_book(market.market_id, yes.outcome_id)
+                except (KeyError, TypeError, ValueError, RuntimeError):
+                    detail = None
+                    books = {}
             results.append(
                 MarketCandidate(
                     platform=self.name,

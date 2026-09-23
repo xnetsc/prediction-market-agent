@@ -248,3 +248,35 @@ class DecisionAndMemoryTests(unittest.TestCase):
             self.assertEqual(activity["recent_selections"][0]["title"], "One market")
             self.assertEqual(activity["incidents"][0]["message"], "schema violation")
             self.assertEqual(activity["incidents"][0]["fallback"], "prescore")
+
+    def test_evaluator_screenings_are_paged_independently_of_decisions(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            cfg = Config(session_db=root / "sessions.sqlite3")
+            memory = SessionMemory(cfg.session_db)
+            memory.record_topic_observations(platform="venue", observations=[
+                {"market_topic_id": "screened", "title": "Screened market", "status": "OPEN",
+                 "liquidity_usdt": 100, "volume_usdt": 200,
+                 "features": {"typed_evaluation": {"action": "PRIORITIZE", "quality": 0.8,
+                                                     "confidence": 0.91, "provider": "jev",
+                                                     "evaluator_name": "jev"}}},
+                {"market_topic_id": "unassessed", "title": "Unassessed", "status": "OPEN",
+                 "liquidity_usdt": 50, "volume_usdt": 0, "features": {}},
+            ])
+            memory.record_topic_observations(platform="other", observations=[
+                {"market_topic_id": "other", "title": "Other market", "status": "OPEN",
+                 "liquidity_usdt": 10, "volume_usdt": 20,
+                 "features": {"typed_evaluation": {"action": "DEFER"}}},
+            ])
+            memory.close()
+            data = AuditData(cfg)
+            try:
+                first = data.evaluator_screenings("venue", limit=1)
+                second = data.evaluator_screenings(limit=1, offset=1)
+            finally:
+                data.management.shutdown()
+            self.assertEqual(first["total"], 1)
+            self.assertEqual(first["items"][0]["market_topic_id"], "screened")
+            self.assertEqual(first["items"][0]["assessment"]["confidence"], 0.91)
+            self.assertEqual(second["total"], 2)
+            self.assertEqual(len(second["items"]), 1)

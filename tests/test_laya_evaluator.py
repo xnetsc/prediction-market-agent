@@ -3,18 +3,21 @@ from __future__ import annotations
 import json
 import tempfile
 import threading
+import time
 import unittest
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from unittest.mock import patch
 
 from prediction_market_agent.agent.decision_evaluator import (
-    CandidateAssessment, DecisionEvaluatorPool,
+    CandidateAssessment, DecisionEvaluatorBudgetExhausted, DecisionEvaluatorPool,
 )
 from prediction_market_agent.plugin_system.config import PluginDirectoryConfig
 from prediction_market_agent.plugin_system.discovery import (
     PluginInitializationContext, discover_plugin_catalog,
 )
 from prediction_market_agent.plugins.evaluators.laya import initialize_plugin
+from prediction_market_agent.plugins.evaluators.jev import _opener
 
 
 class _LayaHandler(BaseHTTPRequestHandler):
@@ -59,6 +62,29 @@ class _LayaHandler(BaseHTTPRequestHandler):
 
 
 class LayaPluginTests(unittest.TestCase):
+    def test_budget_exhaustion_does_not_cool_down_or_fall_back_to_another_service(self) -> None:
+        class Budgeted:
+            name = "budgeted"
+
+            def evaluate_candidates(self, _state, _candidates):
+                raise DecisionEvaluatorBudgetExhausted("time budget")
+
+        class Fallback:
+            name = "fallback"
+
+            def __init__(self):
+                self.calls = 0
+
+            def evaluate_candidates(self, _state, _candidates):
+                self.calls += 1
+                return [CandidateAssessment("one", "DEFER", 0.3)]
+
+        fallback = Fallback()
+        pool = DecisionEvaluatorPool([Budgeted(), fallback])
+        self.assertEqual(pool.evaluate_candidates({}, [{"candidate_id": "one"}]), [])
+        self.assertEqual(fallback.calls, 0)
+        self.assertEqual(pool._cooldown_until, {})
+
     def test_builtin_catalog_discovers_laya_as_an_independent_evaluator(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -111,6 +137,28 @@ class LayaPluginTests(unittest.TestCase):
                 self.assertEqual(request["model"], "convaiinnovations/laya")
                 self.assertEqual(len(json.loads(request["messages"][-1]["content"])["questions"]), 4)
                 self.assertEqual(request["response_format"]["type"], "json_schema")
+
+    def test_scan_deadline_caps_network_timeout_without_entering_model_state(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            evaluator = self._plugin(Path(directory)).factory(None)
+            timeouts: list[float] = []
+            real = _opener("")
+
+            class Opener:
+                def open(self, request, timeout):
+                    timeouts.append(timeout)
+                    return real.open(request, timeout=timeout)
+
+            with patch("prediction_market_agent.plugins.evaluators.jev._opener",
+                       return_value=Opener()):
+                answer = evaluator.evaluate_candidates(
+                    {"_scan_deadline_monotonic": time.monotonic() + 1},
+                    [{"candidate_id": "one", "title": "Test"}],
+                )
+            self.assertEqual(len(answer), 1)
+            self.assertLessEqual(timeouts[0], 1)
+            asked = json.loads(_LayaHandler.requests[-1]["messages"][-1]["content"])
+            self.assertNotIn("_scan_deadline_monotonic", asked["state"])
 
     def test_cpu_service_is_not_ready(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

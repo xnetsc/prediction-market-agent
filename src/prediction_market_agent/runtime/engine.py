@@ -13,6 +13,7 @@ from .actions import ExecutionActionsMixin
 from .bootstrap import PlatformRuntime, bootstrap_engine
 from .broker import ExecutionError
 from .evaluation import MarketEvaluationMixin
+from .evaluator_tool import EvaluatorToolContribution
 from .decision_strategy import DecisionEvolution
 from .market_discovery import DiscoveryEngine
 from .operator_instructions import OperatorInstructions, evidence_for_review
@@ -75,7 +76,9 @@ class TradingEngine(MarketEvaluationMixin, ExecutionActionsMixin):
         self.provider = components.provider
         self.evaluator = components.evaluator
         self.evaluator.set_quality(self.memory.evaluator_quality())
-        self.research_contributions = components.research_contributions
+        self.research_contributions = list(components.research_contributions)
+        if getattr(self.evaluator, "accepts_agent_questions", False):
+            self.research_contributions.append(EvaluatorToolContribution(self.evaluator))
         self.discovery_strategy = components.discovery_strategy
         # What the operator attached to their money. Collected by the platform plugins, understood
         # and kept here, obeyed by every round until this says it is finished.
@@ -91,7 +94,7 @@ class TradingEngine(MarketEvaluationMixin, ExecutionActionsMixin):
             max_scan_pages=config.discovery_max_pages,
             evolution_enabled=components.strategy_evolution,
             cross_platform_search=self.search_market_candidates,
-            research_contributions=components.research_contributions,
+            research_contributions=self.research_contributions,
             operator_instructions=self.operator_instructions.payload,
         )
         self.decision_evolution = DecisionEvolution(

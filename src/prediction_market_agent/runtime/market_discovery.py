@@ -254,23 +254,24 @@ class DiscoveryEngine:
         self, *, platform: str, scan_state: dict[str, Any], frontier: list[dict[str, Any]],
         last_page: dict[str, Any], evaluator_answer: Any,
     ) -> dict[str, Any] | None:
+        continuation_input = {
+            "platform": platform,
+            "scan_state": scan_state,
+            "frontier": frontier[:40],
+            "last_page": last_page,
+            "typed_evaluator": (
+                {
+                    "action": evaluator_answer.action,
+                    "marginal_value": evaluator_answer.marginal_value,
+                    "confidence": evaluator_answer.confidence,
+                    "provider": evaluator_answer.provider,
+                }
+                if evaluator_answer is not None else None
+            ),
+        }
         try:
             result = self.provider.run(
-                {
-                    "platform": platform,
-                    "scan_state": scan_state,
-                    "frontier": frontier[:40],
-                    "last_page": last_page,
-                    "typed_evaluator": (
-                        {
-                            "action": evaluator_answer.action,
-                            "marginal_value": evaluator_answer.marginal_value,
-                            "confidence": evaluator_answer.confidence,
-                            "provider": evaluator_answer.provider,
-                        }
-                        if evaluator_answer is not None else None
-                    ),
-                },
+                continuation_input,
                 schema=CONTINUATION_SCHEMA,
                 schema_name="discovery_continuation",
                 mission=(
@@ -280,8 +281,19 @@ class DiscoveryEngine:
                 ),
                 max_tool_steps=0,
             )
+            self.memory.record_turn(
+                platform=platform, provider=result.provider, market_topic_id="", token_id="",
+                input_payload=continuation_input, raw_output=result.raw_output,
+                decision=result.value, status="OK",
+            )
             return dict(result.value)
         except (DecisionProviderError, AttributeError, KeyError, TypeError, ValueError) as error:
+            self.memory.record_turn(
+                platform=platform, provider=getattr(self.provider, "name", ""),
+                market_topic_id="", token_id="", input_payload=continuation_input,
+                raw_output=getattr(error, "raw_output", ""), decision=None,
+                status="ERROR", error=str(error),
+            )
             LOGGER.warning("discovery continuation provider unavailable on %s: %s", platform, error)
             self.memory.record_runtime_incident(
                 platform=platform,
@@ -380,6 +392,7 @@ class DiscoveryEngine:
         page_number = 0
         disagreement_probe_used = False
         resume_saved = False
+        time_exhausted = False
 
         def save_resume(reason: str) -> None:
             nonlocal resume_saved
@@ -404,6 +417,11 @@ class DiscoveryEngine:
             for source, listing, extra in sources:
                 if source not in active or page_number >= self.max_scan_pages:
                     continue
+                if time.monotonic() - started >= self.max_scan_seconds:
+                    self._scan_audit.append({"stop": "resource_time_limit"})
+                    save_resume("resource_time_limit")
+                    time_exhausted = True
+                    break
                 try:
                     page = listing(
                         offset=cursors[source], limit=max(1, int(plugin.topic_page_size())), **extra
@@ -424,32 +442,59 @@ class DiscoveryEngine:
                     active.discard(source)
                 else:
                     cursors[source] = page.next_offset
-                candidates = [self._evaluation_candidate(topic) for topic in fresh]
-                answers = (
-                    self.evaluator.evaluate_candidates(
-                        {
-                            "platform": plugin.name,
-                            "pages_scanned": page_number,
-                            "topics_seen": len(seen),
-                            "source": source,
-                            # How this screener's own verdicts have turned out here so far, so a
-                            # round can be better calibrated than the one before it.
-                            "screening_calibration": self._screening_calibration,
-                        },
-                        candidates,
-                    )
-                    if self.evaluator is not None and self.evaluator.available
-                    else []
+                # A local evaluator may need one request per candidate. Sending an entire venue
+                # page (often 100 topics) before checking the clock can hold a scan open for many
+                # minutes, preventing even its observation record from being written. The venue's
+                # ordered page remains in the survey; spend the remaining screening budget on its
+                # leading candidates and leave the rest for ordinary agent selection.
+                remaining = max(0.0, self.max_scan_seconds - (time.monotonic() - started))
+                per_candidate = bool(getattr(self.evaluator, "per_candidate_requests", False))
+                screening_limit = (
+                    min(len(fresh), 24, max(0, int(remaining / 2)))
+                    if per_candidate
+                    else len(fresh)
                 )
+                candidates = [self._evaluation_candidate(topic) for topic in fresh[:screening_limit]]
+                answers: list[Any] = []
+                attempted_items = 0
                 if self.evaluator is not None and self.evaluator.available:
-                    self._evaluator_candidate_errors.update(self.evaluator.errors)
-                    for name, error in getattr(self.evaluator, "fallback_errors", {}).items():
-                        self.memory.record_runtime_incident(
-                            platform=plugin.name, stage="evaluator_fallback",
-                            severity="warning", message=f"{name}: {error}",
-                            fallback="本次粗筛改用下一个已启用评估器",
-                        )
+                    screening_state = {
+                        "platform": plugin.name,
+                        "pages_scanned": page_number,
+                        "topics_seen": len(seen),
+                        "source": source,
+                        # How this screener's own verdicts have turned out here so far, so a
+                        # round can be better calibrated than the one before it.
+                        "screening_calibration": self._screening_calibration,
+                    }
+                    screening_state["_scan_deadline_monotonic"] = started + self.max_scan_seconds
+                    chunk_size = 4 if per_candidate else max(1, len(candidates))
+                    for offset in range(0, len(candidates), chunk_size):
+                        if per_candidate and time.monotonic() >= started + self.max_scan_seconds:
+                            break
+                        chunk = candidates[offset:offset + chunk_size]
+                        attempted_items += len(chunk)
+                        chunk_answers = self.evaluator.evaluate_candidates(screening_state, chunk)
+                        answers.extend(chunk_answers)
+                        self._evaluator_candidate_errors.update(self.evaluator.errors)
+                        for name, error in getattr(self.evaluator, "fallback_errors", {}).items():
+                            self.memory.record_runtime_incident(
+                                platform=plugin.name, stage="evaluator_fallback",
+                                severity="warning", message=f"{name}: {error}",
+                                fallback="本次粗筛改用下一个已启用评估器",
+                            )
+                        if not chunk_answers and self.evaluator.errors:
+                            break
                 assessments.update({answer.candidate_id: answer for answer in answers})
+                if time.monotonic() - started >= self.max_scan_seconds:
+                    self._scan_audit.append({
+                        "source": source, "items": len(page.topics),
+                        "screened_items": len(answers), "attempted_items": attempted_items,
+                        "stop": "resource_time_limit",
+                    })
+                    save_resume("resource_time_limit")
+                    time_exhausted = True
+                    break
                 frontier = sorted(
                     [
                         {**self._evaluation_candidate(topic),
@@ -467,6 +512,8 @@ class DiscoveryEngine:
                     "source": source,
                     "items": len(page.topics),
                     "new_items": len(fresh),
+                    "screened_items": len(answers),
+                    "attempted_items": attempted_items,
                     "has_more": bool(page.has_more),
                     "next_offset": page.next_offset,
                 }
@@ -478,6 +525,7 @@ class DiscoveryEngine:
                     "resource_page_limit": self.max_scan_pages,
                     "resource_time_limit_seconds": self.max_scan_seconds,
                 }
+                scan_state["_scan_deadline_monotonic"] = started + self.max_scan_seconds
                 typed = (
                     self.evaluator.assess_continuation(scan_state, frontier[:40], page_summary)
                     if self.evaluator is not None and self.evaluator.available
@@ -497,13 +545,35 @@ class DiscoveryEngine:
                 typed_is_decisive = self._typed_continuation_is_decisive(
                     typed, evaluator_errors, self._screening_threshold
                 )
+                # An optional Agent continuation can run through several provider timeouts
+                # before the first observation is saved. Only ask when all configured attempts
+                # can fit in the remaining scan budget. Unknown test/third-party timeouts keep
+                # their existing behavior; the final candidate choice always stays with Agent.
+                provider_items = getattr(self.provider, "providers", None) or [self.provider]
+                provider_timeouts = [
+                    getattr(getattr(item, "backend", None), "timeout", None)
+                    for item in provider_items
+                ]
+                remaining_scan = max(0.0, started + self.max_scan_seconds - time.monotonic())
+                provider_budgeted = bool(
+                    provider_timeouts
+                    and all(isinstance(timeout, (int, float)) and timeout > 0
+                            for timeout in provider_timeouts)
+                    and sum(provider_timeouts) + 5 >= remaining_scan
+                )
+                continuation_budgeted = bool(
+                    provider_budgeted or (
+                        self.evaluator is not None
+                        and getattr(self.evaluator, "per_candidate_requests", False)
+                    )
+                )
                 llm = (
                     self._llm_continuation(
                         platform=plugin.name, scan_state=scan_state, frontier=frontier,
                         last_page=page_summary, evaluator_answer=typed,
                     )
                     if self.evaluator is not None and self.evaluator.available
-                    and not typed_is_decisive
+                    and not typed_is_decisive and not continuation_budgeted
                     else None
                 )
                 audit = {
@@ -514,7 +584,12 @@ class DiscoveryEngine:
                         if typed else None
                     ),
                     "llm": llm,
-                    "llm_skipped": "decisive_typed_evaluation" if typed_is_decisive else None,
+                    "llm_skipped": (
+                        "decisive_typed_evaluation" if typed_is_decisive
+                        else "single_candidate_screening_budget" if per_candidate
+                        else "provider_timeout_exceeds_scan_budget" if continuation_budgeted
+                        else None
+                    ),
                     "evaluator_errors": evaluator_errors,
                 }
                 self._scan_audit.append(audit)
@@ -549,7 +624,7 @@ class DiscoveryEngine:
                         self.memory.clear_survey_resume(plugin.name)
                     active.clear()
                     break
-            if not progressed:
+            if time_exhausted or not progressed:
                 break
         if active and not resume_saved and page_number >= self.max_scan_pages:
             self._scan_audit.append({"stop": "resource_page_limit"})
@@ -565,7 +640,9 @@ class DiscoveryEngine:
                 -(assessments.get(topic.topic_id).quality if topic.topic_id in assessments else 0.0),
             ),
         )
-        return self._with_requested(plugin, ordered, budget), near_dated
+        return self._with_requested(
+            plugin, ordered, budget, deadline_monotonic=started + self.max_scan_seconds
+        ), near_dated
 
     def _survey(
         self, plugin: PredictionMarketApiPlugin, budget: DiscoveryBudget
@@ -577,13 +654,16 @@ class DiscoveryEngine:
         plugin: PredictionMarketApiPlugin,
         topics: list[Topic],
         budget: DiscoveryBudget,
+        *,
+        deadline_monotonic: float,
     ) -> list[Topic]:
         """Add what the agent asked to look for, alongside what the venue happens to list first.
 
         The listing is one fixed opinion - most traded first - and a robot that only ever sees that
         can only ever find something there. What is worth looking at is a judgement about the
         moment: a catalyst due this week, a category that moved, a question it saw quoted elsewhere.
-        Asking is free; it already reads this platform every round.
+        Built-in venues can match the already-fetched listing without extra network requests.
+        A third-party venue without that capability is only asked while scan time remains.
 
         These are added to the listing, never instead of it. A query that finds nothing leaves the
         round exactly as it was.
@@ -592,9 +672,20 @@ class DiscoveryEngine:
         if not queries:
             return topics
         seen = {topic.topic_id for topic in topics}
-        for query in queries:
+        lightweight = bool(getattr(plugin, "supports_lightweight_search", False))
+        for query in queries[:8]:
+            if not lightweight and time.monotonic() >= deadline_monotonic:
+                self._scan_audit.append({"requested_search": "skipped_scan_budget"})
+                break
             try:
-                found = plugin.search_market_candidates(query, budget.search_result_limit)
+                if lightweight:
+                    found = plugin.search_market_candidates(
+                        query, budget.search_result_limit, lightweight=True
+                    )
+                else:
+                    found = plugin.search_market_candidates(
+                        query, min(5, budget.search_result_limit)
+                    )
             except Exception as error:
                 LOGGER.warning("requested survey %r failed on %s: %s", query, plugin.name, error)
                 continue
@@ -1060,6 +1151,12 @@ class DiscoveryEngine:
             # candidates keep, and the next round asks again.
             LOGGER.error("market discovery agent unavailable on %s; selecting nothing: %s",
                          platform, error)
+            self.memory.record_turn(
+                platform=platform, provider=getattr(self.provider, "name", ""),
+                market_topic_id="", token_id="", input_payload=request,
+                raw_output=getattr(error, "raw_output", ""), decision=None,
+                status="ERROR", error=str(error), decision_id=decision_id,
+            )
             self.memory.record_runtime_incident(
                 platform=platform,
                 stage="market_selection",
@@ -1083,6 +1180,11 @@ class DiscoveryEngine:
         if self.memory.is_cancelled(decision_id):
             LOGGER.info("discovery round %s on %s was deleted after answering", decision_id, platform)
             return [], "cancelled", "deleted while running", dict(toolbox.found)
+        self.memory.record_turn(
+            platform=platform, provider=result.provider, market_topic_id="", token_id="",
+            input_payload=request, raw_output=result.raw_output, decision=result.value,
+            status="OK", decision_id=decision_id,
+        )
         if toolbox.verified:
             # The round's own reading of the candidates, kept where the candidates are.
             self.memory.merge_decision_context(

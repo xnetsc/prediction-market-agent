@@ -31,6 +31,7 @@ class LayaDecisionEvaluator(SchemaDecisionEvaluator):
     """One candidate per call keeps its four typed questions below Laya's six-question limit."""
 
     name = "laya"
+    per_candidate_requests = True
 
     def __init__(self, endpoint: str, proxy: str, timeout: int) -> None:
         super().__init__(
@@ -124,7 +125,7 @@ def initialize_plugin(context: PluginInitializationContext) -> PluginSpec:
 
     return PluginSpec(
         "decision_evaluator", "laya",
-        "本地 WebGPU 粗筛评估器：按 state/questions → answers 协议评估候选与续扫，不作交易决策；服务不就绪时不启用。",
+        "本地 WebGPU 粗筛评估器，也可作为 Agent 事实分类工具：按 state/questions → answers 协议评估候选与续扫，不代替交易决策；服务不就绪时不启用。",
         str(context.module_path), factory, configuration, lambda: None,
         readiness_callback=readiness,
         network_routes_callback=lambda: configured_proxy_route(

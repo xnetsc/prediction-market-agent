@@ -107,8 +107,10 @@ class GuardedMarketApi:
         )
         return self._plugin.get_candles(reference_symbol, interval=interval, limit=limit)
 
-    def search_market_candidates(self, query: str, limit: int) -> Any:
+    def search_market_candidates(self, query: str, limit: int, *, lightweight: bool = False) -> Any:
         self._check("search_market_candidates", {"query": query, "limit": limit})
+        if lightweight and getattr(self._plugin, "supports_lightweight_search", False):
+            return self._plugin.search_market_candidates(query, limit, lightweight=True)
         return self._plugin.search_market_candidates(query, limit)
 
     def create_write_gateway(self, state: Any) -> Any:

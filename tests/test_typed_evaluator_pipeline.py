@@ -9,7 +9,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from types import SimpleNamespace
 
-from prediction_market_agent.agent.decision import AgentRunResult
+from prediction_market_agent.agent.decision import AgentRunResult, DecisionProviderError
 from prediction_market_agent.agent.decision_evaluator import (
     CandidateAssessment,
     ContinuationAssessment,
@@ -415,6 +415,11 @@ class AdaptiveDiscoveryTests(unittest.TestCase):
 
         self.assertEqual(observed, 260)
         self.assertEqual(len(selected), 15)
+        turns = self.memory.connection.execute(
+            "SELECT status, decision_id FROM provider_turns WHERE platform = 'fake'"
+        ).fetchall()
+        self.assertTrue(any(status == "OK" and decision_id is not None for status, decision_id in turns))
+        self.assertTrue(any(status == "OK" and decision_id is None for status, decision_id in turns))
         self.assertGreater(plugin.list_calls, 8)
         self.assertGreater(provider.continuations, 8)
         self.assertIn("typed_evaluation", json.loads(
@@ -422,6 +427,26 @@ class AdaptiveDiscoveryTests(unittest.TestCase):
                 "SELECT features_json FROM discovery_selections LIMIT 1"
             ).fetchone()[0]
         ))
+
+    def test_failed_discovery_model_call_is_visible_in_model_turns(self) -> None:
+        class FailedProvider:
+            name = "test-provider"
+
+            def run(self, _payload, **_options):
+                raise DecisionProviderError("test model timeout", raw_output="timeout detail")
+
+        engine = DiscoveryEngine(
+            memory=self.memory, strategy=BuiltInMarketDiscovery(),
+            provider=FailedProvider(), evaluator=_AdaptiveEvaluator(),
+            max_scan_pages=1, evolution_enabled=False,
+        )
+        self.assertEqual(engine.discover(platform="fake", plugin=FakePlugin(1)), ())
+        turns = self.memory.connection.execute(
+            "SELECT status, error, raw_output, decision_id FROM provider_turns WHERE platform = 'fake'"
+        ).fetchall()
+        self.assertEqual(len(turns), 2)
+        self.assertTrue(all(turn[:3] == ("ERROR", "test model timeout", "timeout detail") for turn in turns))
+        self.assertEqual(sum(turn[3] is None for turn in turns), 1)
 
     def test_pause_persists_cursor_and_next_batch_resumes(self) -> None:
         plugin = _OffsetRecordingPlugin(120)

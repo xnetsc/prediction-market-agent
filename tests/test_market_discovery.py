@@ -1,14 +1,17 @@
 from __future__ import annotations
 
 import json
+import itertools
 import tempfile
 import time
 import unittest
 from dataclasses import replace
 from types import SimpleNamespace
 from pathlib import Path
+from unittest.mock import patch
 
 from prediction_market_agent.agent.decision import AgentRunResult
+from prediction_market_agent.agent.decision_evaluator import CandidateAssessment, ContinuationAssessment
 from prediction_market_agent.agent.evolution import (
     DECISION_EVOLUTION_KEY,
     DISCOVERY_EVOLUTION_KEY,
@@ -35,6 +38,8 @@ from prediction_market_agent.plugin_system.contracts import (
 from prediction_market_agent.runtime.decision_strategy import DecisionEvolution
 from prediction_market_agent.runtime.market_discovery import DiscoveryEngine, topic_features
 from prediction_market_agent.runtime.memory import SessionMemory
+from prediction_market_agent.plugins.api._polymarket.adapter import PolymarketApiPlugin
+from prediction_market_agent.plugins.api._binance.adapter import BinancePredictionApiPlugin
 
 
 CAPABILITIES = ApiCapabilities(
@@ -1379,3 +1384,152 @@ class TheResearchTrailIsRecordedTests(unittest.TestCase):
         self.assertIn("resolution wording", TRADE_CONTROL_MISSION)
         self.assertIn("top of the book", TRADE_CONTROL_MISSION)
         self.assertIn("unused step is not saved", TRADE_CONTROL_MISSION)
+
+
+class ScreeningBudgetTests(unittest.TestCase):
+    def test_builtin_requested_search_uses_cached_titles_without_detail_calls(self) -> None:
+        venue = object.__new__(PolymarketApiPlugin)
+        venue._events = [{"id": "one", "title": "OPEC meeting today", "active": True}]
+        with patch.object(PolymarketApiPlugin, "get_topic", side_effect=AssertionError("network detail")), patch.object(
+            PolymarketApiPlugin, "get_order_book", side_effect=AssertionError("network book")
+        ):
+            result = venue.search_market_candidates("OPEC meeting", 10, lightweight=True)
+        self.assertEqual([item.topic.topic_id for item in result], ["one"])
+        self.assertIsNone(result[0].detail)
+        self.assertEqual(result[0].books, {})
+
+        binance = object.__new__(BinancePredictionApiPlugin)
+        binance._topics = [{"marketTopicId": "two", "title": "OPEC meeting tomorrow",
+                            "question": "OPEC meeting"}]
+        with patch.object(BinancePredictionApiPlugin, "get_topic", side_effect=AssertionError("network detail")), patch.object(
+            BinancePredictionApiPlugin, "get_order_book", side_effect=AssertionError("network book")
+        ):
+            result = binance.search_market_candidates("OPEC meeting", 10, lightweight=True)
+        self.assertEqual([item.topic.topic_id for item in result], ["two"])
+        self.assertIsNone(result[0].detail)
+
+    def test_requested_survey_passes_lightweight_mode_when_available(self) -> None:
+        class Venue(FakePlugin):
+            supports_lightweight_search = True
+
+            def __init__(self):
+                super().__init__(1)
+                self.search_calls = []
+
+            def search_market_candidates(self, query, limit, *, lightweight=False):
+                self.search_calls.append((query, limit, lightweight))
+                return []
+
+        with tempfile.TemporaryDirectory() as directory:
+            memory = SessionMemory(Path(directory) / "sessions.sqlite3")
+            memory.save_survey_plan(platform="fake", queries=["opec meeting"],
+                                    next_scan_seconds=0, reason="")
+            venue = Venue()
+            engine = DiscoveryEngine(memory=memory, strategy=BuiltInMarketDiscovery(),
+                provider=RecordingProvider(), max_scan_pages=1, evolution_enabled=False)
+            engine._adaptive_survey(venue, engine.strategy.budget())
+            self.assertEqual(venue.search_calls, [("opec meeting", 100, True)])
+
+    def test_optional_agent_continuation_does_not_outlive_jev_scan_budget(self) -> None:
+        class Evaluator:
+            available = True
+            per_candidate_requests = False
+            errors: dict[str, str] = {}
+            fallback_errors: dict[str, str] = {}
+
+            def evaluate_candidates(self, state, candidates):
+                self.assert_deadline(state)
+                return [CandidateAssessment(item["candidate_id"], "DEFER", 0.3, 0.6)
+                        for item in candidates]
+
+            def assess_continuation(self, state, _frontier, _page):
+                self.assert_deadline(state)
+                return ContinuationAssessment("CONTINUE_DISCOVERY", 0.3, 0.4)
+
+            @staticmethod
+            def assert_deadline(state):
+                assert "_scan_deadline_monotonic" in state
+
+        with tempfile.TemporaryDirectory() as directory:
+            provider = RecordingProvider()
+            provider.providers = [SimpleNamespace(backend=SimpleNamespace(timeout=180))]
+            engine = DiscoveryEngine(
+                memory=SessionMemory(Path(directory) / "sessions.sqlite3"),
+                strategy=BuiltInMarketDiscovery(), provider=provider,
+                evaluator=Evaluator(), max_scan_seconds=45, max_scan_pages=1,
+                evolution_enabled=False,
+            )
+            surveyed, _ = engine._adaptive_survey(FakePlugin(25), engine.strategy.budget())
+            self.assertEqual(len(surveyed), 25)
+            self.assertEqual(provider.requests, [])
+            self.assertEqual(engine._scan_audit[0]["llm_skipped"],
+                             "provider_timeout_exceeds_scan_budget")
+
+    def test_a_large_venue_page_does_not_require_one_laya_call_per_topic(self) -> None:
+        class LargePage(FakePlugin):
+            def topic_page_size(self) -> int:
+                return 100
+
+        class Evaluator:
+            available = True
+            per_candidate_requests = True
+            errors: dict[str, str] = {}
+            fallback_errors: dict[str, str] = {}
+
+            def __init__(self) -> None:
+                self.screened: list[str] = []
+
+            def evaluate_candidates(self, _state, candidates):
+                self.screened.extend(candidate["candidate_id"] for candidate in candidates)
+                return [CandidateAssessment(candidate["candidate_id"], "DEFER", 0.3, 0.95)
+                        for candidate in candidates]
+
+            def assess_continuation(self, _state, _frontier, _page):
+                return ContinuationAssessment("CONTINUE_DISCOVERY", 0.9)
+
+        with tempfile.TemporaryDirectory() as directory:
+            evaluator = Evaluator()
+            provider = RecordingProvider()
+            engine = DiscoveryEngine(
+                memory=SessionMemory(Path(directory) / "sessions.sqlite3"),
+                strategy=BuiltInMarketDiscovery(), provider=provider,
+                evaluator=evaluator, max_scan_seconds=45, max_scan_pages=1,
+                evolution_enabled=False,
+            )
+            surveyed, _ = engine._adaptive_survey(LargePage(100), engine.strategy.budget())
+            self.assertEqual(len(surveyed), 100)
+            self.assertLessEqual(len(evaluator.screened), 24)
+            self.assertEqual(engine._scan_audit[0]["screened_items"], len(evaluator.screened))
+            self.assertEqual(engine._scan_audit[0]["llm_skipped"], "single_candidate_screening_budget")
+            self.assertEqual(provider.requests, [])
+
+    def test_screening_checks_the_clock_between_small_chunks(self) -> None:
+        class LargePage(FakePlugin):
+            def topic_page_size(self) -> int:
+                return 100
+
+        class Evaluator:
+            available = True
+            per_candidate_requests = True
+            errors: dict[str, str] = {}
+            fallback_errors: dict[str, str] = {}
+
+            def evaluate_candidates(self, _state, candidates):
+                return [CandidateAssessment(item["candidate_id"], "DEFER", 0.3)
+                        for item in candidates]
+
+        with tempfile.TemporaryDirectory() as directory:
+            engine = DiscoveryEngine(
+                memory=SessionMemory(Path(directory) / "sessions.sqlite3"),
+                strategy=BuiltInMarketDiscovery(), provider=RecordingProvider(),
+                evaluator=Evaluator(), max_scan_seconds=45, max_scan_pages=1,
+                evolution_enabled=False,
+            )
+            ticks = itertools.count(0, 10)
+            with patch("prediction_market_agent.runtime.market_discovery.time.monotonic",
+                       side_effect=lambda: next(ticks)):
+                surveyed, _ = engine._adaptive_survey(LargePage(100), engine.strategy.budget())
+            self.assertEqual(len(surveyed), 100)
+            self.assertEqual(engine._scan_audit[0]["stop"], "resource_time_limit")
+            self.assertEqual(engine._scan_audit[0]["screened_items"], 4)
+            self.assertEqual(engine._scan_audit[0]["attempted_items"], 4)

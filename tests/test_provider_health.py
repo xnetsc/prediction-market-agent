@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 
@@ -236,6 +237,29 @@ class FailoverTests(unittest.TestCase):
 
 
 class ProviderQualityTests(unittest.TestCase):
+    def test_recovery_probe_never_blocks_capacity_or_cycle_review(self) -> None:
+        provider = FallbackDecisionProvider([StubProvider("healthy")], {}, ("healthy",))
+        quality = ProviderQuality(memory=self.memory, provider=provider)
+        entered = threading.Event()
+        release = threading.Event()
+
+        def slow_probe():
+            entered.set()
+            release.wait(2)
+            return {}
+
+        quality.probe_recovering = slow_probe
+        try:
+            started = time.monotonic()
+            self.assertTrue(quality.capacity()["available"])
+            self.assertTrue(entered.wait(1))
+            quality.review()
+            self.assertLess(time.monotonic() - started, 0.5)
+        finally:
+            release.set()
+            if quality._probe_thread is not None:
+                quality._probe_thread.join(1)
+
     def setUp(self) -> None:
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)

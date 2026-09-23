@@ -10,11 +10,66 @@ from unittest.mock import patch
 from fastapi.testclient import TestClient
 
 from prediction_market_agent.core.config import Config
+from prediction_market_agent.plugin_system.managed_config import ManagedRuntimeConfig
 from prediction_market_agent.runtime.auth import AdminAuthStore
 from prediction_market_agent.runtime.dashboard import create_app
+from prediction_market_agent.runtime.memory import SessionMemory
 
 
 class LocalAccessTests(unittest.TestCase):
+    def test_screening_records_route_excludes_unassessed_candidates(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config = Config(working_directory=root, session_db=root / "sessions.sqlite3",
+                auth_db=root / "auth.sqlite3", management_file=root / "selection.json",
+                plugin_directories_file=root / "directories.json")
+            memory = SessionMemory(config.session_db)
+            memory.record_topic_observations(platform="venue", observations=[
+                {"market_topic_id": "one", "title": "One", "status": "OPEN",
+                 "liquidity_usdt": 10, "volume_usdt": 20,
+                 "features": {"typed_evaluation": {"action": "DEFER", "confidence": 0.9}}},
+                {"market_topic_id": "two", "title": "Two", "status": "OPEN",
+                 "liquidity_usdt": 10, "volume_usdt": 20, "features": {}},
+            ])
+            memory.close()
+            with TestClient(create_app(config, start_robot=False), base_url="http://localhost") as client:
+                response = client.post("/api/local", json={"url":
+                    "/api/discovery/screenings?platform=venue&limit=1&offset=0", "body": None})
+                self.assertEqual(response.status_code, 200)
+                self.assertEqual(response.json()["total"], 1)
+                self.assertEqual(response.json()["items"][0]["market_topic_id"], "one")
+
+    def test_plugin_selection_is_saved_before_runtime_reconciliation(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config = Config(
+                working_directory=root, session_db=root / "sessions.sqlite3",
+                auth_db=root / "auth.sqlite3", management_file=root / "selection.json",
+                plugin_directories_file=root / "directories.json",
+                application_config_file=root / "application.json",
+            )
+            with patch("prediction_market_agent.runtime.controller.RobotRuntimeManager.reconcile"), patch(
+                "prediction_market_agent.runtime.controller.RobotRuntimeManager.stop"
+            ) as stop, patch(
+                "prediction_market_agent.runtime.controller.RobotRuntimeManager.reconcile_async"
+            ) as reconcile_async, TestClient(
+                create_app(config, start_robot=True), base_url="http://localhost"
+            ) as client:
+                manifest = client.post("/api/local", json={"url": "/api/plugins/manage", "body": None}).json()
+                enabled = {
+                    kind: [item["name"] for item in items if item["enabled"]]
+                    for kind, items in manifest["plugins"].items()
+                }
+                enabled["decision_evaluator"] = []
+                response = client.post("/api/local", json={"url": "/api/plugins/selection", "body": {
+                    "enabled": enabled, "decision_strategy": "", "strategy_evolution": True,
+                }})
+                self.assertEqual(response.status_code, 200)
+                self.assertEqual(ManagedRuntimeConfig.load(config.management_file).enabled["decision_evaluator"], ())
+                self.assertFalse(any(item["enabled"] for item in response.json()["plugins"]["decision_evaluator"]))
+                stop.assert_not_called()
+                reconcile_async.assert_called_once_with()
+
     def test_model_selection_mode_is_saved_without_replacing_other_settings(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

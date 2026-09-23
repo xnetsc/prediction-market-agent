@@ -86,6 +86,28 @@ class ProviderQuality:
         self._first_look = threading.Lock()
         self._looked = False
         self._probing = threading.Lock()
+        self._probe_thread: threading.Thread | None = None
+
+    def _schedule_recovery_probe(self) -> None:
+        """Probe on a worker; neither collection nor a capacity read waits for model I/O."""
+        if not self._probing.acquire(blocking=False):
+            return
+
+        def run() -> None:
+            try:
+                self.probe_recovering()
+            except Exception:
+                LOGGER.exception("provider recovery check failed; judging on what is recorded")
+            finally:
+                self._probing.release()
+
+        thread = threading.Thread(target=run, name="decision-provider-recovery", daemon=True)
+        self._probe_thread = thread
+        try:
+            thread.start()
+        except Exception:
+            self._probing.release()
+            raise
 
     def capacity(self) -> dict[str, Any]:
         """Whether a decision can be asked for right now, found out for free wherever possible.
@@ -97,15 +119,8 @@ class ProviderQuality:
         pulls markets and writes a failed record to learn it again.
         """
         self._look_once()
-        # Two callers can arrive together - the watch and a platform's cycle. One check is enough,
-        # and neither should wait on a slow one: the other reads what is already recorded.
-        if self._probing.acquire(blocking=False):
-            try:
-                self.probe_recovering()
-            except Exception:
-                LOGGER.exception("provider recovery check failed; judging on what is recorded")
-            finally:
-                self._probing.release()
+        # A liveness call may run for minutes. It must not hold the discovery path hostage.
+        self._schedule_recovery_probe()
         return capacity_reading(self.provider)
 
     def _look_once(self) -> None:
@@ -336,10 +351,7 @@ class ProviderQuality:
 
     def review(self, *, cross_evaluate: bool = False, sample: int = 2) -> dict[str, Any]:
         """Refresh measured quality and publish it as the provider ranking weights."""
-        try:
-            self.probe_recovering()
-        except Exception:
-            LOGGER.exception("provider liveness probe failed; keeping the current health view")
+        self._schedule_recovery_probe()
         if cross_evaluate:
             try:
                 self.cross_evaluate(sample=sample)

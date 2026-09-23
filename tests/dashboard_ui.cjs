@@ -269,6 +269,16 @@ const fs = require('node:fs');
                         assert(response.ok);
                         await route.fulfill({json:{installed:'/fixture/openrouter_ui.py',management:await response.json()}});return;
                     }
+                    if(message.url==='/api/plugins/selection'){
+                        const response=await fetch(base+'/api/local',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({url:'/api/plugins/manage',body:null})});
+                        assert(response.ok);
+                        const manifest=await response.json();
+                        for(const [kind,plugins] of Object.entries(manifest.plugins))for(const plugin of plugins){
+                            const rank=(message.body.enabled[kind]||[]).indexOf(plugin.name);
+                            plugin.enabled=rank>=0;plugin.priority=rank>=0?rank+1:99;
+                        }
+                        await route.fulfill({json:manifest});return;
+                    }
                     await route.fulfill({json:{}});return;
                 }
                 if(message.url==='/api/plugins/config/choices'){
@@ -317,13 +327,41 @@ const fs = require('node:fs');
             await page.getByRole('button',{name:'再添加一个 OpenRouter 配置'}).click();
             await page.waitForFunction(()=>document.getElementById('openRouterPluginStatus').textContent.includes('openrouter_ui.py'));
             assert.equal(writes.find(w=>w.url==='/api/plugins/openrouter/create').body.name,'openrouter_ui');
+            const readsBeforeSelection=passiveReads.length;
             await page.getByRole('button',{name:'保存模型启用与顺序'}).click();
             await page.waitForFunction(()=>document.getElementById('modelManageStatus').textContent.includes('启用状态和优先级已保存'));
+            assert.equal(passiveReads.length,readsBeforeSelection,'saving selection must not wait for unrelated runtime reads');
             assert.equal(Object.keys(writes.find(w=>w.url==='/api/plugins/selection').body.enabled).length,8);
             await page.unroute('**/api/local');
             await page.evaluate(()=>{location.hash='decisions'});
             await page.waitForFunction(()=>document.querySelector('.nav-link[aria-current="page"]').hash==='#decisions');
             await page.waitForFunction(()=>!document.getElementById('decisions').hasAttribute('aria-busy'));
+            await page.evaluate(()=>renderDiscoveryActivity({
+                platforms:[{platform:'fixture',latest_observed_at:1000000000000,latest_batch_count:100,batches:3,observations:300,evaluator_counts:{},top_candidates:[]}],
+                runtime_platforms:{fixture:{running:true,runtime:{last_started_at:1000000100,current_stage:'discovery'}}},
+                decision_deletions:[{deleted_at:1000000200000,source:'management_console',scope:{},result:{provider_turns:3,agent_steps:6}}],
+                incidents:[],recent_selections:[],
+            }));
+            assert((await page.locator('#discoveryActivity').innerText()).includes('当前阶段：采集与粗筛'));
+            assert(!(await page.locator('#discoveryActivity').innerText()).includes('删除审计'));
+            assert((await page.locator('#deletionAudit').textContent()).includes('不是市场采集时间'));
+            await page.route('**/api/local',async route=>{
+                const message=route.request().postDataJSON();
+                if(message.url.startsWith('/api/discovery/screenings?')){
+                    await route.fulfill({json:{total:1,limit:50,offset:0,items:[{
+                        id:1,observed_at:1000000000000,platform:'fixture',market_topic_id:'screened-1',
+                        title:'Screened fixture',status:'OPEN',liquidity_usdt:10,volume_usdt:20,
+                        assessment:{action:'PRIORITIZE',quality:0.8,confidence:0.91,
+                            provider:'openrouter',evaluator_name:'jev'},
+                    }]}});return;
+                }
+                await route.continue();
+            });
+            await page.locator('#evaluatorScreeningsPanel>summary').click();
+            await page.waitForFunction(()=>document.getElementById('evaluatorScreenings').textContent.includes('Screened fixture'));
+            assert((await page.locator('#evaluatorScreenings').innerText()).includes('jev / openrouter'));
+            assert((await page.locator('#evaluatorScreenings').innerText()).includes('优先'));
+            await page.unroute('**/api/local');
             await page.evaluate(()=>{LEDGER_TAB='concluded';LEDGER_RESULTS=new Set();renderDecisionLedger([{id:'ui-fixture',created_at:new Date().toISOString(),platform:'demo',market_topic_id:'Only a browser fixture',context:{market:{title:'Very long market '.repeat(20)}},final_decision:{action:'HOLD',rationale:'Evidence is incomplete; do not place an order.'},proposed_decision:{action:'HOLD',rationale:'Need research'},status:'NO_ACTION',group:'concluded',result:'HOLD',agent_steps:2,research:[{source:'fixture'}]}])});
             await page.locator('.decision-entry>summary').click();
             assert.equal(await page.locator('.ledger-four>dt').count(),4);

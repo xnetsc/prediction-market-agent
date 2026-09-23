@@ -107,6 +107,18 @@ class MarketGuardTests(unittest.TestCase):
     def test_an_allowed_read_returns_the_platform_result_unchanged(self) -> None:
         self.assertEqual(self.guard.get_topic("t-9"), {"id": "t-9"})
 
+    def test_lightweight_search_keeps_the_same_business_risk_gate(self) -> None:
+        class LightweightPlugin(FakePlugin):
+            supports_lightweight_search = True
+
+            def search_market_candidates(self, query, limit, *, lightweight=False):
+                return self._record("lightweight" if lightweight else "search", [query, limit])
+
+        plugin = LightweightPlugin()
+        guard = GuardedMarketApi(plugin, self._coordinator("ALLOW"))
+        self.assertEqual(guard.search_market_candidates("opec", 5, lightweight=True), ["opec", 5])
+        self.assertEqual(plugin.calls, ["lightweight"])
+
     def test_rules_are_told_which_platform_and_that_this_is_a_market_call(self) -> None:
         self.guard.get_candles("BTCUSDT")
         _, context = self.rule.seen[0]
