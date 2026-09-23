@@ -176,3 +176,10 @@ dialog{background:var(--surface)!important;color:var(--ink)!important;border:1px
 .page-guide{margin:6px 0 10px}
 .page-guide>summary{cursor:pointer;color:var(--muted)}
 .page-guide[open]>summary{margin-bottom:8px}
+
+/* 本地决策模型：一段说明、三步、一条命令。命令要能一眼看全并整行复制。 */
+.laya-why{border-left:3px solid var(--line);padding:6px 12px;margin:8px 0;color:var(--muted)}
+.laya-steps{margin:10px 0;padding-left:20px;line-height:1.9}
+.laya-steps li{margin-bottom:10px}
+.laya-command{display:inline-block;background:var(--panel);border:1px solid var(--line);border-radius:6px;
+  padding:4px 10px;margin:4px 0;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;user-select:all}

@@ -1973,3 +1973,19 @@ function discoveryTitle(r){
     const first=picks[0]&&(picks[0].title||titles.get(String(picks[0].topic_id))||picks[0].topic_id);
     return '选中 '+picks.length+' 个'+poolText+(first?'：'+first:'');
 }
+
+// 本地决策模型：它跑在容器外面，所以这里能做的只有一件事——替用户确认那台机器上的服务真的在答，
+// 以及答的是不是 GPU 那条路径。连不上和跑在 CPU 上是两种不同的坏，要分开说。
+async function checkLaya(){
+    const note=document.getElementById('layaStatus');
+    const endpoint=(document.getElementById('layaEndpoint')?.textContent||'').trim();
+    note.className='status pending';note.textContent='正在问 '+endpoint+' …';
+    try{
+        const result=await post('/api/secure',{path:'/api/laya/probe',endpoint:endpoint});
+        if(!result.reachable){note.className='status danger';note.textContent='连不上：'+esc(result.detail||'没有响应');return}
+        note.className=result.backend==='webgpu'?'status good':'status danger';
+        note.textContent=result.backend==='webgpu'
+            ?'已就绪：'+esc(result.model||'')+'，跑在 GPU 上'
+            :'能连上，但跑在 '+esc(result.backend||'未知')+' 上——粗筛会慢到不可用，检查那台机器的显卡和浏览器';
+    }catch(e){note.className='status danger';note.textContent=e.message}
+}

@@ -108,6 +108,8 @@ Prediction 与 Polymarket API 插件，以及 Codex、Claude、OpenRouter Provid
 
 ## 快速安装与启动
 
+新手请直接看 [上手指南](docs/GETTING_STARTED.md)：从零到它开始写决策记录，一步一步，每步都写了做完该看到什么。
+
 普通用户不需要安装 Python、创建 venv 或构建源码。先取得仓库中的启动脚本：
 
 macOS/Linux：
@@ -181,6 +183,7 @@ Windows 更新时将最后一条替换为 `.\start-local.ps1`。`once` 是明确
 
 ## 文档与例子
 
+- [上手指南：从零到它开始做决策](docs/GETTING_STARTED.md)
 - [功能、文档、例子与测试证据矩阵](docs/FEATURE_EVIDENCE.md)
 - [架构与插件边界](docs/ARCHITECTURE.md)
 - [配置参考](docs/CONFIGURATION.md)

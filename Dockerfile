@@ -17,9 +17,14 @@ WORKDIR /app
 COPY pyproject.toml LICENSE README.md /app/
 COPY src /app/src
 COPY deploy/container-entrypoint.sh deploy/container-with-worker.sh /app/deploy/
+# The local decision model's service, carried as a resource rather than run here: it needs a GPU,
+# and a container on macOS has none - Docker Desktop does not pass the Metal device through. The
+# console offers this directory as a zip so an operator can run it where there is one.
+COPY deploy/laya-service /opt/laya-service
 RUN python -m pip install --no-cache-dir . && chmod +x /app/deploy/container-entrypoint.sh /app/deploy/container-with-worker.sh
 
 ENV PREDICTION_AGENT_WORKDIR=/data
+ENV LAYA_PACKAGE_DIR=/opt/laya-service
 ENV FORWARDED_ALLOW_IPS=127.0.0.1,100.0.0.0/8
 VOLUME ["/data"]
 EXPOSE 8765

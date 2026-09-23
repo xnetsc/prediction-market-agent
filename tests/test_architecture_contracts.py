@@ -357,3 +357,49 @@ class ArchitectureContractTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TheLocalDecisionModelIsShippedTests(unittest.TestCase):
+    """It needs a GPU, and the container it would run in has none on macOS.
+
+    So the service is carried in the image as a resource rather than started by it, and the console
+    hands it over with the one command that runs it. Packaging it at request time from what the
+    image holds is what keeps the download and the image from drifting apart.
+    """
+
+    def test_the_image_carries_the_service_and_says_where(self) -> None:
+        dockerfile = Path("Dockerfile").read_text()
+        self.assertIn("COPY deploy/laya-service /opt/laya-service", dockerfile)
+        self.assertIn("ENV LAYA_PACKAGE_DIR=/opt/laya-service", dockerfile)
+
+    def test_the_package_has_everything_but_the_weights(self) -> None:
+        root = Path("deploy/laya-service")
+        for name in ("server.mjs", "page.html", "start.sh", "package.json", "README.md"):
+            self.assertTrue((root / name).exists(), name)
+        self.assertTrue((root / "vendor" / "webtorch" / "webtorch" / "js" / "webtorch-main.js").exists(),
+                        "the SDK travels with it; a package that needs another checkout is not one")
+        self.assertIn("models/", (root / ".gitignore").read_text(),
+                      "800 MB of weights are fetched once on the machine that uses them")
+
+    def test_the_console_serves_it_and_explains_the_gpu(self) -> None:
+        source = Path("src/prediction_market_agent/runtime/dashboard.py").read_text()
+        self.assertIn('"/laya-service.zip"', source)
+        self.assertIn('"/api/laya/probe"', source)
+        panel = source[source.index('id="layaPanel"'):][:2000]
+        self.assertIn("不会把显卡透传给容器", panel)
+        self.assertIn("bash laya-service/start.sh", panel)
+        self.assertIn("host.docker.internal:8899", panel)
+
+    def test_one_command_and_it_installs_what_it_needs(self) -> None:
+        start = Path("deploy/laya-service/start.sh").read_text()
+        self.assertIn("npm install", start)
+        server = Path("deploy/laya-service/server.mjs").read_text()
+        self.assertIn("async function ensureBrowser", server)
+        self.assertIn("'install', 'chromium'", server)
+        self.assertIn("async function ensureLocalModel", server)
+
+    def test_the_repository_has_a_getting_started_path(self) -> None:
+        guide = Path("docs/GETTING_STARTED.md").read_text()
+        for step in ("启动", "接一个 AI 模型服务", "接一个交易平台", "入金", "让它跑起来", "本地粗筛模型"):
+            self.assertIn(step, guide)
+        self.assertIn("docs/GETTING_STARTED.md", Path("README.md").read_text())

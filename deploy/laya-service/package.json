@@ -1,0 +1,8 @@
+{
+  "name": "laya-service",
+  "private": true,
+  "type": "module",
+  "description": "laya (typed decision model) over an OpenRouter-shaped HTTP API, running on WebGPU in a headless browser.",
+  "scripts": { "start": "node server.mjs" },
+  "dependencies": { "playwright": "^1.49.0" }
+}

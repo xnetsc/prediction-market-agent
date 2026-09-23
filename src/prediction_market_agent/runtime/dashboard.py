@@ -4,6 +4,10 @@ import hashlib
 import json
 import re
 import sqlite3
+import io
+import os
+import urllib.request
+import zipfile
 import logging
 import threading
 import time
@@ -58,6 +62,7 @@ HTML = r"""<!doctype html><html lang="zh-CN"><head><meta charset="utf-8">
 <section data-view="overview" id="gettingStarted"><h3>开始使用</h3><p class="muted">按下面的顺序完成连接。先确认规则与暂停状态，再让机器人运行。</p><div id="setupSteps" class="setup-grid"></div></section><div id="cards" class="cards" data-view="overview"></div>
 <dialog id="loginWizard"><h3 id="loginWizardTitle">客户端网页登录</h3><p>请只在官方页面输入账号密码。机器人仅接收本次授权结果，登录凭据保存在服务器中。</p><label class="field">客户端验证方式<select id="wizardLoginMethod" onchange="switchLoginMethod(this.value)"><option value="auto">自动选择</option><option value="local">本地回调</option><option value="remote">设备码 / 验证码</option></select><small>切换会取消本次客户端登录等待并重新开始，不改变管理员 Passkey 鉴权。</small></label><div id="remoteLoginSteps" hidden><div class="info-banner">远程 / 手机登录不需要本地助手，也不需要向公网开放随机端口。</div><h4>1. 打开官方授权页面</h4><a id="remoteOfficialLink" target="_blank" rel="noopener noreferrer" hidden>打开官方登录页</a><div id="deviceCodeStep" hidden><h4>2. 在官方页面输入设备码</h4><pre id="remoteDeviceCode" aria-label="设备码"></pre><p>需要在账号安全设置或工作空间权限中允许设备码登录。完成后回到此页，点击“刷新登录状态”。</p></div><div id="manualCodeStep" hidden><h4>2. 粘贴官方页面给出的验证码</h4><label class="field">本次验证码<input id="remoteLoginCode" type="password" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="仅填写官方显示的验证码"></label><button id="submitLoginCode" class="primary" onclick="submitRemoteCode()">提交验证码</button><p>验证码仅传给正在等待的官方客户端，不写入配置或审计记录。</p></div><h4>3. 等待客户端确认</h4><p id="remoteLoginResult" role="status"></p></div><div id="localLoginSteps"><p id="callbackProbeStatus" role="status">等待客户端提供实际回调地址…</p><button id="callbackProbeRetry" onclick="retryCallbackProbe()">重新检测回调映射</button><ol><li data-helper-step hidden><h4>复制本次登录命令</h4><p>选择浏览器所在电脑的系统。命令从当前机器人获取完整脚本后运行，只对本次登录有效、只可获取一次。请确认站点可信，不要分享命令或终端历史。</p><select id="helperPlatform" onchange="resetHelperCommand()"><option value="bash">macOS / Linux（Bash）</option><option value="powershell">Windows（PowerShell）</option></select><textarea id="helperCommand" readonly rows="5" style="width:100%;box-sizing:border-box" aria-label="本次登录助手命令" placeholder="正在生成命令…"></textarea><button id="helperCopy" onclick="copyHelperCommand()" disabled>复制命令</button></li><li data-helper-step hidden><h4>在终端粘贴运行</h4><p>macOS 打开“终端”，Linux 打开终端，Windows 打开 PowerShell，然后粘贴命令并回车。无需手动保存脚本、解压或打开可执行文件，也不会修改系统安全设置。若系统管理策略禁止脚本，请联系管理员。</p><p>macOS/Linux 需要 Python 3.9+，缺少时会明确提示；缺少 cryptography 时在临时 venv 安装加密依赖，结束后清理，不修改系统 Python。Windows 使用 PowerShell 5.1+ 和系统 .NET。</p><p>保持终端开启，显示 Ready 后回到此页面。助手使用本机网络/代理，不继承容器代理；网络失败请检查代理或防火墙，不要关闭 TLS 验证。端口冲突不会自动终止其他程序。取消或超时后助手释放监听。</p><p id="helperConnection" role="status">等待助手连接…</p></li><li><h4>在官方网页授权</h4><p>映射验证成功或助手 Ready 后，点击下面的链接。官方页面自动回调，无需复制代码。</p><a id="officialLoginLink" target="_blank" rel="noopener noreferrer" hidden>打开官方登录页</a></li><li><h4>确认完成</h4><p id="loginWizardResult" role="status">尚未完成。</p><p>只有这里显示“已登录”才算成功；完成网页授权后点击“刷新登录状态”。失败或超时可“重新开始”并获取新命令。</p></li></ol><button onclick="switchRemoteLogin()">改用设备码 / 验证码登录</button></div><p id="loginWizardError" class="danger"></p><div class="toolbar"><button class="primary" onclick="refreshLoginWizard()">刷新登录状态</button><button onclick="restartWizard()">重新开始</button><button onclick="cancelWizard()">取消本次登录</button><button onclick="document.getElementById('loginWizard').close()">收起向导</button></div></dialog>
 <section data-view="models" hidden><div class="section-heading"><div><h3>连接 AI 模型服务</h3><p>选择客户端账号，或填写 OpenRouter 配置。无需同时配置多种方式；数字越小越先尝试，不可用时依次切换 Provider，不会替换任何 Provider 中用户选定的模型。</p></div></div><div id="clientAlerts" class="status danger" role="alert"></div><div id="clientControls" class="service-grid"></div><div class="toolbar"><button class="primary" onclick="saveSelection()">保存模型启用与顺序</button><span id="modelManageStatus" class="status" role="status"></span></div><p id="clientControlError" class="danger"></p></section>
+<section data-view="models" hidden id="layaPanel"><div class="section-heading"><div><h3>本地决策模型（粗筛，免费）</h3><p>粗筛每轮要看几百个候选，交给昂贵模型做既慢又费。这个模型跑在<strong>你自己的机器</strong>上，不花钱、除首次下载外不出网。它只回答判断题，不写文章，也不做买卖决策。</p></div></div><div class="laya-why"><p><strong>为什么不能装在机器人容器里：</strong>它要 GPU。macOS 上的 Docker 不会把显卡透传给容器，容器里只能退回 CPU——800MB 的编码器逐个候选地算，不是慢一点，是不可用。所以请在<strong>有显卡的机器上</strong>（比如你这台 Mac 本机）运行它，机器人通过网络调用。</p></div><ol class="laya-steps"><li><b>下载资源包</b><br><a class="button-link" href="/laya-service.zip" download>laya-service.zip</a><span class="muted">（约 6 MB，不含模型；模型首次启动时自动下载约 800MB 并留在本地）</span></li><li><b>解压并启动</b>，一条命令：<br><code class="laya-command">unzip laya-service.zip &amp;&amp; bash laya-service/start.sh</code><br><span class="muted">需要 Node.js 18+。首次会自动装 Playwright 和一个无头 Chromium。看到 <code>laya ready: … on webgpu</code> 就成了；若显示 <code>on cpu</code>，说明没拿到显卡，能答但慢到不可用。</span></li><li><b>把地址填到下面的模型配置里</b><br><code class="laya-command" id="layaEndpoint">http://host.docker.internal:8899/v1</code><span class="muted">机器人和它在同一台机器上时填 <code>http://127.0.0.1:8899/v1</code></span></li></ol><div class="toolbar"><button onclick="checkLaya()">测试连接</button><span id="layaStatus" class="status muted">还没测过</span></div></section>
 <section data-view="models" hidden><h3>服务可用性与实测质量</h3><p class="muted">限流、掉线或凭证过期的服务会自动退避，恢复后自动回到轮换；可用的服务按实测质量排序使用。</p><div id="providerHealth"></div></section>
 <section data-view="models" id="modelConfigurationSection" hidden><h3>模型与连接配置</h3><p class="muted">保存会立即重新检查服务是否可用；不会自动调用付费模型。</p><div id="modelConfigurations"></div></section>
 <section data-view="models" hidden><div class="section-heading"><div><h3>添加 OpenRouter 配置</h3><p>每次创建一个很小的插件文件，对应一份独立的 Key、模型、代理和优先级。文件本身不含凭据。</p></div></div><div class="plugin-grid"><label class="field"><b>配置名</b><input id="openRouterPluginName" value="openrouter_2" pattern="openrouter_[a-z0-9_]+" autocomplete="off"><small>以 openrouter_ 开头，只用小写字母、数字和下划线。</small></label><label class="field"><b>插件目录</b><select id="openRouterPluginTarget"></select></label></div><div class="toolbar"><button onclick="createOpenRouterPlugin()">再添加一个 OpenRouter 配置</button><span id="openRouterPluginStatus" class="status muted" role="status"></span></div></section>
@@ -1344,6 +1349,33 @@ def create_app(config: Config, *, start_robot: bool = True) -> FastAPI:
             headers={"Cache-Control": "no-cache", "X-Content-Type-Options": "nosniff"},
         )
 
+    LAYA_PACKAGE = Path(os.environ.get("LAYA_PACKAGE_DIR", "/opt/laya-service"))
+
+    @app.get("/laya-service.zip")
+    def laya_package() -> Response:
+        """Hand over the local decision model's service, built from what this image carries.
+
+        Zipped on request rather than at build time so that what an operator downloads is exactly
+        what this image has, with no step in between that could ship a stale copy. The weights are
+        not in it - they are 800 MB and the service fetches them once, on the machine that will use
+        them.
+        """
+        if not LAYA_PACKAGE.is_dir():
+            raise HTTPException(status_code=404, detail="这个镜像里没有带本地决策模型的服务")
+        buffer = io.BytesIO()
+        skip = {"node_modules", "models", "__pycache__", ".git"}
+        with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as archive:
+            for item in sorted(LAYA_PACKAGE.rglob("*")):
+                if any(part in skip for part in item.relative_to(LAYA_PACKAGE).parts):
+                    continue
+                if item.is_file():
+                    archive.write(item, Path("laya-service") / item.relative_to(LAYA_PACKAGE))
+        return Response(
+            buffer.getvalue(),
+            media_type="application/zip",
+            headers={"Content-Disposition": 'attachment; filename="laya-service.zip"'},
+        )
+
     @app.get("/healthz")
     def health() -> dict[str, Any]:
         return {"ok": True, "robot": runtime.status()}
@@ -1499,6 +1531,26 @@ def create_app(config: Config, *, start_robot: bool = True) -> FastAPI:
             return application_settings.reset(
                 payload.get("names") if "names" in payload else None
             )
+        if path == "/api/laya/probe":
+            # Asked from the console, answered by the machine that actually runs it. Whether it is
+            # on a GPU is the part worth reporting: the CPU path answers too, and answers uselessly
+            # slowly, so "reachable" alone would be a reassuring lie.
+            endpoint = str(payload.get("endpoint") or "").strip().rstrip("/")
+            if not endpoint.startswith(("http://", "https://")):
+                raise ValueError("地址要以 http:// 或 https:// 开头")
+            health = endpoint[: -len("/v1")] + "/health" if endpoint.endswith("/v1") else endpoint + "/health"
+            try:
+                with urllib.request.urlopen(health, timeout=8) as response:
+                    reading = json.loads(response.read(64 * 1024) or b"{}")
+            except Exception as error:
+                return {"reachable": False, "detail": str(error)[:200]}
+            return {
+                "reachable": True,
+                "ready": bool(reading.get("ready")),
+                "backend": str(reading.get("backend") or ""),
+                "model": str(reading.get("model") or ""),
+                "status": str(reading.get("status") or ""),
+            }
         if path == "/api/incidents/forget":
             return data.forget_incidents(int(payload.get("until_id", 0)))
         if path == "/api/instructions/forget":
