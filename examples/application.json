@@ -10,6 +10,7 @@
     "admin_session_hours": 72,
     "admin_absolute_session_hours": 168,
     "agent_language": "zh",
+    "model_selection_mode": "QUALITY",
     "paper_trading": "off",
     "paper_trading_funds": 1000,
     "strategy_horizon_days": 3,

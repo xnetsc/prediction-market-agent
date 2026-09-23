@@ -393,7 +393,7 @@ class TheLocalDecisionModelIsShippedTests(unittest.TestCase):
         self.assertIn("不会在容器内启动 Laya", panel)
         self.assertIn('id="layaEndpoint" type="url"', panel)
         self.assertIn("bash laya-service/start.sh", panel)
-        self.assertIn("host.docker.internal:8899", panel)
+        self.assertIn("host.proxy.internal:8899", panel)
 
     def test_one_command_and_it_installs_what_it_needs(self) -> None:
         start = Path("deploy/laya-service/start.sh").read_text()
@@ -402,6 +402,7 @@ class TheLocalDecisionModelIsShippedTests(unittest.TestCase):
         self.assertIn("async function ensureBrowser", server)
         self.assertIn("'install', 'chromium'", server)
         self.assertIn("async function ensureLocalModel", server)
+        self.assertIn("process.env.LAYA_HOST || '0.0.0.0'", server)
 
     def test_the_repository_has_a_getting_started_path(self) -> None:
         guide = Path("docs/GETTING_STARTED.md").read_text()

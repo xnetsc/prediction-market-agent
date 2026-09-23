@@ -81,6 +81,8 @@ Agent 动作策略或具体交易策略；这些只能由对应插件定义。�
 导入或初始化，因此只能在启用后显示和管理其动态私有字段。API/Provider/策略允许暂时为空；运行状态页会
 显示全局或平台阻塞原因，补齐后自动激活。完整文件结构见 `examples/plugin_selection.json`。
 
+`model_selection_mode` 默认 `QUALITY`：决策 Provider 和发现评估器各自在已启用且可用的实例中优先选实测质量较高者，同分按启用顺序。设为 `CONFIGURED` 时两类都强制按启用顺序、忽略质量。每次只调用一个实例，失败才尝试下一个；这个设置不会改变各 Provider 内已选的具体模型。
+
 显式保存空 `decision_strategy` 表示不启用用户策略插件，不能回退到进程启动时的旧插件；此时使用框架内置
 决策策略。内置策略没有配置卡片，但当前生效全文可以导出。
 
@@ -96,6 +98,7 @@ Agent 动作策略或具体交易策略；这些只能由对应插件定义。�
   OpenRouter 中的 Jev 型号走原生 Decisions，其它明确支持 structured output 的型号走 strict schema Chat
   Completions，并默认只复用指定 Provider 的推理 Key；自定义方式填写 Chat Completions Base URL、模型名和
   可选 Key，原生 strict schema 不可用或被忽略时回退到强制函数参数。各方式都不复用 Provider 的模型或代理；
+  另有默认禁用的 `laya` 实例，直接连接外部 WebGPU 服务，独立校验健康状态与 Choice/Score/Noul 协议；
 - 策略插件：策略文本路径和候选筛选字段；
 - 标的发现插件：发现文本、读取预算及其私有参数；
 - 研究插件：预测市场跨平台查询、行情、K 线和业务历史的结果限制；通用搜索/网页由官方 CLI 管理；

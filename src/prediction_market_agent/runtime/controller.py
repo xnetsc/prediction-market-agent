@@ -429,6 +429,14 @@ class RobotRuntimeManager:
         return {"cleared": cleared, "probed": probed, "capacity": reading,
                 "health": engine.provider_quality.manifest()}
 
+    def set_model_selection_mode(self, mode: str) -> None:
+        """Apply a saved routing preference without restarting an active cycle."""
+        with self._lock:
+            engine = self._engine
+        if engine is not None:
+            engine.provider.health.set_order_mode(mode)
+            engine.evaluator.set_order_mode(mode)
+
     def export_strategies(self, lane: str = "") -> dict[str, Any]:
         """Report what the discovery and decision strategies currently send to the model."""
         from .strategy_export import export_strategies

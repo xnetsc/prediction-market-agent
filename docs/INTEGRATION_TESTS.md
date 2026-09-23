@@ -12,17 +12,18 @@ PYTHONPATH=src .venv/bin/python -m compileall -q src tests examples
 PYTHONPATH=src .venv/bin/python -m pytest -q --ignore=tests/test_api_integration.py
 ```
 
-2026-09-20 本轮 typed evaluator、OpenRouter、自适应发现、资金连接、盈亏账本和控制台刷新优化后的最终结果为
-`671 passed, 250 subtests passed`，另有 2 条第三方弃用警告。其中覆盖：
+2026-09-23 Laya evaluator、两类模型选择方式与故障回退接入后，确定性回归为
+`733 passed, 252 subtests passed`，另有 2 条第三方弃用警告。其中覆盖：
 
 - 八类插件发现、禁用不导入、启停/刷新/teardown、动态配置和示例 schema 一致性；
 - 平台自有 runtime、立即首轮、可中断等待、失败退避和通用业务事件队列；
-- 内置/用户发现与决策策略、策略进化、Provider 健康与质量排序；
+- 内置/用户发现与决策策略、策略进化、Provider 与 evaluator 的质量优先/强制顺序及故障回退；
 - Codex、Claude、OpenRouter 的模型目录、结构化输出、代理、登录和凭据迁移；
 - 两类过滤插件、资金请求、实盘网关与独立纸面交易状态；
 - SQLite 决策/异常/盈亏台账、分页/筛选/删除、并发 HTTP、Passkey/ECDH、回环与公网访问隔离；
 - 本地启动器、宿主机代理、回调转发、registry 拉取和云部署契约；
 - 公共示例字段完整、无退役字段、默认值一致，旧轮询字段升级时忽略并安全清理，管理示例不启用不存在的插件；
+- Laya 本地 WebGPU evaluator 的健康协议、单候选四道题上限、结构化输出和 CPU 拒绝；
 - 测试树不允许 `skip`、`xfail` 或 `expectedFailure` 装饰器。
 
 完整 `pytest` 默认包含生产联网测试，因此在 Binance 受限网络中会保留真实失败，而不是显示全绿。需要只看
@@ -109,7 +110,7 @@ DASHBOARD_TEST_URL=http://127.0.0.1:18765 \
   DASHBOARD_SCREENSHOTS=runtime-data/ui-review node tests/dashboard_ui.cjs
 ```
 
-2026-09-21 三种宽度均通过（决策记录置顶、采集与异常折叠、资金页并行读取后复跑），无 JavaScript 错误和整页横向溢出。目标必须是隔离的管理测试实例；这不替代
+2026-09-23 三种宽度均通过（模型选择方式、Laya 插件入口、决策记录、采集与异常、资金页），无 JavaScript 错误和整页横向溢出。目标必须是隔离的管理测试实例；这不替代
 iOS Safari、Android 真机、Windows 原生浏览器或真实账号授权验收。
 
 登录、回调和代理的非浏览器专项分别位于：
@@ -129,6 +130,9 @@ iOS Safari、Android 真机、Windows 原生浏览器或真实账号授权验收
 `agent/decision_evaluator.py`、`plugin_system/config_io.py`、`plugins/evaluators/jev.py`、
 `plugins/providers/openrouter.py`、`runtime/pnl.py` 和新版 dashboard
 静态资源，不包含任何已退役的通用兼容 Provider 模块。
+
+2026-09-23 更新后的 wheel 为 477886 字节，SHA-256
+`9a29b716305e61a13bff23f82d1dbf687af202dd67b2efab5345300d73b24583`；已核实包内含独立 Laya evaluator、更新的决策回退和界面资源。旧值保留作历史验收记录，不代表当前包。
 
 `.github/workflows/container.yml` 的 `login-helpers` 作业在 macOS、Ubuntu 和 Windows 原生运行终端助手与
 宿主代理测试；`publish` 作业构建安装态镜像，执行 `deploy/check-container.sh`，再发布 amd64/arm64。

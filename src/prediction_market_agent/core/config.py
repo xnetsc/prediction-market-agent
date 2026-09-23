@@ -107,6 +107,12 @@ APPLICATION_FIELDS = (
         "zh", options=("zh", "en"),
     ),
     ApplicationConfigField(
+        "model_selection_mode", "模型与评估器选择方式", "enum",
+        "QUALITY：只在已启用且可用的实例中优先选择实测质量较高者，同分按设置顺序；"
+        "CONFIGURED：强制按保存的顺序尝试，忽略质量分。两类服务每次都只调用一个，失败才回退。",
+        "QUALITY", options=("QUALITY", "CONFIGURED"),
+    ),
+    ApplicationConfigField(
         "paper_trading", "纸面交易模式", "enum",
         "开启后，平台读取、价格、模型、过滤和结算判定仍走真实链路。下单、撤单、赎回和转账不会发到平台；"
         "订单按平台当时报出的价格和费率在本地成交，持仓、现金和已实现盈亏照常记账，"
@@ -324,6 +330,7 @@ class Config:
     working_directory: Path = Path(".")
     decision_providers: tuple[str, ...] = ()
     decision_evaluators: tuple[str, ...] = ()
+    model_selection_mode: str = "QUALITY"
 
     agent_language: str = "zh"
     """Which language the model writes its human-readable text in. Prose only, never the schema."""
@@ -381,6 +388,7 @@ class Config:
             working_directory=working_directory,
             decision_providers=managed.selected("decision_provider", ()),
             decision_evaluators=managed.selected("decision_evaluator", ()),
+            model_selection_mode=str(values["model_selection_mode"]),
             agent_language=str(values["agent_language"]),
             paper_trading=str(values["paper_trading"]) == "on",
             paper_trading_funds=float(values["paper_trading_funds"]),
@@ -422,6 +430,8 @@ class Config:
         return cfg
 
     def validate(self) -> None:
+        if self.model_selection_mode not in {"QUALITY", "CONFIGURED"}:
+            raise ValueError("model_selection_mode must be QUALITY or CONFIGURED")
         if self.dashboard_host not in {"127.0.0.1", "localhost", "::1", "0.0.0.0"}:
             raise ValueError("dashboard_host must be a supported listen address")
         if not 1 <= self.dashboard_port <= 65535:

@@ -88,11 +88,11 @@ Agent、风控和写动作。`stop` 必须中断等待并等线程结束；`tear
 
 初始化上下文提供 `context.proxy_settings(value, field_name=...)`。需要联网且希望跟随程序统一代理的插件，
 可把自己的代理字段默认设为 `INHERIT`，在真正创建网络客户端时调用该函数；插件也可完全不使用它。
-返回值含已解析的 `proxy`、`no_proxy` 和脱敏显示信息。OpenRouter Provider 与 Jev evaluator 都分别使用
-这个入口；Jev 的 OpenRouter 方式默认只复用 OpenRouter API Key，不读取或覆盖 Provider 的代理。一个
+返回值含已解析的 `proxy`、`no_proxy` 和脱敏显示信息。OpenRouter Provider、Jev 与 Laya evaluator 都分别使用
+这个入口；Jev 的 OpenRouter 方式默认只复用 OpenRouter API Key，不读取或覆盖 Provider 的代理。Laya 默认直连本地服务，也可显式选择 `INHERIT`。一个
 不依赖 Jev 的 evaluator 契约示例位于 `examples/decision_evaluator_plugins/static_evaluator.py`。
 宿主机代理快照同时保存宿主机原始地址和容器可达地址；`HOST`/`INHERIT` 在宿主机源码运行时选前者，
-在容器内选后者，插件无需也不得用 DIRECT 绕过统一代理。
+在容器内选后者。插件显式声明直连默认（例如同机 Laya 服务），或用户明确把该插件设为 `DIRECT` 时，才直连；不能因继承解析出错而悄悄绕过统一代理。
 
 ## 动态选项、预置和管理动作
 
@@ -162,6 +162,7 @@ OpenRouter、模型和新扩展安装只在 `#models` 管理，不在插件中�
 - `examples/api_plugins/static_demo.py`：标准化读取、私有 JSON、线上 HTTP 写传输和卸载。
 - `examples/decision_provider_plugins/static_provider.py`：严格 schema 的结构化 Provider。
 - `plugins/evaluators/jev.py` 与 `examples/plugin_configs/jev.json`：Jev 独立 evaluator、OpenRouter/自定义连接、共享/独立 Key 和独立代理配置。
+- `plugins/evaluators/laya.py`：另一个默认禁用的 evaluator 实例，连接外部 WebGPU 服务并验证类型化问答；与 Jev 共用类别，不共用凭据或端点配置。
 - `examples/decision_strategy_plugins/example_strategy.py`：策略文本和私有候选筛选。
 - `examples/market_discovery_plugins/example_discovery.py`：私有发现文本、读取预算和进化开关。
 - `examples/research_tool_plugins/static_evidence.py`：动态加入 Agent 控制 schema 的工具。

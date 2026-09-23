@@ -20,7 +20,7 @@ const fs = require('node:fs');
             const page = await context.newPage();
             let remoteModel=null;
             let layaReady=false;
-            let layaEndpoint='http://host.docker.internal:8899/v1';
+            let layaEndpoint='http://host.proxy.internal:8899/v1';
             const passiveReads=[];
             await page.route('**/api/local',async route=>{
                 const message=route.request().postDataJSON();
@@ -109,6 +109,8 @@ const fs = require('node:fs');
                     assert.equal(await page.locator('#pnlEvents').count(),1);
                 }
                 if(view==='models'){
+                    assert.equal(await page.locator('#modelSelectionMode').inputValue(),'QUALITY');
+                    assert(await page.locator('a[href="#plugins/decision_evaluator"]').first().isVisible());
                     await page.locator('#layaPanel button').click();
                     await page.waitForFunction(()=>document.getElementById('layaStatus').textContent.includes('服务已连接，模型尚未就绪'));
                     layaReady=true;
@@ -132,6 +134,9 @@ const fs = require('node:fs');
             assert.equal(await page.locator('#pluginCategoryNav a[href="#plugins/decision_provider"]').count(),0);
             assert.equal(await page.locator('#pluginManager .plugin-category:visible').count(),0);
             if(output)await page.screenshot({path:path.join(output,`plugins-${width}.png`),fullPage:true});
+            await page.evaluate(()=>{location.hash='plugins/decision_evaluator'});
+            await page.waitForSelector('#plugin_decision_evaluator_laya');
+            assert(await page.locator('#plugin_decision_evaluator_laya .enable').isVisible());
             for(const kind of ['api','market_discovery','decision_evaluator','decision_strategy','research_tool','agent_policy','risk']){
                 await page.evaluate(kind=>{location.hash='plugins/'+kind},kind);
                 await page.waitForSelector('#category_'+kind,{state:'visible'});
@@ -153,7 +158,7 @@ const fs = require('node:fs');
                     assert(await page.locator('#globalFeedback').isVisible());
                     await toggle.setChecked(original);
                 }
-                assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth>innerWidth),false);
+                assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth>innerWidth),false,`${kind} at ${width}px`);
                 if(output&&kind==='api')await page.screenshot({path:path.join(output,`platforms-${width}.png`),fullPage:true});
             }
             await page.evaluate(()=>{location.hash='plugins/api'});

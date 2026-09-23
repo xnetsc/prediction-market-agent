@@ -43,11 +43,13 @@ class ConfigurationTests(unittest.TestCase):
                 json.dumps({"version": 1, "values": {
                     "management_file": str(management),
                     "agent_max_tool_steps": 5,
+                    "model_selection_mode": "CONFIGURED",
                 }}),
                 encoding="utf-8",
             )
             loaded = Config.load(application)
             self.assertEqual(loaded.agent_max_tool_steps, 5)
+            self.assertEqual(loaded.model_selection_mode, "CONFIGURED")
             self.assertEqual(loaded.shared_http_proxy, "HOST")
             self.assertEqual(
                 loaded.host_proxy_file,

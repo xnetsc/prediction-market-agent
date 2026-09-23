@@ -74,6 +74,7 @@ class TradingEngine(MarketEvaluationMixin, ExecutionActionsMixin):
                 )
         self.provider = components.provider
         self.evaluator = components.evaluator
+        self.evaluator.set_quality(self.memory.evaluator_quality())
         self.research_contributions = components.research_contributions
         self.discovery_strategy = components.discovery_strategy
         # What the operator attached to their money. Collected by the platform plugins, understood

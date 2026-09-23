@@ -1083,6 +1083,73 @@ class SessionMemory:
             "topics_with_history": len(history),
         }
 
+    def evaluator_quality(self, *, platform: str = "") -> dict[str, float]:
+        """Conservatively rank screeners by later full-decision agreement.
+
+        This measures whether a paid full decision found a trade after a screener asked for
+        attention, or held after it deferred. It is a cost-usefulness proxy, not trade P&L.
+        Cases without a subsequent full decision cannot establish correctness and are excluded.
+        """
+        rows = self.connection.execute(
+            """
+            SELECT d.final_decision_json,
+                   (SELECT o.features_json FROM topic_observations AS o
+                    WHERE o.platform = d.platform
+                      AND o.market_topic_id = d.market_topic_id
+                      AND o.observed_at <= d.created_at
+                      AND o.features_json LIKE '%typed_evaluation%'
+                    ORDER BY o.observed_at DESC, o.id DESC LIMIT 1)
+            FROM decision_ledger AS d
+            WHERE (? = '' OR d.platform = ?)
+              AND d.market_topic_id != ''
+              AND d.strategy_name NOT LIKE '%discovery%'
+              AND d.final_decision_json IS NOT NULL
+            ORDER BY d.id DESC LIMIT 1000
+            """,
+            (platform, platform),
+        )
+        counts: dict[str, dict[str, int]] = {}
+        for final_json, features_json in rows:
+            if not features_json:
+                continue
+            try:
+                decision = json.loads(final_json or "{}")
+                typed = (json.loads(features_json or "{}") or {}).get("typed_evaluation")
+            except (TypeError, ValueError):
+                continue
+            if not isinstance(decision, dict) or not isinstance(typed, dict):
+                continue
+            action = str(decision.get("action") or "").upper()
+            screened = str(typed.get("action") or "").upper()
+            if action not in {"BUY", "SELL", "HOLD"} or screened not in {
+                "PRIORITIZE", "NEEDS_DATA", "DEFER", "REJECT"
+            }:
+                continue
+            name = str(typed.get("evaluator_name") or "").strip()
+            if not name:
+                provider = str(typed.get("provider") or "")
+                name = "laya" if provider.startswith("laya:") else (
+                    "jev" if provider.startswith(("openrouter:", "custom:")) else ""
+                )
+            if not name:
+                continue
+            entry = counts.setdefault(name, {"positive": 0, "positive_right": 0,
+                                             "negative": 0, "negative_right": 0})
+            observed = "positive" if action in {"BUY", "SELL"} else "negative"
+            entry[observed] += 1
+            predicted_positive = screened in {"PRIORITIZE", "NEEDS_DATA"}
+            if predicted_positive == (observed == "positive"):
+                entry[observed + "_right"] += 1
+        scores: dict[str, float] = {}
+        for name, entry in counts.items():
+            total = entry["positive"] + entry["negative"]
+            balanced = sum(
+                entry[kind + "_right"] / entry[kind] if entry[kind] else 0.5
+                for kind in ("positive", "negative")
+            ) / 2.0
+            scores[name] = round(1.0 + (balanced - 0.5) * total / (total + 20), 4)
+        return scores
+
     def record_discovery_selection(
         self,
         *,

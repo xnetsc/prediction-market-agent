@@ -349,6 +349,8 @@ class DiscoveryEngine:
         # page and each of those calls has to see the same history.
         self._screening_history = self.memory.screening_history(platform=plugin.name)
         self._screening_calibration = self.memory.screening_calibration(platform=plugin.name)
+        if callable(getattr(self.evaluator, "set_quality", None)):
+            self.evaluator.set_quality(self.memory.evaluator_quality(platform=plugin.name))
         deadline_listing = getattr(plugin, "list_topics_by_deadline", None)
         sources: list[tuple[str, Any, dict[str, Any]]] = []
         if horizon_days > 0 and callable(deadline_listing):
@@ -441,6 +443,12 @@ class DiscoveryEngine:
                 )
                 if self.evaluator is not None and self.evaluator.available:
                     self._evaluator_candidate_errors.update(self.evaluator.errors)
+                    for name, error in getattr(self.evaluator, "fallback_errors", {}).items():
+                        self.memory.record_runtime_incident(
+                            platform=plugin.name, stage="evaluator_fallback",
+                            severity="warning", message=f"{name}: {error}",
+                            fallback="本次粗筛改用下一个已启用评估器",
+                        )
                 assessments.update({answer.candidate_id: answer for answer in answers})
                 frontier = sorted(
                     [
@@ -479,6 +487,13 @@ class DiscoveryEngine:
                     dict(self.evaluator.errors)
                     if self.evaluator is not None and self.evaluator.available else {}
                 )
+                if self.evaluator is not None:
+                    for name, error in getattr(self.evaluator, "fallback_errors", {}).items():
+                        self.memory.record_runtime_incident(
+                            platform=plugin.name, stage="evaluator_fallback",
+                            severity="warning", message=f"{name}: {error}",
+                            fallback="本次续扫评估改用下一个已启用评估器",
+                        )
                 typed_is_decisive = self._typed_continuation_is_decisive(
                     typed, evaluator_errors, self._screening_threshold
                 )
@@ -709,6 +724,7 @@ class DiscoveryEngine:
                     "quality": typed.quality,
                     "confidence": typed.confidence,
                     "provider": typed.provider,
+                    "evaluator_name": typed.evaluator_name,
                     # Whether this is one window of a series that will be relisted. A slate of
                     # copies of one question is a slate that decides one question several times.
                     **({"recurring_series": typed.recurring}

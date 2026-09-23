@@ -566,10 +566,15 @@ class FallbackDecisionProvider:
                 session = getattr(getattr(provider, "backend", None), "session", None)
                 with session() if callable(session) else nullcontext():
                     result = call(provider)
-            except DecisionProviderError as error:
+            except DecisionCancelled:
+                raise
+            except Exception as error:
                 kind = self.health.record_failure(provider.name, str(error))
                 errors[provider.name] = f"[{kind}] {error}"
-                raw.append({"provider": provider.name, "raw": error.raw_output})
+                raw.append({
+                    "provider": provider.name,
+                    "raw": error.raw_output if isinstance(error, DecisionProviderError) else str(error),
+                })
                 continue
             self.health.record_success(
                 provider.name, latency_seconds=time.monotonic() - started
@@ -621,6 +626,8 @@ def make_provider(
             providers.append(AgentDecisionProvider(backend, config))
         except (DecisionProviderError, json.JSONDecodeError, ValueError) as error:
             unavailable[name] = str(error)
+    selected_health = health or ProviderHealthRegistry(tuple(item.name for item in providers))
+    selected_health.set_order_mode(config.model_selection_mode)
     return FallbackDecisionProvider(
-        providers, unavailable, config.decision_providers, health=health
+        providers, unavailable, config.decision_providers, health=selected_health
     )

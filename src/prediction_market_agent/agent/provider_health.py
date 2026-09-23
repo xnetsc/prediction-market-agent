@@ -262,6 +262,7 @@ class ProviderHealthRegistry:
             name: ProviderState(name) for name in names
         }
         self._quality: dict[str, float] = {}
+        self._order_mode = "QUALITY"
         self.classifier: Callable[[str], str] | None = None
         """Asked to name a failure the patterns did not recognise; set by the runtime.
 
@@ -307,14 +308,30 @@ class ProviderHealthRegistry:
         with self._lock:
             return self._quality.get(name, 1.0)
 
+    def set_order_mode(self, mode: str) -> None:
+        if mode not in {"QUALITY", "CONFIGURED"}:
+            raise ValueError("provider order mode must be QUALITY or CONFIGURED")
+        with self._lock:
+            self._order_mode = mode
+
     def order(self, names: tuple[str, ...], *, now: float | None = None) -> list[str]:
-        """Available providers first, best measured quality first, configured order as tiebreak.
+        """Order enabled providers by availability, then the selected routing mode.
 
         A cooled-down provider is not dropped: it moves to the back, so a run where every provider
         is throttled still tries them rather than refusing to decide.
         """
         moment = time.time() if now is None else now
         with self._lock:
+            if self._order_mode == "CONFIGURED":
+                return [name for _index, name in sorted(
+                    enumerate(names),
+                    key=lambda item: (
+                        not self._states.setdefault(
+                            item[1], ProviderState(item[1])
+                        ).ready(moment),
+                        item[0],
+                    ),
+                )]
             ranked = sorted(
                 enumerate(names),
                 key=lambda item: (
@@ -324,7 +341,8 @@ class ProviderHealthRegistry:
                     # Not yet proved since its last failure: usable, but not ahead of a provider
                     # that is currently working.
                     self._states[item[1]].probation,
-                    -self._quality.get(item[1], 1.0),
+                    (-self._quality.get(item[1], 1.0)
+                     if self._order_mode == "QUALITY" else 0),
                     item[0],
                 ),
             )

@@ -6,6 +6,7 @@ from pathlib import Path
 
 from prediction_market_agent.agent.decision import (
     AgentRunResult,
+    DecisionCancelled,
     DecisionProviderError,
     FallbackDecisionProvider,
 )
@@ -88,6 +89,10 @@ class HealthRegistryTests(unittest.TestCase):
         registry = ProviderHealthRegistry(("a", "b", "c"))
         registry.set_quality({"a": 0.8, "b": 1.4, "c": 1.0})
         self.assertEqual(registry.order(("a", "b", "c")), ["b", "c", "a"])
+        registry.set_order_mode("CONFIGURED")
+        self.assertEqual(registry.order(("a", "b", "c")), ["a", "b", "c"])
+        registry.record_failure("a", "HTTP 429 rate limit")
+        self.assertEqual(registry.order(("a", "b", "c")), ["b", "c", "a"])
 
     def test_every_provider_cooled_down_still_gets_tried(self) -> None:
         registry = ProviderHealthRegistry(("a", "b"))
@@ -116,6 +121,40 @@ class FailoverTests(unittest.TestCase):
             throttled.calls, 1, "a cooled-down provider must not be retried every call"
         )
         self.assertEqual(healthy.calls, 2)
+
+    def test_both_order_modes_fall_back_after_an_unexpected_provider_error(self) -> None:
+        class BrokenProvider(StubProvider):
+            def run(self, payload, **options):
+                self.calls += 1
+                raise RuntimeError("client process exited")
+
+        for mode in ("QUALITY", "CONFIGURED"):
+            with self.subTest(mode=mode):
+                broken = BrokenProvider("broken")
+                healthy = StubProvider("healthy")
+                provider = self._provider(broken, healthy)
+                provider.health.set_quality({"broken": 1.5, "healthy": 0.8})
+                provider.health.set_order_mode(mode)
+                answer = provider.run({}, schema={}, schema_name="s", mission="m")
+                self.assertEqual(answer.provider, "healthy")
+                self.assertEqual((broken.calls, healthy.calls), (1, 1))
+                self.assertEqual(
+                    provider.health.state("broken").last_error, "client process exited"
+                )
+
+    def test_cancellation_does_not_fall_back_or_mark_a_provider_failed(self) -> None:
+        class CancelledProvider(StubProvider):
+            def run(self, payload, **options):
+                self.calls += 1
+                raise DecisionCancelled("decision was removed")
+
+        cancelled = CancelledProvider("cancelled")
+        next_provider = StubProvider("next")
+        provider = self._provider(cancelled, next_provider)
+        with self.assertRaises(DecisionCancelled):
+            provider.run({}, schema={}, schema_name="s", mission="m")
+        self.assertEqual((cancelled.calls, next_provider.calls), (1, 0))
+        self.assertEqual(provider.health.state("cancelled").consecutive_failures, 0)
 
     def test_a_provider_that_has_not_proved_itself_does_not_get_the_decision(self) -> None:
         """A lapsed cooldown says the window may have reopened, not that the provider works."""

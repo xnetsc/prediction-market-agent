@@ -204,6 +204,7 @@ class SchemaDecisionEvaluator:
         connection_name: str = "openrouter",
         protocol: str = "decisions",
         require_parameters: bool = False,
+        allow_http: bool = False,
     ) -> None:
         if not model:
             raise ValueError("请选择或填写 evaluator 模型")
@@ -212,7 +213,7 @@ class SchemaDecisionEvaluator:
         if not 1 <= batch_size <= 100:
             raise ValueError("JEV_BATCH_SIZE must be in [1, 100]")
         parsed = urllib.parse.urlsplit(endpoint)
-        if parsed.scheme != "https" and not (
+        if parsed.scheme != "https" and not (allow_http and parsed.scheme == "http") and not (
             parsed.scheme == "http" and parsed.hostname in {"localhost", "127.0.0.1", "::1"}
         ):
             raise ValueError("evaluator endpoint must use HTTPS")

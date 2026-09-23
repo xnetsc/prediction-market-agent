@@ -8,7 +8,7 @@
 Docker 容器能否使用 GPU，取决于宿主系统、显卡和容器运行配置；不能说所有容器都不支持。
 本方案把它作为独立服务，供用户在确认 WebGPU 可用的机器上自行运行。
 
-管理页只提供说明、下载和连接测试。`http://host.docker.internal:8899/v1` 是一种示例地址，
+管理页只提供说明、下载和连接测试。`http://host.proxy.internal:8899/v1` 是本项目 Compose 提供的示例地址，
 **不是对当前机器的检测结果**；请在页面填写机器人容器实际能访问的地址。
 
 ## 怎么启动
@@ -51,12 +51,14 @@ laya ready: convaiinnovations/laya on webgpu
 在机器人界面填写 Laya 服务地址并测试。下面只是常见示例，不是自动检测：
 
 ```
-http://host.docker.internal:8899/v1     # 适用于能解析并连接此宿主机名的容器环境
+http://host.proxy.internal:8899/v1       # 本项目 Compose 默认提供的容器主机名
+http://host.docker.internal:8899/v1     # 部分 Docker Desktop 环境提供
 http://127.0.0.1:8899/v1                # 仅适用于调用方与服务共享网络命名空间
 ```
 
-服务默认只监听本机回环地址。若容器或另一台机器无法访问，不要直接把无认证接口暴露到公网；
-应按部署环境配置受控的网络转发，再把可访问地址填到页面。
+服务默认监听 `0.0.0.0`，以便容器访问宿主机。Laya API 无鉴权，启动后可能被同一网络内的设备访问：
+务必用本机防火墙或隔离网络限制来源，不能直接暴露公网。不需要容器访问时可用
+`bash start.sh --host 127.0.0.1` 收紧为仅本机访问。
 
 API 是 OpenRouter 的 chat-completions 形状，所以任何能调 OpenRouter 的东西都能调它：
 
@@ -72,6 +74,7 @@ curl -s http://127.0.0.1:8899/v1/chat/completions -H 'content-type: application/
 | 参数 | 默认 | 说明 |
 |---|---|---|
 | `--port` | `8899` | 监听端口 |
+| `--host` | `0.0.0.0` | 监听地址；如需仅本机访问，设为 `127.0.0.1` |
 | `--models` | `./models` | 模型落盘位置 |
 | `--endpoint` | `https://huggingface.co` | 首次下载模型的来源，可换镜像 |
 | `--headless false` | 无头 | 想看看浏览器里发生了什么时用 |

@@ -149,12 +149,20 @@ class MarketEvaluationMixin:
             })
         if not candidates:
             return
+        if callable(getattr(evaluator, "set_quality", None)):
+            evaluator.set_quality(self.memory.evaluator_quality(platform=platform))
         state = {"platform": platform, "why": "decide which of these still need a full decision"}
         try:
             answers = evaluator.screen_decision(state, candidates) or {}
         except Exception as error:
             LOGGER.warning("decision screening failed on %s: %s", platform, error)
             return
+        for name, error in getattr(evaluator, "fallback_errors", {}).items():
+            self.memory.record_runtime_incident(
+                platform=platform, stage="evaluator_fallback", severity="warning",
+                message=f"{name}: {error}",
+                fallback="决策前粗筛改用下一个已启用评估器",
+            )
         skips = {
             key: value for key, value in answers.items()
             if not value.get("examine", True)

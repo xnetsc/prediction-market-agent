@@ -1,11 +1,13 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
+import time
 from typing import Any, Protocol
 
 
 DEFAULT_SCREENING_CONFIDENCE = 0.90
 MIN_SCREENING_CONFIDENCE = 0.80
+EVALUATOR_FAILURE_COOLDOWN_SECONDS = 30
 
 
 def is_high_confidence(value: float | None, threshold: float = DEFAULT_SCREENING_CONFIDENCE) -> bool:
@@ -39,6 +41,7 @@ class CandidateAssessment:
     """
     probabilities: dict[str, float] = field(default_factory=dict)
     provider: str = ""
+    evaluator_name: str = ""
 
     def __post_init__(self) -> None:
         if not self.candidate_id:
@@ -138,12 +141,56 @@ def _consistent_upwards(
 
 
 class DecisionEvaluatorPool:
-    """Run all configured evaluators; failures are errors, never implicit agreement."""
+    """Use one enabled evaluator at a time, falling back only after failure."""
 
-    def __init__(self, evaluators: list[DecisionEvaluator], unavailable: dict[str, str] | None = None):
+    def __init__(
+        self, evaluators: list[DecisionEvaluator], unavailable: dict[str, str] | None = None,
+        *, order_mode: str = "QUALITY",
+    ):
         self.evaluators = list(evaluators)
         self.unavailable = dict(unavailable or {})
         self.errors: dict[str, str] = {}
+        self.fallback_errors: dict[str, str] = {}
+        self._last_errors: dict[str, str] = {}
+        self._cooldown_until: dict[str, float] = {}
+        self._quality: dict[str, float] = {}
+        self.set_order_mode(order_mode)
+
+    def set_order_mode(self, mode: str) -> None:
+        if mode not in {"QUALITY", "CONFIGURED"}:
+            raise ValueError("evaluator order mode must be QUALITY or CONFIGURED")
+        self.order_mode = mode
+
+    def set_quality(self, scores: dict[str, float]) -> None:
+        self._quality = {str(name): float(score) for name, score in scores.items()}
+
+    def _ordered(self) -> list[DecisionEvaluator]:
+        if self.order_mode == "CONFIGURED":
+            ranked = list(self.evaluators)
+        else:
+            ranked = sorted(
+                self.evaluators,
+                key=lambda item: -self._quality.get(item.name, 1.0),
+            )
+        now = time.monotonic()
+        available = [item for item in ranked if now >= self._cooldown_until.get(item.name, 0)]
+        if not available and ranked:
+            self.errors = {
+                item.name: self._last_errors.get(item.name, "evaluator cooling down")
+                for item in ranked
+            }
+        return available
+
+    def _record_failure(self, name: str, error: Exception) -> None:
+        message = str(error)[:500]
+        self.errors[name] = message
+        self.fallback_errors[name] = message
+        self._last_errors[name] = message
+        self._cooldown_until[name] = time.monotonic() + EVALUATOR_FAILURE_COOLDOWN_SECONDS
+
+    def _succeeded(self, name: str) -> None:
+        self.errors = {}
+        self._cooldown_until.pop(name, None)
 
     @property
     def names(self) -> tuple[str, ...]:
@@ -153,41 +200,29 @@ class DecisionEvaluatorPool:
     def available(self) -> bool:
         return bool(self.evaluators)
 
-    @staticmethod
-    def _recurring(items: list[Any]) -> float | None:
-        values = [float(item.recurring) for item in items if getattr(item, "recurring", None) is not None]
-        return sum(values) / len(values) if values else None
-
-    @staticmethod
-    def _confidence(items: list[Any]) -> float | None:
-        values = [float(item.confidence) for item in items if item.confidence is not None]
-        return sum(values) / len(values) if values else None
-
     def evaluate_candidates(
         self, state: dict[str, Any], candidates: list[dict[str, Any]]
     ) -> list[CandidateAssessment]:
-        grouped: dict[str, list[CandidateAssessment]] = {}
         self.errors = {}
-        for evaluator in self.evaluators:
+        self.fallback_errors = {}
+        for evaluator in self._ordered():
             try:
                 answers = evaluator.evaluate_candidates(state, candidates)
+                expected = {
+                    str(item.get("candidate_id") or item.get("topic_id"))
+                    for item in candidates
+                    if item.get("candidate_id") or item.get("topic_id")
+                }
+                received = [answer.candidate_id for answer in answers]
+                if set(received) != expected or len(received) != len(set(received)):
+                    raise DecisionEvaluatorError("evaluator returned incomplete candidate assessments")
+                result = [replace(answer, evaluator_name=evaluator.name) for answer in answers]
             except Exception as error:
-                self.errors[evaluator.name] = str(error)[:500]
+                self._record_failure(evaluator.name, error)
                 continue
-            for answer in answers:
-                grouped.setdefault(answer.candidate_id, []).append(answer)
-        priority = {"PRIORITIZE": 3, "NEEDS_DATA": 2, "DEFER": 1, "REJECT": 0}
-        return [
-            CandidateAssessment(
-                candidate_id=candidate_id,
-                action=max(answers, key=lambda item: priority[item.action]).action,
-                quality=sum(item.quality for item in answers) / len(answers),
-                confidence=self._confidence(answers),
-                recurring=self._recurring(answers),
-                provider="+".join(item.provider or "unknown" for item in answers),
-            )
-            for candidate_id, answers in grouped.items()
-        ]
+            self._succeeded(evaluator.name)
+            return result
+        return []
 
     def classify_failure(self, message: str) -> str:
         """Name a client failure the patterns did not recognise, or say unknown.
@@ -197,101 +232,89 @@ class DecisionEvaluatorPool:
         reading, not reasoning, and getting it wrong costs a provider that is retried every round
         instead of waited out, or waited out when it would have worked.
         """
-        for evaluator in self.evaluators:
+        self.errors = {}
+        self.fallback_errors = {}
+        for evaluator in self._ordered():
             classify = getattr(evaluator, "classify_failure", None)
             if not callable(classify):
                 continue
             try:
                 answer = str(classify(message) or "").strip().lower()
             except Exception as error:
-                self.errors[evaluator.name] = str(error)[:500]
+                self._record_failure(evaluator.name, error)
                 continue
             if answer:
+                self._succeeded(evaluator.name)
                 return answer
         return "unknown"
 
     def screen_decision(
         self, state: dict[str, Any], candidates: list[dict[str, Any]]
     ) -> dict[str, dict[str, Any]]:
-        """Ask every screener whether each candidate still deserves a full decision.
-
-        Skipping is only agreed when every screener that answered says so: examining costs a model
-        call, skipping costs a trade nobody looked at, and those are not the same mistake.
-        """
-        answers: dict[str, list[dict[str, Any]]] = {}
+        """Ask one screener; a failed call falls back without silently skipping a market."""
         self.errors = {}
-        for evaluator in self.evaluators:
+        self.fallback_errors = {}
+        for evaluator in self._ordered():
             screen = getattr(evaluator, "screen_decision", None)
             if not callable(screen):
                 continue
             try:
                 answer = screen(state, candidates)
+                expected = {str(item.get("candidate_id")) for item in candidates if item.get("candidate_id")}
+                if not isinstance(answer, dict) or set(answer) != expected or not all(
+                    isinstance(value, dict) and isinstance(value.get("examine"), bool)
+                    for value in answer.values()
+                ):
+                    raise DecisionEvaluatorError("evaluator returned incomplete decision screening answers")
             except Exception as error:
-                self.errors[evaluator.name] = str(error)[:500]
+                self._record_failure(evaluator.name, error)
                 continue
-            for candidate_id, verdict in (answer or {}).items():
-                if isinstance(verdict, dict):
-                    answers.setdefault(str(candidate_id), []).append(verdict)
-        if self.errors:
-            return {}
-        return {
-            candidate_id: {
-                "examine": any(bool(item.get("examine", True)) for item in verdicts),
-                "confidence": min(float(item.get("confidence") or 0.0) for item in verdicts),
-                "why": next((str(item.get("why", "")) for item in verdicts
-                             if not item.get("examine", True)), ""),
-            }
-            for candidate_id, verdicts in answers.items()
-        }
+            self._succeeded(evaluator.name)
+            return {str(key): value for key, value in answer.items() if isinstance(value, dict)}
+        return {}
 
     def screen_outliers(
         self, state: dict[str, Any], assessments: list[dict[str, Any]]
     ) -> dict[str, bool]:
-        """Ask every screener which of its own answers stand apart, and keep what they agree on.
-
-        A candidate is trusted on separation only when more of the screeners that answered say so
-        than not: this path lets a verdict below the floor drop a candidate, so a single evaluator
-        having an opinion is not enough to act on when others looked and disagreed.
-        """
-        votes: dict[str, list[bool]] = {}
+        """Use one evaluator's separation judgement, falling back after a failed call."""
         self.errors = {}
+        self.fallback_errors = {}
         if len(assessments) < OUTLIER_REVIEW_MINIMUM:
             return {}
-        for evaluator in self.evaluators:
+        for evaluator in self._ordered():
             review = getattr(evaluator, "screen_outliers", None)
             if not callable(review):
                 continue
             try:
                 answer = review(state, assessments)
+                expected = {
+                    str(item.get("candidate_id")) for item in assessments
+                    if item.get("under_review") and item.get("candidate_id")
+                }
+                if not isinstance(answer, dict) or not set(answer).issubset(expected):
+                    raise DecisionEvaluatorError("evaluator returned invalid outlier answers")
             except Exception as error:
-                self.errors[evaluator.name] = str(error)[:500]
+                self._record_failure(evaluator.name, error)
                 continue
-            for candidate_id, trusted in (answer or {}).items():
-                votes.setdefault(str(candidate_id), []).append(bool(trusted))
-        trusted = {
-            candidate_id: sum(opinions) * 2 > len(opinions)
-            for candidate_id, opinions in votes.items()
-        }
-        return _consistent_upwards(trusted, assessments)
+            self._succeeded(evaluator.name)
+            return _consistent_upwards(
+                {str(key): bool(value) for key, value in answer.items()}, assessments
+            )
+        return {}
 
     def assess_continuation(
         self, state: dict[str, Any], frontier: list[dict[str, Any]], page: dict[str, Any]
     ) -> ContinuationAssessment | None:
-        answers: list[ContinuationAssessment] = []
         self.errors = {}
-        for evaluator in self.evaluators:
+        self.fallback_errors = {}
+        for evaluator in self._ordered():
             try:
-                answers.append(evaluator.assess_continuation(state, frontier, page))
+                answer = evaluator.assess_continuation(state, frontier, page)
+                if not isinstance(answer, ContinuationAssessment):
+                    raise DecisionEvaluatorError("evaluator returned no continuation assessment")
             except Exception as error:
-                self.errors[evaluator.name] = str(error)[:500]
-        if not answers:
-            return None
-        order = {"CONTINUE_DISCOVERY": 3, "PROCESS_FRONTIER": 2,
-                 "PAUSE_AND_RESUME": 1, "SOURCE_EXHAUSTED": 0}
-        selected = max(answers, key=lambda item: order[item.action])
-        return ContinuationAssessment(
-            action=selected.action,
-            marginal_value=sum(item.marginal_value for item in answers) / len(answers),
-            confidence=self._confidence(answers),
-            provider="+".join(item.provider or "unknown" for item in answers),
-        )
+                self._record_failure(evaluator.name, error)
+                continue
+            self._succeeded(evaluator.name)
+            return answer
+        return None

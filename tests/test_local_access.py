@@ -15,6 +15,24 @@ from prediction_market_agent.runtime.dashboard import create_app
 
 
 class LocalAccessTests(unittest.TestCase):
+    def test_model_selection_mode_is_saved_without_replacing_other_settings(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config = Config(
+                working_directory=root, session_db=root / "sessions.sqlite3",
+                auth_db=root / "auth.sqlite3", management_file=root / "selection.json",
+                plugin_directories_file=root / "directories.json",
+                application_config_file=root / "application.json",
+            )
+            with TestClient(create_app(config, start_robot=False), base_url="http://localhost") as client:
+                for values in ({"paper_trading": "on"}, {"model_selection_mode": "CONFIGURED"}):
+                    response = client.post("/api/local", json={"url": "/api/settings", "body": {"values": values}})
+                    self.assertEqual(response.status_code, 200)
+                fields = client.post("/api/local", json={"url": "/api/settings", "body": None}).json()["fields"]
+                effective = {field["name"]: field["value"] for field in fields}
+                self.assertEqual(effective["model_selection_mode"], "CONFIGURED")
+                self.assertEqual(effective["paper_trading"], "on")
+
     def test_laya_probe_distinguishes_loading_from_disconnected(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

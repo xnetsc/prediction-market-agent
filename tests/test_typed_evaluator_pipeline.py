@@ -653,20 +653,20 @@ class ConfidenceThatStandsApartTests(unittest.TestCase):
         self.assertEqual(pool.screen_outliers({}, [{"candidate_id": "a", "under_review": True}]), {})
         self.assertEqual(screener.asked, [], "nothing was asked")
 
-    def test_screeners_that_looked_and_disagreed_outvote_one_that_did_not(self) -> None:
-        """This path drops candidates, so one opinion against two is not enough to act on."""
-        pool = self._pool(
-            self.Screener({"a": True}), self.Screener({"a": False}), self.Screener({"a": False})
-        )
-        assessments = [{"candidate_id": key, "under_review": True} for key in "abcd"]
-        self.assertEqual(pool.screen_outliers({}, assessments), {"a": False})
-
-    def test_a_screener_that_fails_is_recorded_and_not_counted_as_agreement(self) -> None:
-        working = self.Screener({"a": True})
-        pool = self._pool(working, self.Screener(fails=True))
+    def test_only_first_available_screener_reviews_outliers(self) -> None:
+        first, second = self.Screener({"a": True}), self.Screener({"a": False})
+        pool = self._pool(first, second)
         assessments = [{"candidate_id": key, "under_review": True} for key in "abcd"]
         self.assertEqual(pool.screen_outliers({}, assessments), {"a": True})
-        self.assertIn("jev", pool.errors)
+        self.assertEqual(len(first.asked), 1)
+        self.assertEqual(second.asked, [])
+
+    def test_a_failed_screener_falls_back_to_the_next_one(self) -> None:
+        working = self.Screener({"a": True})
+        pool = self._pool(self.Screener(fails=True), working)
+        assessments = [{"candidate_id": key, "under_review": True} for key in "abcd"]
+        self.assertEqual(pool.screen_outliers({}, assessments), {"a": True})
+        self.assertEqual(pool.errors, {})
 
     def test_the_gate_accepts_either_route(self) -> None:
         from prediction_market_agent.agent.decision_evaluator import is_high_confidence
@@ -733,6 +733,23 @@ class TheScreenerRemembersTests(unittest.TestCase):
         self.assertEqual(calibration["by_screening_action"]["PRIORITIZE"], {"HOLD": 1, "BUY": 1})
         self.assertEqual(calibration["topics_with_history"], 2)
 
+    def test_evaluator_quality_uses_only_paired_full_decisions(self) -> None:
+        for name, topic, screened, decided in (
+            ("laya", "laya-good", "PRIORITIZE", "BUY"),
+            ("jev", "jev-miss", "DEFER", "BUY"),
+        ):
+            self.memory.record_topic_observations(platform="poly", observations=[{
+                "market_topic_id": topic, "title": topic, "status": "OPEN",
+                "liquidity_usdt": 1.0, "volume_usdt": 1.0,
+                "features": {"typed_evaluation": {
+                    "action": screened, "evaluator_name": name,
+                }},
+            }])
+            self._decided(topic, decided, "test", "")
+        scores = self.memory.evaluator_quality(platform="poly")
+        self.assertGreater(scores["laya"], scores["jev"])
+        self.assertEqual(self.memory.evaluator_quality(platform="other"), {})
+
     def test_the_history_travels_with_the_candidate_and_the_state(self) -> None:
         source = Path("src/prediction_market_agent/runtime/market_discovery.py").read_text()
         self.assertIn('candidate["history"] = known', source)
@@ -771,26 +788,27 @@ class WhatTheCheapModelIsBetterAtTests(unittest.TestCase):
             self.asked.append(("classify_failure", message))
             return self.answers.get("classify_failure", "")
 
-    def test_skipping_is_agreed_only_when_every_screener_says_so(self) -> None:
+    def test_only_the_first_available_screener_answers(self) -> None:
         keeps = self.Screener(screen_decision={"t1": {"examine": True, "confidence": 0.9}})
         skips = self.Screener(screen_decision={"t1": {"examine": False, "confidence": 0.9,
                                                       "why": "触发条件未发生"}})
         both = DecisionEvaluatorPool([keeps, skips]).screen_decision({}, [{"candidate_id": "t1"}])
-        self.assertTrue(both["t1"]["examine"], "one screener wanting a look is enough to look")
+        self.assertTrue(both["t1"]["examine"])
+        self.assertEqual(skips.asked, [])
         only_skip = DecisionEvaluatorPool([skips]).screen_decision({}, [{"candidate_id": "t1"}])
         self.assertFalse(only_skip["t1"]["examine"])
         self.assertEqual(only_skip["t1"]["why"], "触发条件未发生")
 
-    def test_a_screener_that_failed_cannot_cause_a_skip(self) -> None:
+    def test_a_failed_screener_falls_back_to_the_next_one(self) -> None:
         class Broken(self.Screener):
             def screen_decision(self, state, candidates):
                 raise RuntimeError("down")
 
         pool = DecisionEvaluatorPool([
-            self.Screener(screen_decision={"t1": {"examine": False, "confidence": 1.0}}), Broken()
+            Broken(), self.Screener(screen_decision={"t1": {"examine": False, "confidence": 1.0}})
         ])
-        self.assertEqual(pool.screen_decision({}, [{"candidate_id": "t1"}]), {})
-        self.assertIn("jev", pool.errors)
+        self.assertFalse(pool.screen_decision({}, [{"candidate_id": "t1"}])["t1"]["examine"])
+        self.assertEqual(pool.errors, {})
 
     def test_the_gate_refuses_to_skip_without_a_previous_verdict(self) -> None:
         source = Path("src/prediction_market_agent/runtime/evaluation.py").read_text()

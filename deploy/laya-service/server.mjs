@@ -52,6 +52,7 @@ const WEBTORCH = resolve(option(
   'webtorch', process.env.WEBTORCH_DIR || join(HERE_DIR(), 'vendor', 'webtorch'),
 ));
 const PORT = Number(option('port', process.env.PORT || 8899));
+const HOST = option('host', process.env.LAYA_HOST || '0.0.0.0');
 const HEADLESS = option('headless', 'true') !== 'false';
 
 /* The one model this service exists for. Not a parameter: the SDK's demo page can load anything,
@@ -427,8 +428,8 @@ server.on('error', (error) => {
   throw error;
 });
 
-server.listen(PORT, '127.0.0.1', async () => {
-  console.log(`laya service on http://127.0.0.1:${PORT}  (webtorch: ${WEBTORCH})`);
+server.listen(PORT, HOST, async () => {
+  console.log(`laya service on http://${HOST}:${PORT}  (webtorch: ${WEBTORCH})`);
   await exclusive(async () => {
     try { await refreshSdk(); }
     catch (error) { console.error('GitHub SDK 更新检查失败，继续使用已打包版本：', error.message || error); }

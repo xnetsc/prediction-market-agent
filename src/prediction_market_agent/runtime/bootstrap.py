@@ -221,4 +221,6 @@ def _decision_evaluators(config: Config, catalog: PluginCatalog) -> DecisionEval
         except Exception as error:
             unavailable[name] = str(error)
             LOGGER.warning("optional decision evaluator %s could not start: %s", name, error)
-    return DecisionEvaluatorPool(evaluators, unavailable)
+    return DecisionEvaluatorPool(
+        evaluators, unavailable, order_mode=config.model_selection_mode
+    )

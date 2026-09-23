@@ -35,7 +35,7 @@ Prediction 与 Polymarket API 插件，以及 Codex、Claude、OpenRouter Provid
   校准（Brier）、以及由**另一个**服务给出的评分；模型给自己打的分不计入。任何 Provider 都使用相同的
   多步工具 Agent。故障转移只在用户已启用的 Provider 之间进行；每个 Provider 始终使用该服务中用户选定的模型，
   不会为求可用而暗中换型号。Codex/Claude 留空是用户明确选择客户端默认；OpenRouter 不允许留空。
-- 当前随仓库提供并默认选择的 evaluator 插件实例默认使用 Jev，只负责发现阶段的低成本粗筛：选 Jev 时直接向 OpenRouter Decisions
+- 当前随仓库提供并默认选择的 `jev` evaluator 插件只负责发现阶段的低成本粗筛：选 Jev 时直接向 OpenRouter Decisions
   发送 `state/questions`；选择其它 OpenRouter 模型时，只显示明确支持 structured output 的型号并强制
   `answers` JSON schema；自定义方式也可接普通聊天模型，先使用其原生 JSON schema，端点拒绝或忽略约束时
   再由该 evaluator 插件的兼容层改用强制函数参数承载同一 schema。三条路径都自行解析 Choice、
@@ -44,6 +44,8 @@ Prediction 与 Polymarket API 插件，以及 Codex、Claude、OpenRouter Provid
   普通聊天模型则由插件约束成同一协议。
   OpenRouter 方式自动使用官方 Base URL 并默认复用主 OpenRouter Key；
   自定义方式填写自己的 Base URL、模型名和可选 Key。代理始终属于 Jev 插件自己。
+- 另有独立的 `laya` 本地 WebGPU evaluator 插件，默认不启用。先在模型服务页测试连接，再到插件中心的
+  “决策评估器”启用并保存服务地址；它与 Jev 可分别选择，不会进入最终交易决策 Provider 池。
 - 预测市场研究工具由插件动态贡献，工具名会动态进入 Agent 控制 schema；内置跨市场、行情刷新、K 线和
   业务历史查询工具集。网页、文件、命令和 skills 使用官方 CLI 自带能力。
 - SQLite 保存每轮完整输入输出、Agent 工具轨迹、风险判定、执行请求/结果、独立采集证据、运行异常、
