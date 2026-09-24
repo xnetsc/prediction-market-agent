@@ -1056,6 +1056,27 @@ class OpenRouterBackend:
                     "无法读取所选 OpenRouter 模型的 Codex 元数据"
                 ) from error
 
+    def _isolated_codex_home(self) -> Path:
+        """Keep OpenRouter's model cache away from the official Codex account.
+
+        Codex writes the bridge's single-model catalog into models_cache.json.  Sharing
+        CODEX_HOME with the official provider makes its model picker show that model.
+        Link only the account configuration and installed capabilities; sessions and
+        caches belong to this separate OpenRouter CLI home.
+        """
+        official = self.client_homes["CODEX"].resolve()
+        isolated = official.parent / ".codex-openrouter"
+        isolated.mkdir(parents=True, exist_ok=True, mode=0o700)
+        for name in ("auth.json", "config.toml", "skills", "plugins", "AGENTS.md"):
+            source = official / name
+            target = isolated / name
+            if source.exists() and not target.exists() and not target.is_symlink():
+                try:
+                    target.symlink_to(source, target_is_directory=source.is_dir())
+                except FileExistsError:
+                    pass
+        return isolated
+
     @contextmanager
     def session(self):
         """One new Codex/Claude conversation for one application round."""
@@ -1186,7 +1207,7 @@ class OpenRouterBackend:
                     "-",
                 ]
             env = client_subprocess_environment(
-                "CODEX", self.client_homes["CODEX"], "",
+                "CODEX", self._isolated_codex_home(), "",
                 self.proxy_settings["no_proxy"],
             )
             env.update(

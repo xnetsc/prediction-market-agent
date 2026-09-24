@@ -3,6 +3,7 @@ from __future__ import annotations
 import tempfile
 import unittest
 import io
+import json
 import urllib.error
 from pathlib import Path
 from unittest.mock import patch
@@ -31,13 +32,22 @@ class LocalAccessTests(unittest.TestCase):
                 {"market_topic_id": "two", "title": "Two", "status": "OPEN",
                  "liquidity_usdt": 10, "volume_usdt": 20, "features": {}},
             ])
+            memory.queue_market_screening(platform="venue", candidates=[
+                {"candidate_id": "three:market", "topic_id": "three", "market_id": "market",
+                 "title": "New background result", "status": "OPEN"},
+            ])
+            memory.complete_market_screening(
+                platform="venue", candidate_id="three:market",
+                assessment={"action": "PRIORITIZE", "evaluator_name": "laya"},
+            )
             memory.close()
             with TestClient(create_app(config, start_robot=False), base_url="http://localhost") as client:
                 response = client.post("/api/local", json={"url":
                     "/api/discovery/screenings?platform=venue&limit=1&offset=0", "body": None})
                 self.assertEqual(response.status_code, 200)
-                self.assertEqual(response.json()["total"], 1)
-                self.assertEqual(response.json()["items"][0]["market_topic_id"], "one")
+                self.assertEqual(response.json()["total"], 2)
+                self.assertEqual(response.json()["items"][0]["market_topic_id"], "three")
+                self.assertEqual(response.json()["items"][0]["source"], "queue")
 
     def test_plugin_selection_is_saved_before_runtime_reconciliation(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -67,6 +77,34 @@ class LocalAccessTests(unittest.TestCase):
                 self.assertEqual(response.status_code, 200)
                 self.assertEqual(ManagedRuntimeConfig.load(config.management_file).enabled["decision_evaluator"], ())
                 self.assertFalse(any(item["enabled"] for item in response.json()["plugins"]["decision_evaluator"]))
+                stop.assert_not_called()
+                reconcile_async.assert_called_once_with()
+
+    def test_model_configuration_saves_without_waiting_for_running_agent(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config = Config(
+                working_directory=root, session_db=root / "sessions.sqlite3",
+                auth_db=root / "auth.sqlite3", management_file=root / "selection.json",
+                plugin_directories_file=root / "directories.json",
+                application_config_file=root / "application.json",
+            )
+            with patch("prediction_market_agent.runtime.controller.RobotRuntimeManager.reconcile"), patch(
+                "prediction_market_agent.runtime.controller.RobotRuntimeManager.stop",
+            ) as stop, patch(
+                "prediction_market_agent.runtime.controller.RobotRuntimeManager.reconcile_async"
+            ) as reconcile_async, TestClient(
+                create_app(config, start_robot=True), base_url="http://localhost"
+            ) as client:
+                response = client.post("/api/local", json={"url": "/api/plugins/config", "body": {
+                    "kind": "decision_provider", "name": "codex",
+                    "values": {"CODEX_MODEL": "gpt-5.6-terra"}, "clear_secrets": [],
+                }})
+                self.assertEqual(response.status_code, 200)
+                self.assertEqual(
+                    json.loads((root / "config" / "plugins" / "codex.json").read_text())["CODEX_MODEL"],
+                    "gpt-5.6-terra",
+                )
                 stop.assert_not_called()
                 reconcile_async.assert_called_once_with()
 

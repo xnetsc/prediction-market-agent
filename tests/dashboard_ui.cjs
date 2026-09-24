@@ -356,7 +356,7 @@ const fs = require('node:fs');
                 const message=route.request().postDataJSON();
                 if(message.url.startsWith('/api/discovery/screenings?')){
                     await route.fulfill({json:{total:1,limit:50,offset:0,items:[{
-                        id:1,observed_at:1000000000000,platform:'fixture',market_topic_id:'screened-1',
+                        id:'queue:fixture:screened-1',source:'queue',recorded_at:1000000000000,platform:'fixture',market_topic_id:'screened-1',market_id:'market-1',
                         title:'Screened fixture',status:'OPEN',liquidity_usdt:10,volume_usdt:20,
                         assessment:{action:'PRIORITIZE',quality:0.8,confidence:0.91,
                             provider:'openrouter',evaluator_name:'jev'},
@@ -368,6 +368,8 @@ const fs = require('node:fs');
             await page.waitForFunction(()=>document.getElementById('evaluatorScreenings').textContent.includes('Screened fixture'));
             assert((await page.locator('#evaluatorScreenings').innerText()).includes('jev / openrouter'));
             assert((await page.locator('#evaluatorScreenings').innerText()).includes('优先'));
+            assert((await page.locator('#evaluatorScreenings').innerText()).includes('粗筛完成'));
+            assert((await page.locator('#evaluatorScreenings').innerText()).includes('market-1'));
             await page.unroute('**/api/local');
             await page.evaluate(()=>{LEDGER_TAB='concluded';LEDGER_RESULTS=new Set();renderDecisionLedger([{id:'ui-fixture',created_at:new Date().toISOString(),platform:'demo',market_topic_id:'Only a browser fixture',context:{market:{title:'Very long market '.repeat(20)}},final_decision:{action:'HOLD',rationale:'Evidence is incomplete; do not place an order.'},proposed_decision:{action:'HOLD',rationale:'Need research'},status:'NO_ACTION',group:'concluded',result:'HOLD',agent_steps:2,research:[{source:'fixture'}]}])});
             assert.equal(await page.locator('#decisionRecordsPanel').evaluate(node=>node.open),false);

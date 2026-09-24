@@ -63,7 +63,7 @@ HTML = r"""<!doctype html><html lang="zh-CN"><head><meta charset="utf-8">
 <section data-view="overview" id="gettingStarted"><h3>开始使用</h3><p class="muted">按下面的顺序完成连接。先确认规则与暂停状态，再让机器人运行。</p><div id="setupSteps" class="setup-grid"></div></section><div id="cards" class="cards" data-view="overview"></div>
 <dialog id="loginWizard"><h3 id="loginWizardTitle">客户端网页登录</h3><p>请只在官方页面输入账号密码。机器人仅接收本次授权结果，登录凭据保存在服务器中。</p><label class="field">客户端验证方式<select id="wizardLoginMethod" onchange="switchLoginMethod(this.value)"><option value="auto">自动选择</option><option value="local">本地回调</option><option value="remote">设备码 / 验证码</option></select><small>切换会取消本次客户端登录等待并重新开始，不改变管理员 Passkey 鉴权。</small></label><div id="remoteLoginSteps" hidden><div class="info-banner">远程 / 手机登录不需要本地助手，也不需要向公网开放随机端口。</div><h4>1. 打开官方授权页面</h4><a id="remoteOfficialLink" target="_blank" rel="noopener noreferrer" hidden>打开官方登录页</a><div id="deviceCodeStep" hidden><h4>2. 在官方页面输入设备码</h4><pre id="remoteDeviceCode" aria-label="设备码"></pre><p>需要在账号安全设置或工作空间权限中允许设备码登录。完成后回到此页，点击“刷新登录状态”。</p></div><div id="manualCodeStep" hidden><h4>2. 粘贴官方页面给出的验证码</h4><label class="field">本次验证码<input id="remoteLoginCode" type="password" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="仅填写官方显示的验证码"></label><button id="submitLoginCode" class="primary" onclick="submitRemoteCode()">提交验证码</button><p>验证码仅传给正在等待的官方客户端，不写入配置或审计记录。</p></div><h4>3. 等待客户端确认</h4><p id="remoteLoginResult" role="status"></p></div><div id="localLoginSteps"><p id="callbackProbeStatus" role="status">等待客户端提供实际回调地址…</p><button id="callbackProbeRetry" onclick="retryCallbackProbe()">重新检测回调映射</button><ol><li data-helper-step hidden><h4>复制本次登录命令</h4><p>选择浏览器所在电脑的系统。命令从当前机器人获取完整脚本后运行，只对本次登录有效、只可获取一次。请确认站点可信，不要分享命令或终端历史。</p><select id="helperPlatform" onchange="resetHelperCommand()"><option value="bash">macOS / Linux（Bash）</option><option value="powershell">Windows（PowerShell）</option></select><textarea id="helperCommand" readonly rows="5" style="width:100%;box-sizing:border-box" aria-label="本次登录助手命令" placeholder="正在生成命令…"></textarea><button id="helperCopy" onclick="copyHelperCommand()" disabled>复制命令</button></li><li data-helper-step hidden><h4>在终端粘贴运行</h4><p>macOS 打开“终端”，Linux 打开终端，Windows 打开 PowerShell，然后粘贴命令并回车。无需手动保存脚本、解压或打开可执行文件，也不会修改系统安全设置。若系统管理策略禁止脚本，请联系管理员。</p><p>macOS/Linux 需要 Python 3.9+，缺少时会明确提示；缺少 cryptography 时在临时 venv 安装加密依赖，结束后清理，不修改系统 Python。Windows 使用 PowerShell 5.1+ 和系统 .NET。</p><p>保持终端开启，显示 Ready 后回到此页面。助手使用本机网络/代理，不继承容器代理；网络失败请检查代理或防火墙，不要关闭 TLS 验证。端口冲突不会自动终止其他程序。取消或超时后助手释放监听。</p><p id="helperConnection" role="status">等待助手连接…</p></li><li><h4>在官方网页授权</h4><p>映射验证成功或助手 Ready 后，点击下面的链接。官方页面自动回调，无需复制代码。</p><a id="officialLoginLink" target="_blank" rel="noopener noreferrer" hidden>打开官方登录页</a></li><li><h4>确认完成</h4><p id="loginWizardResult" role="status">尚未完成。</p><p>只有这里显示“已登录”才算成功；完成网页授权后点击“刷新登录状态”。失败或超时可“重新开始”并获取新命令。</p></li></ol><button onclick="switchRemoteLogin()">改用设备码 / 验证码登录</button></div><p id="loginWizardError" class="danger"></p><div class="toolbar"><button class="primary" onclick="refreshLoginWizard()">刷新登录状态</button><button onclick="restartWizard()">重新开始</button><button onclick="cancelWizard()">取消本次登录</button><button onclick="document.getElementById('loginWizard').close()">收起向导</button></div></dialog>
 <section data-view="models" hidden><div class="section-heading"><div><h3>连接 AI 模型服务</h3><p>选择客户端账号，或填写 OpenRouter 配置。无需同时配置多种方式；默认在已启用项中质量优先、同分按设置顺序，也可在下方强制按顺序；不可用时依次回退，不会替换任何服务中用户选定的模型。</p></div></div><div id="clientAlerts" class="status danger" role="alert"></div><div id="clientControls" class="service-grid"></div><div class="toolbar"><button class="primary" onclick="saveSelection()">保存模型启用与顺序</button><span id="modelManageStatus" class="status" role="status"></span></div><p id="clientControlError" class="danger"></p></section>
-<section data-view="models" hidden id="layaPanel"><div class="section-heading"><div><h3>本地决策模型（粗筛，免费）</h3><p>粗筛每轮要看几百个候选，交给昂贵模型做既慢又费。这个模型跑在<strong>你自己的机器</strong>上，不产生模型调用费用。推理在本机完成；启动及每 6 小时会检查 GitHub 上的 SDK 更新。它只回答判断题，不写文章，也不做买卖决策。</p></div></div><div class="laya-why"><p><strong>为什么不在当前机器人容器里运行：</strong>当前镜像不运行 Laya，也没有配置它所需的 GPU/WebGPU 推理环境。Docker 能否使用 GPU 取决于宿主系统和容器配置，不能一概而论。本页只提供说明、下载和连接测试，不会在容器内启动 Laya。请在确认浏览器能使用 WebGPU 的机器上运行它。</p></div><ol class="laya-steps"><li><b>下载资源包</b><br><a class="button-link" href="/laya-service.zip" download>laya-service.zip</a><span class="muted">（不含模型；模型首次启动时自动下载约 800MB 并留在本地）</span></li><li><b>解压并启动</b>，一条命令：<br><code class="laya-command">unzip laya-service.zip &amp;&amp; bash laya-service/start.sh</code><br><span class="muted">需要 Node.js 18+ 和 curl。首次会自动装 Playwright 和一个无头 Chromium。看到 <code>laya ready: … on webgpu</code> 就成了；若显示 <code>on cpu</code>，说明没拿到显卡，能答但慢到不可用。</span></li><li><b>填写 Laya 服务地址并测试</b><br><input class="laya-command laya-endpoint" id="layaEndpoint" type="url" value="http://host.proxy.internal:8899/v1" aria-label="Laya 服务地址"><br><span class="muted">这里是示例地址，不是环境检测结果；请填写机器人容器能够访问的实际地址。</span></li></ol><div class="toolbar"><button onclick="checkLaya()">测试连接</button><span id="layaStatus" class="status muted">还没测过</span></div><div class="toolbar"><button onclick="refreshLayaBenchmark()">刷新测速结果</button><span id="layaBenchmarkStatus" class="status muted" role="status">尚未读取测速结果</span></div><p class="muted">Laya 服务自身启动时测一次，之后每 5 分钟测一次；测速期间新推理收到带状态的 429。本页只在进入时或点击刷新时读取结果。</p></section>
+<section data-view="models" hidden id="layaPanel"><div class="section-heading"><div><h3>本地决策模型（粗筛，免费）</h3><p>粗筛每轮要看几百个候选，交给昂贵模型做既慢又费。这个模型跑在<strong>你自己的机器</strong>上，不产生模型调用费用。推理在本机完成；启动及每 6 小时会检查 GitHub 上的 SDK 更新。它只回答判断题，不写文章，也不做买卖决策。</p></div></div><div class="laya-why"><p><strong>为什么不在当前机器人容器里运行：</strong>当前镜像不运行 Laya，也没有配置它所需的 GPU/WebGPU 推理环境。Docker 能否使用 GPU 取决于宿主系统和容器配置，不能一概而论。本页只提供说明、下载和连接测试，不会在容器内启动 Laya。请在确认浏览器能使用 WebGPU 的机器上运行它。</p></div><ol class="laya-steps"><li><b>下载资源包</b><br><a class="button-link" href="/laya-service.zip" download>laya-service.zip</a><span class="muted">（不含模型；模型首次启动时自动下载约 800MB 并留在本地）</span></li><li><b>解压并启动</b>，一条命令：<br><code class="laya-command">unzip laya-service.zip &amp;&amp; bash laya-service/start.sh</code><br><span class="muted">需要 Node.js 18+ 和 curl。首次会自动装 Playwright 和一个无头 Chromium。看到 <code>laya ready: … on webgpu</code> 就成了；若显示 <code>on cpu</code>，说明没拿到显卡，能答但慢到不可用。</span></li><li><b>填写 Laya 服务地址并测试</b><br><input class="laya-command laya-endpoint" id="layaEndpoint" type="url" value="http://host.proxy.internal:8899/v1" aria-label="Laya 服务地址"><br><span class="muted">这里是示例地址，不是环境检测结果；请填写机器人容器能够访问的实际地址。</span></li></ol><div class="toolbar"><button onclick="checkLaya()">测试连接</button><span id="layaStatus" class="status muted">还没测过</span></div><div class="toolbar"><button onclick="refreshLayaBenchmark()">刷新测速结果</button><span id="layaBenchmarkStatus" class="status muted" role="status">尚未读取测速结果</span></div><p class="muted">Laya 服务自身仅在启动时自动测一次，也可手动触发；测速期间新推理收到带状态的 429。本页只在进入时或点击刷新时读取结果。</p></section>
 <section data-view="models" hidden><p class="muted">服务默认监听 <code>0.0.0.0</code>，供容器访问宿主机。Laya API 无鉴权，须用防火墙或隔离网络限制来源，不要暴露公网；不需要容器访问时可用 <code>bash start.sh --host 127.0.0.1</code> 收紧监听。<code>host.proxy.internal</code> 是本项目 Compose 的默认示例，其他环境请填写机器人实际可访问的地址，并以连接测试为准。</p><p>连接测试通过后，前往<a href="#plugins/decision_evaluator">插件中心 → 决策评估器</a>，启用 Laya、填写同一服务地址并保存。测试连接本身不会启用粗筛；可同时选择 Jev 等其他评估器并设置顺序。</p></section>
 <section data-view="models" hidden><h3>模型与评估器的选择顺序</h3><p class="muted">只在已启用的决策模型服务和粗筛评估器中选择。两类各自每次只调用一个，失败才回退；未启用项不参与排序。</p><div class="toolbar"><label>选择方式 <select id="modelSelectionMode"><option value="QUALITY">质量优先（默认，同分按设置顺序）</option><option value="CONFIGURED">强制按设置顺序（忽略质量）</option></select></label><button onclick="saveModelSelectionMode()">保存选择方式</button><span id="modelSelectionModeStatus" class="status muted" role="status"></span></div></section>
 <section data-view="models" hidden><h3>服务可用性与实测质量</h3><p class="muted">限流、掉线或凭证过期的服务会自动退避，恢复后自动回到轮换；可用的决策模型按所选方式排序使用。</p><div id="providerHealth"></div></section>
@@ -201,7 +201,7 @@ function renderInstallTargets(){if(!LAST_MANAGER)return;let kind=document.getEle
 async function installPlugin(){let s=document.getElementById('installStatus');try{let result=await post('/api/plugins/install',{kind:document.getElementById('installKind').value,target_directory:document.getElementById('installTarget').value,name:document.getElementById('installName').value,source:document.getElementById('installSource').value});renderManager(result.management);s.className='status good';s.textContent='已安装：'+result.installed}catch(e){s.className='status danger';s.textContent=e.message}}
 async function refreshManager(){let [m,r]=await Promise.all([get('/api/plugins/manage'),get('/api/runtime')]);renderManager(m);renderRuntime(r);renderProviderHealth(r);renderLayaBenchmark(r);await Promise.all([refreshClientControls(),refreshModelSelectionMode()])}
 async function refreshPlugins(){let s=managementFeedback();setOperationStatus(s,'正在重新扫描插件文件…','pending');try{let m=await post('/api/plugins/refresh',{});renderManager(m);setOperationStatus(managementFeedback(),'插件已按最新文件和启用名单刷新')}catch(e){setOperationStatus(s,e.message,'danger')}}
-async function savePluginConfig(kind,name){let root=document.getElementById('plugin_'+kind+'_'+name),values={},clear_secrets=[];for(let e of root.querySelectorAll('[data-field]')){if(e.dataset.clearSecret==='true')clear_secrets.push(e.dataset.field);let v=e.type==='checkbox'?e.checked:e.value;if(e.dataset.type==='integer')v=Number.parseInt(v,10);if(e.dataset.type==='number')v=Number(v);values[e.dataset.field]=v}setOperationStatus(pluginFeedback(kind,name),'正在保存 '+name+' 配置…','pending');try{await post('/api/plugins/config',{kind,name,values,clear_secrets});await refreshManager();setOperationStatus(pluginFeedback(kind,name),name+' 配置已保存，运行条件已重新检查')}catch(e){setOperationStatus(pluginFeedback(kind,name),e.message,'danger')}}
+async function savePluginConfig(kind,name){let root=document.getElementById('plugin_'+kind+'_'+name),values={},clear_secrets=[];for(let e of root.querySelectorAll('[data-field]')){if(e.dataset.clearSecret==='true')clear_secrets.push(e.dataset.field);let v=e.type==='checkbox'?e.checked:e.value;if(e.dataset.type==='integer')v=Number.parseInt(v,10);if(e.dataset.type==='number')v=Number(v);values[e.dataset.field]=v}setOperationStatus(pluginFeedback(kind,name),'正在保存 '+name+' 配置…','pending');try{await post('/api/plugins/config',{kind,name,values,clear_secrets});setOperationStatus(pluginFeedback(kind,name),name+' 配置已保存，运行条件正在后台更新')}catch(e){setOperationStatus(pluginFeedback(kind,name),e.message,'danger');return}try{await refreshManager();setOperationStatus(pluginFeedback(kind,name),name+' 配置已保存，运行条件正在后台更新')}catch(e){setOperationStatus(pluginFeedback(kind,name),'配置已保存，但页面刷新失败：'+e.message,'danger')}}
 async function deletePluginConfig(kind,name){if(!confirm('删除 '+kind+':'+name+' 的私有配置并恢复默认值？'))return;setOperationStatus(pluginFeedback(kind,name),'正在删除 '+name+' 配置…','pending');try{await post('/api/plugins/config/delete',{kind,name});await refreshManager();setOperationStatus(pluginFeedback(kind,name),kind+':'+name+' 配置已删除')}catch(e){setOperationStatus(pluginFeedback(kind,name),e.message,'danger')}}
 async function resetPluginField(kind,name,field){setOperationStatus(pluginFeedback(kind,name),'正在恢复 '+field+'…','pending');try{await post('/api/plugins/config/reset',{kind,name,fields:[field]});await refreshManager();setOperationStatus(pluginFeedback(kind,name),kind+':'+name+' 的 '+field+' 已恢复默认值')}catch(e){setOperationStatus(pluginFeedback(kind,name),e.message,'danger')}}
 async function saveSelection(){let enabled={};for(let kind of KINDS)enabled[kind]=[];for(let kind of PLUGIN_CENTER_KINDS.filter(x=>x!=='decision_strategy')){let rows=[...document.querySelectorAll('.enable[data-kind="'+kind+'"]:checked')].map(e=>({name:e.dataset.name,priority:Number(document.querySelector('.priority[data-kind="'+kind+'"][data-name="'+e.dataset.name+'"]').value)||99})).sort((a,b)=>a.priority-b.priority);enabled[kind]=rows.map(x=>x.name)}enabled.decision_provider=[...document.querySelectorAll('.model-enable:checked')].map(e=>({name:e.dataset.name,priority:Number(document.querySelector('.model-priority[data-name="'+e.dataset.name+'"]').value)||99})).sort((a,b)=>a.priority-b.priority).map(x=>x.name);let strategy=document.querySelector('input[name="strategy"]:checked')?.value||'';enabled.decision_strategy=strategy?[strategy]:[];let status=managementFeedback();setOperationStatus(status,'正在保存启用状态与顺序…','pending');try{let saved=await post('/api/plugins/selection',{enabled,decision_strategy:strategy,strategy_evolution:document.getElementById('evolutionToggle')?.checked!==false});renderManager(saved);setOperationStatus(managementFeedback(),'启用状态和优先级已保存；运行中的插件将在当前工作结束后切换')}catch(e){setOperationStatus(status,e.message,'danger')}}
@@ -581,43 +581,81 @@ class AuditData:
     def evaluator_screenings(
         self, platform: str = "", limit: int = 50, offset: int = 0
     ) -> dict[str, Any]:
-        """Page through persisted per-candidate verdicts without loading full market history."""
+        """Page live queue verdicts and legacy observation verdicts by their actual timestamps."""
         connection = sqlite3.connect(self.config.session_db)
         try:
-            predicate = "features_json LIKE '%\"typed_evaluation\"%'"
-            parameters: list[Any] = []
+            observation_where = "features_json LIKE '%\"typed_evaluation\"%'"
+            observation_params: list[Any] = []
             if platform:
-                predicate += " AND platform = ?"
-                parameters.append(platform)
+                observation_where += " AND platform = ?"
+                observation_params.append(platform)
+            sources = [f"""
+                SELECT 'observation' AS source, CAST(id AS TEXT) AS source_id,
+                       id AS source_sort_id,
+                       observed_at AS recorded_at, platform, market_topic_id,
+                       title, status, liquidity_usdt, volume_usdt,
+                       features_json AS payload_json, '' AS assessment_json, '' AS market_id
+                FROM topic_observations WHERE {observation_where}
+            """]
+            parameters = list(observation_params)
+            queue_exists = connection.execute(
+                "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'market_screening_queue'"
+            ).fetchone() is not None
+            if queue_exists:
+                queue_where = "last_screened_at > 0 AND assessment_json != '{}'"
+                if platform:
+                    queue_where += " AND platform = ?"
+                sources.append(f"""
+                    SELECT 'queue' AS source, candidate_id AS source_id,
+                           0 AS source_sort_id,
+                           last_screened_at AS recorded_at, platform, topic_id AS market_topic_id,
+                           '' AS title, '' AS status, 0 AS liquidity_usdt, 0 AS volume_usdt,
+                           candidate_json AS payload_json, assessment_json, market_id
+                    FROM market_screening_queue WHERE {queue_where}
+                """)
+                if platform:
+                    parameters.append(platform)
+            union = " UNION ALL ".join(sources)
             total = int(connection.execute(
-                f"SELECT COUNT(*) FROM topic_observations WHERE {predicate}", parameters,
+                f"SELECT COUNT(*) FROM ({union})", parameters,
             ).fetchone()[0])
+            page_size = max(1, min(100, limit))
+            page_offset = max(0, offset)
             rows = connection.execute(
                 f"""
-                SELECT id, observed_at, platform, market_topic_id, title, status,
-                       liquidity_usdt, volume_usdt, features_json
-                FROM topic_observations WHERE {predicate}
-                ORDER BY observed_at DESC, id DESC LIMIT ? OFFSET ?
+                SELECT source, source_id, recorded_at, platform, market_topic_id,
+                       title, status, liquidity_usdt, volume_usdt,
+                       payload_json, assessment_json, market_id
+                FROM ({union})
+                ORDER BY recorded_at DESC, source DESC, source_sort_id DESC, source_id DESC
+                LIMIT ? OFFSET ?
                 """,
-                [*parameters, max(1, min(100, limit)), max(0, offset)],
+                [*parameters, page_size, page_offset],
             ).fetchall()
         finally:
             connection.close()
         items = []
         for row in rows:
-            features = _json_value(row[8]) or {}
-            typed = features.get("typed_evaluation") if isinstance(features, dict) else None
+            source = str(row[0])
+            payload = _json_value(row[9]) or {}
+            typed = (_json_value(row[10]) if source == "queue" else
+                     payload.get("typed_evaluation") if isinstance(payload, dict) else None)
             if not isinstance(typed, dict):
                 continue
+            candidate = payload if source == "queue" and isinstance(payload, dict) else {}
             items.append({
-                "id": int(row[0]), "observed_at": int(row[1]),
-                "platform": str(row[2]), "market_topic_id": str(row[3]),
-                "title": str(row[4]), "status": str(row[5]),
-                "liquidity_usdt": float(row[6] or 0), "volume_usdt": float(row[7] or 0),
+                "id": (f"queue:{row[3]}:{row[1]}" if source == "queue" else int(row[1])),
+                "source": source,
+                "recorded_at": int(row[2]), "observed_at": int(row[2]),
+                "platform": str(row[3]), "market_topic_id": str(row[4]),
+                "market_id": str(row[11]),
+                "title": str(candidate.get("title") or row[5]),
+                "status": str(candidate.get("status") or row[6]),
+                "liquidity_usdt": float(candidate.get("liquidity_usdt") or row[7] or 0),
+                "volume_usdt": float(candidate.get("volume_usdt") or row[8] or 0),
                 "assessment": typed,
             })
-        return {"total": total, "limit": max(1, min(100, limit)),
-                "offset": max(0, offset), "items": items}
+        return {"total": total, "limit": page_size, "offset": page_offset, "items": items}
 
     def discovery_activity(self, platform: str = "") -> dict[str, Any]:
         """Show collection and candidate analysis independently of deletable decisions."""
@@ -1701,25 +1739,22 @@ def create_app(config: Config, *, start_robot: bool = True) -> FastAPI:
                 query_value(query, "platform"),
             )
         if path == "/api/plugins/config":
-            runtime.stop()
             result = management.save_plugin_configuration(str(payload.get("kind", "")), str(payload.get("name", "")), payload.get("values", {}), clear_secrets=payload.get("clear_secrets"))
             management.refresh()
             if start_robot:
-                runtime.reconcile()
+                runtime.reconcile_async()
             return result
         if path == "/api/plugins/config/delete":
-            runtime.stop()
             result = management.delete_plugin_configuration(str(payload.get("kind", "")), str(payload.get("name", "")))
             management.refresh()
             if start_robot:
-                runtime.reconcile()
+                runtime.reconcile_async()
             return result
         if path == "/api/plugins/config/reset":
-            runtime.stop()
             result = management.reset_plugin_configuration_fields(str(payload.get("kind", "")), str(payload.get("name", "")), payload.get("fields", []))
             management.refresh()
             if start_robot:
-                runtime.reconcile()
+                runtime.reconcile_async()
             return result
         if path == "/api/plugins/directories":
             runtime.stop()

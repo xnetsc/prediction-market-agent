@@ -95,7 +95,7 @@ class ClientModelCatalog:
             send({"method":"initialized"})
             models=[];cursor=None;seen=set()
             for request_id in range(2,22):
-                send({"id":request_id,"method":"model/list","params":{"limit":100,"includeHidden":False,"cursor":cursor}})
+                send({"id":request_id,"method":"model/list","params":{"limit":100,"includeHidden":True,"cursor":cursor}})
                 while True:
                     message=receive()
                     if message.get("id")==request_id:break

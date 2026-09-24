@@ -293,7 +293,7 @@ class ClientAccountTests(unittest.TestCase):
         relay.handle(relay.secret, seal(relay.secret,
             {"action": "callback", "query": "state=fixture&code=fixture-approval"}, "helper-request"))
 
-    def test_upgrades_are_versioned_and_failed_upgrade_preserves_active_client(self):
+    def test_upgrades_are_staged_and_keep_only_new_and_previous_verified_versions(self):
         _, control = self.plugin()
         npm = self.root / "npm"
         npm.write_text('''#!EXECUTABLE
@@ -301,7 +301,7 @@ import sys
 from pathlib import Path
 target=Path(sys.argv[sys.argv.index('--prefix')+1])
 version=sys.argv[-1].rsplit('@',1)[1]
-if version=='2.3.0': sys.exit(1)
+if version=='2.5.0': sys.exit(1)
 client=target/'node_modules'/'.bin'/'claude'
 client.parent.mkdir(parents=True)
 client.write_text('#!EXECUTABLE\\nprint("'+version+'")\\n')
@@ -310,20 +310,64 @@ client.chmod(0o700)
         npm.chmod(0o700)
         control.inspect()
         old = control.executable()
-        control.state.update(latest_version="2.2.0", update_available=True)
+        interrupted = control.directory("CLIENT") / "2.1.9-123456789abc"
+        interrupted.mkdir(parents=True)
+        (interrupted / "partial-download").write_bytes(b"interrupted install")
         with patch("prediction_market_agent.plugins.providers._client_control.shutil.which", return_value=str(npm)):
-            control.upgrade()
-            control.update_thread.join(5)
-            self.assertEqual(control.snapshot()["installed_version"], "2.2.0")
+            for index, version in enumerate(("2.2.0", "2.3.0", "2.4.0")):
+                control.state.update(latest_version=version, update_available=True, update_state="downloading")
+                control._stage(version)
+                self.assertEqual(control.snapshot()["update_state"], "ready")
+                self.assertFalse(interrupted.exists())
+                self.assertEqual(control.snapshot()["installed_version"], "2.1.0" if version == "2.2.0" else previous)
+                self.assertEqual(len(list(control.directory("CLIENT").glob("*-????????????"))), min(2, index + 1))
+                control.upgrade()
+                self.assertEqual(control.snapshot()["installed_version"], version)
+                self.assertEqual(control.snapshot()["update_state"], "idle")
+                previous = version
             self.assertTrue(Path(old).exists())
             active = control.executable()
             self.assertNotEqual(old, active)
-            control.state.update(latest_version="2.3.0", update_available=True)
-            control.upgrade()
-            control.update_thread.join(5)
+            self.assertEqual(len(list(control.directory("CLIENT").glob("*-????????????"))), 2)
+            control.state.update(latest_version="2.5.0", update_available=True, update_state="downloading")
+            control._stage("2.5.0")
             self.assertEqual(control.snapshot()["update_state"], "failed")
             self.assertEqual(control.executable(), active)
+            self.assertEqual(len(list(control.directory("CLIENT").glob("*-????????????"))), 2)
         self.assertTrue(Path(active).exists())
+
+    def test_version_check_starts_prefetch_without_switching_active_client(self):
+        _, control = self.plugin("codex")
+        control.inspect()
+        original = control.executable()
+        response = MagicMock()
+        response.__enter__.return_value.read.return_value = b'{"version":"2.2.0"}'
+        opener = MagicMock()
+        opener.open.return_value = response
+        with patch(
+            "prediction_market_agent.plugins.providers._client_control.urllib.request.build_opener",
+            return_value=opener,
+        ), patch.object(control, "_stage") as stage:
+            control.check_update()
+        stage.assert_called_once_with("2.2.0")
+        self.assertEqual(control.snapshot()["update_state"], "downloading")
+        self.assertEqual(control.executable(), original)
+        self.assertTrue(next(action for action in control.snapshot()["actions"] if action["id"] == "upgrade")["disabled"])
+
+    def test_parallel_control_does_not_duplicate_a_client_download(self):
+        if os.name != "posix":
+            self.skipTest("file lock is used on POSIX deployments")
+        import fcntl
+        _, control = self.plugin("codex")
+        directory = control.directory("CLIENT")
+        directory.mkdir(parents=True)
+        with (directory / ".prefetch.lock").open("a+") as held:
+            fcntl.flock(held.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            control.state.update(latest_version="2.2.0", update_available=True, update_state="downloading")
+            control._stage("2.2.0")
+        self.assertEqual(control.snapshot()["update_state"], "downloading")
+        self.assertEqual(control.last_update_check, 0)
+        self.assertEqual(list(directory.glob("2.2.0-*")), [])
 
     def test_model_and_private_configuration_fields_are_independent(self):
         for name, model in (("codex", "account-model-a"), ("claude", "account-model-b")):

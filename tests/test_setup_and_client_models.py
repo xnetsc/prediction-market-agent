@@ -86,16 +86,19 @@ class ClientModelsTests(unittest.TestCase):
         with self.assertRaises(ValueError):normalize_models('codex',[{'model':'x','supportedReasoningEfforts':[{'reasoningEffort':3}]}])
 
     def test_protocol_initialization_and_pagination_never_send_prompt(self):
-        for client,lines in [('codex',[{'id':1,'result':{}},{'id':2,'result':{'data':[{'model':'one'}],'nextCursor':'next'}},{'id':3,'result':{'data':[{'model':'two'}],'nextCursor':None}}]),
+        for client,lines in [('codex',[{'id':1,'result':{}},{'id':2,'result':{'data':[{'model':'one'}],'nextCursor':'next'}},{'id':3,'result':{'data':[{'model':'two','hidden':True}],'nextCursor':None}}]),
                              ('claude',[{'type':'control_response','response':{'request_id':'model-catalog','subtype':'success','response':{'models':[{'value':'one'}]}}}])]:
             with self.subTest(client=client):
                 process=SimpleNamespace(stdin=io.StringIO(),stdout=io.StringIO(''.join(json.dumps(line)+'\n' for line in lines)))
                 values=ClientModelCatalog(client,None)._read(process)
                 self.assertTrue(values)
+                if client=='codex':self.assertEqual([item['value'] for item in values],['one','two'])
                 sent=[json.loads(line) for line in process.stdin.getvalue().splitlines()]
                 self.assertNotIn('turn/start',process.stdin.getvalue())
                 self.assertNotIn('"type": "user"',process.stdin.getvalue())
-                if client=='codex':self.assertEqual(sent[-1]['params']['cursor'],'next')
+                if client=='codex':
+                    self.assertEqual(sent[-1]['params']['cursor'],'next')
+                    self.assertTrue(all(item['params']['includeHidden'] for item in sent if item.get('method')=='model/list'))
 
     def test_model_list_errors_do_not_expose_private_paths_or_tokens(self):
         control=SimpleNamespace(executable=lambda:'/not/installed',environment=lambda:{})

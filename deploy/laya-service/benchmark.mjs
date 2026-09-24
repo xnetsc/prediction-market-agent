@@ -19,13 +19,13 @@ export const BENCHMARK_QUESTIONS = {
   evidence_benchmark: { type: 'noul', instructions: 'The supplied facts are enough to prioritize without another read.' },
 };
 
-export function createBenchmark({ exclusive, sample, now = () => Date.now(), intervalMs = 300000 }) {
+export function createBenchmark({ exclusive, sample, now = () => Date.now() }) {
   if (typeof exclusive !== 'function' || typeof sample !== 'function') {
     throw new TypeError('benchmark requires an exclusive queue and sample function');
   }
-  let current = { status: 'not_run', active: false, interval_seconds: intervalMs / 1000 };
+  let current = { status: 'not_run', active: false };
   let running = null;
-  let timer = null;
+  let started = false;
   const snapshot = () => ({ ...current });
   const median = (values) => {
     const sorted = [...values].sort((a, b) => a - b);
@@ -68,15 +68,13 @@ export function createBenchmark({ exclusive, sample, now = () => Date.now(), int
   }
 
   function start() {
-    if (timer) return;
+    if (started) return;
+    started = true;
     trigger();
-    timer = setInterval(trigger, intervalMs);
-    timer.unref?.();
   }
 
   function stop() {
-    if (timer) clearInterval(timer);
-    timer = null;
+    started = false;
   }
 
   return { snapshot, trigger, start, stop, wait: () => running || Promise.resolve() };

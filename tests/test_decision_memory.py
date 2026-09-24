@@ -1,3 +1,4 @@
+import time
 from ._support import *
 
 class DecisionAndMemoryTests(unittest.TestCase):
@@ -280,3 +281,48 @@ class DecisionAndMemoryTests(unittest.TestCase):
             self.assertEqual(first["items"][0]["assessment"]["confidence"], 0.91)
             self.assertEqual(second["total"], 2)
             self.assertEqual(len(second["items"]), 1)
+
+    def test_background_screenings_appear_before_older_collection_verdicts(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            cfg = Config(session_db=root / "sessions.sqlite3")
+            memory = SessionMemory(cfg.session_db)
+            memory.record_topic_observations(platform="venue", observations=[
+                {"market_topic_id": "legacy", "title": "Older collection", "status": "OPEN",
+                 "features": {"typed_evaluation": {"action": "DEFER"}}},
+            ])
+            seen_at = int(time.time() * 1000) + 1000
+            for index in range(2):
+                candidate_id = f"new-{index}"
+                memory.queue_market_screening(
+                    platform="venue", observed_at=seen_at + index,
+                    candidates=[{"candidate_id": candidate_id, "topic_id": "topic",
+                                 "market_id": f"market-{index}", "title": f"Fresh {index}",
+                                 "status": "OPEN", "liquidity_usdt": 100 + index}],
+                )
+                memory.complete_market_screening(
+                    platform="venue", candidate_id=candidate_id,
+                    assessment={"action": "PRIORITIZE", "evaluator_name": "laya"},
+                    now_ms=seen_at + index,
+                )
+            memory.queue_market_screening(
+                platform="venue", candidates=[{"candidate_id": "pending", "topic_id": "topic",
+                                               "title": "Not evaluated"}],
+            )
+            memory.close()
+            data = AuditData(cfg)
+            try:
+                first = data.evaluator_screenings("venue", limit=2)
+                second = data.evaluator_screenings("venue", limit=2, offset=2)
+                other = data.evaluator_screenings("other")
+            finally:
+                data.management.shutdown()
+            self.assertEqual(first["total"], 3)
+            self.assertEqual([row["title"] for row in first["items"]], ["Fresh 1", "Fresh 0"])
+            self.assertEqual([row["source"] for row in first["items"]], ["queue", "queue"])
+            self.assertEqual(first["items"][0]["recorded_at"], seen_at + 1)
+            self.assertEqual(first["items"][0]["market_id"], "market-1")
+            self.assertEqual(first["items"][0]["assessment"]["evaluator_name"], "laya")
+            self.assertEqual([row["title"] for row in second["items"]], ["Older collection"])
+            self.assertEqual(second["items"][0]["source"], "observation")
+            self.assertEqual(other["total"], 0)

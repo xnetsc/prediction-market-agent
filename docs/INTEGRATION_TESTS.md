@@ -33,6 +33,10 @@ PYTHONPATH=src .venv/bin/python -m pytest -q --ignore=tests/test_api_integration
 
 2026-09-24 将测速调度迁至 Laya 服务后，确定性回归为 `780 passed, 261 subtests passed`，2 条第三方弃用警告；Node 队列与 SDK 测试 7 项通过。服务启动测速、定时测速、手动触发、已有推理先完成、测速整组独占及失败后释放队列均有测试；宿主 WebGPU 实测 `/health.benchmark` 返回三样本中位 305ms，手动触发时新推理收到 429、`Retry-After: 1` 和 `benchmark.status: running`。机器人不再发起测速样本。
 
+之后按使用反馈取消了 Laya 服务的周期测速；上段“定时测速”是当时版本的历史测试结果，不代表当前行为。当前仅启动自动测一次，`POST /benchmark` 仍可手动触发。
+
+同轮修复粗筛明细只读旧采集快照的缺口：持久逐市场队列的最新结果与旧观察记录合并分页，来源和时间含义各自标清。确定性回归 `789 passed, 262 subtests passed`、Node 7 项和 390/768/1440px 浏览器验收通过；现场只读浏览器首行是新 Laya 评估。生产 Binance 联网测试仍因 HTTP 451 不计入上述确定性结果。
+
 完整 `pytest` 默认包含生产联网测试，因此在 Binance 受限网络中会保留真实失败，而不是显示全绿。需要只看
 确定性回归时必须显式使用上面的 `--ignore`，不要给联网用例添加 skip。
 

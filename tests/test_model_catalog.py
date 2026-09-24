@@ -300,6 +300,12 @@ class ModelCatalogTests(unittest.TestCase):
 
     def test_codex_agent_keeps_cli_tooling_and_uses_transparent_responses_proxy(self):
         seen = {}
+        official_home = self.root / "codex-auth" / ".codex"
+        official_home.mkdir(parents=True)
+        (official_home / "models_cache.json").write_text('{"models":[{"slug":"official"}]}')
+        (official_home / "auth.json").write_text("fixture-auth")
+        (official_home / "config.toml").write_text("fixture-config")
+        (official_home / "skills").mkdir()
 
         def run(command, **kwargs):
             # Patching subprocess.run changes the shared module object, so an unrelated background
@@ -307,6 +313,9 @@ class ModelCatalogTests(unittest.TestCase):
             # CLI invocation this test owns.
             if "--output-last-message" in command:
                 seen.update(command=command, kwargs=kwargs)
+                Path(kwargs["env"]["CODEX_HOME"], "models_cache.json").write_text(
+                    '{"models":[{"slug":"vendor/model-a"}]}'
+                )
                 output = Path(command[command.index("--output-last-message") + 1])
                 output.write_text('{"answer":"ok"}', encoding="utf-8")
             return subprocess.CompletedProcess(command, 0, "", "")
@@ -358,8 +367,20 @@ class ModelCatalogTests(unittest.TestCase):
         )
         self.assertEqual(
             seen["kwargs"]["env"].get("CODEX_HOME"),
-            str((self.root / "codex-auth" / ".codex").resolve()),
+            str((self.root / "codex-auth" / ".codex-openrouter").resolve()),
         )
+        bridge_home = Path(seen["kwargs"]["env"]["CODEX_HOME"])
+        self.assertEqual(
+            json.loads((official_home / "models_cache.json").read_text())["models"][0]["slug"],
+            "official",
+        )
+        self.assertEqual(
+            json.loads((bridge_home / "models_cache.json").read_text())["models"][0]["slug"],
+            "vendor/model-a",
+        )
+        self.assertEqual((bridge_home / "auth.json").resolve(), (official_home / "auth.json").resolve())
+        self.assertEqual((bridge_home / "config.toml").resolve(), (official_home / "config.toml").resolve())
+        self.assertEqual((bridge_home / "skills").resolve(), (official_home / "skills").resolve())
 
     def test_auto_agent_falls_back_to_claude_and_preserves_cli_configuration(self):
         seen = {}

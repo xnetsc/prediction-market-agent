@@ -270,10 +270,10 @@ function renderEvaluatorScreenings(){
     const host=document.getElementById('evaluatorScreenings');if(!host)return;
     if(!SCREENING_ROWS.length){host.innerHTML='<div class="empty-state"><strong>没有保存的评估器粗筛记录</strong><p>候选可能未经过评估器，或模型调用尚未返回；请查看上方采集异常。</p></div>';return}
     const confidence=value=>value!==null&&value!==undefined&&value!==''&&Number.isFinite(Number(value))?Math.round(Number(value)*100)+'%':'—';
-    host.innerHTML='<p class="muted">已显示 '+SCREENING_ROWS.length+' / '+SCREENING_TOTAL+' 条；按采集时间由新到旧。</p>'
+    host.innerHTML='<p class="muted">已显示 '+SCREENING_ROWS.length+' / '+SCREENING_TOTAL+' 条；按记录时间由新到旧。后台粗筛按完成时间显示，旧采集记录按采集时间显示。</p>'
         +table(SCREENING_ROWS,[
-            ['采集时间 / 平台',row=>esc(new Date(row.observed_at).toLocaleString())+'<br>'+esc(row.platform)],
-            ['候选',row=>'<strong>'+esc(row.title)+'</strong><br><span class="muted">'+esc(row.market_topic_id)+'</span>'],
+            ['记录时间 / 平台',row=>esc(new Date(row.recorded_at??row.observed_at).toLocaleString())+'<br>'+esc(row.platform)+' · '+(row.source==='queue'?'粗筛完成':'采集附带')],
+            ['候选',row=>'<strong>'+esc(row.title)+'</strong><br><span class="muted">'+esc(row.market_topic_id)+(row.market_id?' / '+esc(row.market_id):'')+'</span>'],
             ['评估器 / 服务',row=>esc(row.assessment.evaluator_name||'未记录')+' / '+esc(row.assessment.provider||'未记录')],
             ['粗筛结论',row=>esc(DISCOVERY_ACTION_LABELS[row.assessment.action]||row.assessment.action||'未知')],
             ['质量 / 置信度',row=>esc(row.assessment.quality??'—')+' / '+confidence(row.assessment.confidence)],
@@ -502,7 +502,8 @@ function renderServiceConnections(){
             for(const [value,label] of [['auto','自动选择（'+(preferredLoginMethod()==='remote'?'设备码 / 验证码':'本机网页回调')+'）'],['local','本机网页回调'],['remote','设备码 / 验证码']]){const option=controlNode('option',label,select);option.value=value}
             select.value=LOGIN_METHODS.get(name)||'auto';select.onchange=()=>LOGIN_METHODS.set(name,select.value);
             controlNode('p',s.message||'',more).className='description';
-            controlNode('p','客户端版本：'+(s.installed_version||'未检测')+' · '+(s.update_available?'有新版可升级':s.update_message||'尚未检查更新'),more).className='description';
+            const updateText=s.update_message||(s.update_available?'有新版待准备':'尚未检查更新');
+            controlNode('p','客户端版本：'+(s.installed_version||'未检测')+(s.latest_version?' · 最新：'+s.latest_version:'')+' · '+updateText+(s.update_state==='downloading'?'；完成后刷新本页确认升级':''),more).className='description';
             if(s.update_checked_at)controlNode('p','最近检查：'+new Date(s.update_checked_at*1000).toLocaleString(),more).className='description';
             const diagnostics=controlNode('details','',more);diagnostics.className='diagnostic-detail';controlNode('summary','连接技术信息',diagnostics);controlNode('p',s.proxy_message||'未提供连接信息',diagnostics);
             const maintenance=controlNode('div','',more);maintenance.className='toolbar';

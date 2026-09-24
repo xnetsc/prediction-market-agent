@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import base64
 import json
+import logging
 import os
 import re
 import shutil
@@ -54,6 +55,8 @@ USAGE_TIMEOUT_SECONDS = 45
 CLAUDE_USAGE_URL = "https://api.anthropic.com/api/oauth/usage"
 """Claude Code's account-usage service; credentials still remain owned by the client plugin."""
 
+LOGGER = logging.getLogger(__name__)
+
 def client_configuration_loader(load, prefix: str):
     """Read pre-script configurations without altering credentials or private files."""
     def load_without_retired_helper_directory():
@@ -77,8 +80,8 @@ def client_fields(prefix: str) -> tuple[PluginConfigField, ...]:
         PluginConfigField(f"{prefix}_CLIENT_DIRECTORY", "客户端升级目录", "string",
                           "保存版本化安装及当前版本指针；相对工作目录解析，不覆盖镜像自带客户端。",
                           default=f"clients/{prefix.lower()}"),
-        PluginConfigField(f"{prefix}_CHECK_UPDATES", "自动检查新版", "boolean",
-                          "后台只检查官方 npm 最新版本，不自动安装；升级必须在界面点击。", default=True),
+        PluginConfigField(f"{prefix}_CHECK_UPDATES", "自动预下载新版", "boolean",
+                          "后台检查官方 npm 并预下载、验证新版；只有在界面确认升级后才切换使用。", default=True),
         PluginConfigField(f"{prefix}_UPDATE_CHECK_SECONDS", "检查新版间隔（秒）", "integer",
                           "后台版本检查间隔，至少 60 秒；默认六小时。", default=21600),
         PluginConfigField(f"{prefix}_LOGIN_TIMEOUT_SECONDS", "登录等待期限（秒）", "integer",
@@ -105,6 +108,7 @@ class ClientControl:
         self.install_process: subprocess.Popen | None = None
         self.login_thread: threading.Thread | None = None
         self.update_thread: threading.Thread | None = None
+        self.update_lock = threading.Lock()
         self.monitor: threading.Thread | None = None
         self.state: dict[str, Any] = {"state": "checking", "message": "正在检查客户端登录状态",
                                       "installed_version": "", "latest_version": "",
@@ -265,8 +269,8 @@ class ClientControl:
                  "fields": [{"name": "bundle", "label": "选择凭据文件", "type": "file",
                              "description": "须是本机器人导出的同一客户端文件；导入会覆盖当前登录状态。"}],
                  "confirm": "用文件中的凭据覆盖当前登录状态？"},
-                {"id": "upgrade", "label": "升级客户端", "disabled": not value["update_available"] or value["update_state"] == "installing",
-                 "confirm": "安装官方最新客户端？成功后用于后续请求，已有请求继续使用旧版本。"},
+                {"id": "upgrade", "label": "升级客户端", "disabled": not value["update_available"] or value["update_state"] != "ready",
+                 "confirm": "切换到已下载并验证的官方新版客户端？后续请求使用新版，已有请求继续使用旧版本。"},
             ]
             return value
 
@@ -742,8 +746,10 @@ class ClientControl:
             self.update_thread.start()
 
     def check_update(self) -> None:
-        self.last_update_check = time.time()
+        if not self.update_lock.acquire(blocking=False):
+            return
         try:
+            self.last_update_check = time.time()
             settings = self.proxy_settings()
             proxy = settings["proxy"]
             if urllib.request.proxy_bypass_environment("registry.npmjs.org", {"no": settings["no_proxy"]}):
@@ -755,28 +761,167 @@ class ClientControl:
                 raise ValueError("Unexpected stable package version")
             with self.lock:
                 installed = self.state["installed_version"]
-                newer = not installed or tuple(map(int, version.split('.'))) > tuple(map(int, installed.split('-')[0].split('.')))
+                newer = self._newer(version, installed)
                 self.state.update(latest_version=version, update_available=newer,
-                                  update_checked_at=time.time(), update_message="发现新版，可点击升级" if newer else "已是最新版本")
+                                  update_checked_at=time.time())
+                if not newer:
+                    self.state.update(update_state="idle", update_message="已是最新版本")
+            if newer:
+                staged = self._staged_entry()
+                if staged and staged[0] == version:
+                    with self.lock:
+                        self.state.update(update_state="ready", update_message="新版已下载并验证，确认后立即切换")
+                else:
+                    with self.lock:
+                        self.state.update(update_state="downloading", update_message="正在后台下载并验证新版；当前客户端继续可用")
+                    self._stage(version)
         except (OSError, ValueError, KeyError, TypeError):
+            staged = self._staged_entry()
             with self.lock:
-                self.state.update(update_message="版本检查失败，请检查代理或稍后重试", update_checked_at=time.time())
+                installed = self.state["installed_version"]
+                if staged and self._newer(staged[0], installed):
+                    self.state.update(latest_version=staged[0], update_available=True,
+                                      update_state="ready", update_message="网络检查失败；已下载的新版仍可确认升级")
+                else:
+                    self.state.update(update_message="版本检查失败，请检查代理或稍后重试")
+                self.state["update_checked_at"] = time.time()
+        finally:
+            self.update_lock.release()
+
+    @staticmethod
+    def _newer(version: str, installed: str) -> bool:
+        return not installed or tuple(map(int, version.split('.'))) > tuple(map(int, installed.split('-')[0].split('.')))
+
+    def _managed_entry(self, filename: str) -> tuple[str, Path] | None:
+        root = self.directory("CLIENT").resolve()
+        try:
+            item = json.loads((root / filename).read_text(encoding="utf-8"))
+            relative = Path(item["executable"])
+            version = str(item.get("version") or relative.parts[0].split("-", 1)[0])
+            executable = root / relative
+            if (relative.is_absolute() or ".." in relative.parts
+                    or not re.fullmatch(r"\d+\.\d+\.\d+", version)
+                    or root not in executable.resolve().parents
+                    or not executable.is_file()):
+                return None
+            return version, executable
+        except (OSError, ValueError, KeyError, TypeError, IndexError):
+            return None
+
+    def _staged_entry(self) -> tuple[str, Path] | None:
+        return self._managed_entry("staged.json")
+
+    def _cleanup_incomplete_versions(self) -> None:
+        """Discard unreferenced installs that cannot execute their claimed version."""
+        root = self.directory("CLIENT").resolve()
+        if not root.is_dir():
+            return
+        protected = set()
+        for pointer in ("active.json", "staged.json"):
+            entry = self._managed_entry(pointer)
+            if entry:
+                protected.add(entry[1].relative_to(root).parts[0])
+        for directory in root.iterdir():
+            if (directory.name in protected or directory.is_symlink() or not directory.is_dir()
+                    or not re.fullmatch(r"\d+\.\d+\.\d+-[0-9a-f]{12}", directory.name)):
+                continue
+            executable = directory / "node_modules" / ".bin" / self.name
+            try:
+                result = subprocess.run([str(executable), "--version"], env=self.environment(),
+                                        capture_output=True, text=True, timeout=5, check=False)
+                if result.returncode == 0 and self._version(result.stdout) == directory.name.split("-", 1)[0]:
+                    continue
+            except (OSError, subprocess.SubprocessError):
+                pass
+            try:
+                shutil.rmtree(directory)
+            except OSError:
+                LOGGER.warning("could not remove incomplete %s client download %s", self.name, directory.name)
+
+    def _prefetch_lock_path(self, root: Path) -> Path:
+        """Use the same mount alias for every controller in one Docker container."""
+        data = Path("/data")
+        if data.is_dir():
+            candidates = [data / "clients" / self.name]
+            try:
+                candidates.insert(0, data / root.relative_to(self.root.resolve()))
+            except (OSError, ValueError):
+                pass
+            for canonical in candidates:
+                try:
+                    if canonical.is_dir() and os.path.samefile(root, canonical):
+                        return canonical / ".prefetch.lock"
+                except OSError:
+                    continue
+        return root / ".prefetch.lock"
+
+    def _prune_versions(self, *kept: Path) -> None:
+        """Remove only obsolete version directories created by this plugin."""
+        root = self.directory("CLIENT").resolve()
+        if not root.is_dir():
+            return
+        keep_names = set()
+        for executable in kept:
+            try:
+                relative = executable.relative_to(root)
+            except ValueError:
+                continue
+            if relative.parts:
+                keep_names.add(relative.parts[0])
+        for directory in root.iterdir():
+            if (directory.name in keep_names or directory.is_symlink() or not directory.is_dir()
+                    or not re.fullmatch(r"\d+\.\d+\.\d+-[0-9a-f]{12}", directory.name)):
+                continue
+            try:
+                shutil.rmtree(directory)
+            except OSError:
+                LOGGER.warning("could not remove obsolete %s client version %s", self.name, directory.name)
 
     def upgrade(self) -> None:
-        with self.lock:
-            if self.update_thread and self.update_thread.is_alive():
-                raise ValueError("版本检查或升级正在进行")
-            version = self.state["latest_version"]
-            if not self.state["update_available"] or not re.fullmatch(r"\d+\.\d+\.\d+", version):
-                raise ValueError("请先检查新版")
-            self.state.update(update_state="installing", update_message="正在安装并验证新版，旧版仍可用")
-            self.update_thread = threading.Thread(target=self._install, args=(version,), daemon=True)
-            self.update_thread.start()
+        if not self.update_lock.acquire(blocking=False):
+            raise ValueError("新版仍在检查或下载，请稍后确认升级")
+        try:
+            with self.lock:
+                version = self.state["latest_version"]
+                ready = self.state["update_available"] and self.state["update_state"] == "ready"
+            staged = self._staged_entry()
+            if not ready or staged is None or staged[0] != version:
+                raise ValueError("新版尚未下载并验证，请先检查新版")
+            root = self.directory("CLIENT")
+            previous = self._managed_entry("active.json")
+            atomic_write_text(root / "active.json", json.dumps({"executable": str(staged[1].relative_to(root))}))
+            (root / "staged.json").unlink(missing_ok=True)
+            with self.lock:
+                self.state.update(installed_version=version, update_state="idle", update_available=False,
+                                  update_message="升级成功，后续请求使用新版")
+            self._prune_versions(staged[1], *([previous[1]] if previous else []))
+        finally:
+            self.update_lock.release()
 
-    def _install(self, version: str) -> None:
+    def _stage(self, version: str) -> None:
         process = None
+        target = None
+        succeeded = False
+        lock_file = None
         try:
             root = self.directory("CLIENT")
+            root.mkdir(parents=True, exist_ok=True)
+            if os.name == "posix":
+                import fcntl
+                lock_file = self._prefetch_lock_path(root).open("a+")
+                try:
+                    fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                except BlockingIOError:
+                    with self.lock:
+                        self.state.update(update_state="downloading", update_message="另一个实例正在预下载新版；稍后读取已验证结果")
+                    self.last_update_check = 0
+                    return
+            self._cleanup_incomplete_versions()
+            staged = self._staged_entry()
+            if staged and staged[0] == version:
+                with self.lock:
+                    self.state.update(update_state="ready", update_message="新版已下载并验证，确认后立即切换")
+                return
             target = root / f"{version}-{uuid.uuid4().hex[:12]}"
             target.mkdir(parents=True, mode=0o700)
             env = self.environment()
@@ -792,7 +937,10 @@ class ClientControl:
                                            env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                                            start_new_session=True)
                 self.install_process = process
-            process.wait(timeout=300)
+            # Platform binaries can exceed 300 MB unpacked. This runs only in the
+            # background prefetch lane, so a slower download must not turn a valid
+            # release into a false failure or delay a settings-save request.
+            process.wait(timeout=900)
             if process.returncode:
                 raise ValueError("Package install failed")
             executable = target / "node_modules" / ".bin" / self.name
@@ -802,18 +950,30 @@ class ClientControl:
                 raise ValueError("Installed version verification failed")
             if self.stop.is_set():
                 return
-            atomic_write_text(root / "active.json", json.dumps({"executable": str(executable.relative_to(root))}))
+            atomic_write_text(root / "staged.json", json.dumps({"version": version, "executable": str(executable.relative_to(root))}))
             with self.lock:
-                self.state.update(installed_version=version, update_state="idle", update_available=False,
-                                  update_message="升级成功，后续请求使用新版")
+                self.state.update(update_state="ready", update_message="新版已下载并验证，确认后立即切换")
+            active = self._managed_entry("active.json")
+            self._prune_versions(executable, *([active[1]] if active else []))
+            succeeded = True
+        except subprocess.TimeoutExpired:
+            with self.lock:
+                self.state.update(update_state="failed", update_message="预下载超时，旧版本保留；未完成的下载将清理，请检查 npm 网络或代理后重试")
         except (OSError, ValueError, subprocess.SubprocessError):
             with self.lock:
-                self.state.update(update_state="failed", update_message="升级失败，旧版本保留；请检查代理、磁盘空间和 npm 后重试")
+                self.state.update(update_state="failed", update_message="预下载失败，旧版本保留；请检查代理、磁盘空间和 npm 后重试")
         finally:
             if process and process.poll() is None:
                 self._kill_install(process)
             with self.lock:
                 self.install_process = None
+            if target is not None and not succeeded:
+                try:
+                    shutil.rmtree(target)
+                except OSError:
+                    LOGGER.warning("could not remove failed %s client download %s", self.name, target.name)
+            if lock_file is not None:
+                lock_file.close()
 
     @staticmethod
     def _kill_install(process: subprocess.Popen) -> None:

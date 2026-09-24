@@ -84,22 +84,23 @@ test('failed benchmark publishes failure and releases inference gate', async () 
   assert.equal(await exclusive(async () => 'recovered'), 'recovered');
 });
 
-test('service benchmark runs at startup and repeats on its interval without overlap', async () => {
+test('service benchmark runs at startup once and only repeats when manually triggered', async () => {
   const exclusive = createGpuQueue();
   let calls = 0;
-  const benchmark = createBenchmark({ exclusive, intervalMs: 20, sample: async () => {
+  const benchmark = createBenchmark({ exclusive, sample: async () => {
     calls += 1;
   } });
   benchmark.start();
   await benchmark.wait();
   assert.equal(calls, 4);
-  const deadline = Date.now() + 300;
-  while (calls < 8 && Date.now() < deadline) {
-    await new Promise((resolve) => setTimeout(resolve, 5));
-  }
-  benchmark.stop();
+  await new Promise((resolve) => setTimeout(resolve, 60));
+  assert.equal(calls, 4);
+  benchmark.start();
+  assert.equal(calls, 4);
+  assert.equal(benchmark.trigger().accepted, true);
   await benchmark.wait();
-  assert.ok(calls >= 8);
-  assert.equal(calls % 4, 0);
+  benchmark.stop();
+  assert.equal(calls, 8);
   assert.equal(benchmark.snapshot().status, 'ok');
+  assert.equal('interval_seconds' in benchmark.snapshot(), false);
 });
