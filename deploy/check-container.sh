@@ -16,6 +16,20 @@ docker exec "$container_id" prediction-market-agent --help >/dev/null
 docker exec "$container_id" codex --version
 docker exec "$container_id" claude --version
 docker exec "$container_id" npm --version
+if [ -n "${CODEX_CLI_VERSION:-}" ]; then
+    actual=$(docker exec "$container_id" node -p 'require("/usr/local/lib/node_modules/@openai/codex/package.json").version')
+    [ "$actual" = "$CODEX_CLI_VERSION" ] || {
+        echo "Codex CLI image version mismatch: expected $CODEX_CLI_VERSION, got $actual" >&2
+        exit 1
+    }
+fi
+if [ -n "${CLAUDE_CLI_VERSION:-}" ]; then
+    actual=$(docker exec "$container_id" node -p 'require("/usr/local/lib/node_modules/@anthropic-ai/claude-code/package.json").version')
+    [ "$actual" = "$CLAUDE_CLI_VERSION" ] || {
+        echo "Claude CLI image version mismatch: expected $CLAUDE_CLI_VERSION, got $actual" >&2
+        exit 1
+    }
+fi
 docker exec -i "$container_id" python - <<'PY'
 import json
 import io

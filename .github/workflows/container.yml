@@ -46,11 +46,26 @@ jobs:
   publish:
     needs: login-helpers
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3
       - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+      - name: Resolve current official CLI releases
+        id: clients
+        shell: bash
+        run: |
+          set -euo pipefail
+          codex="$(npm view @openai/codex dist-tags.latest --registry=https://registry.npmjs.org)"
+          claude="$(npm view @anthropic-ai/claude-code dist-tags.latest --registry=https://registry.npmjs.org)"
+          for version in "$codex" "$claude"; do
+            if [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+              echo "Unexpected stable CLI version: $version" >&2
+              exit 1
+            fi
+          done
+          echo "codex=$codex" >> "$GITHUB_OUTPUT"
+          echo "claude=$claude" >> "$GITHUB_OUTPUT"
       - name: Image name
         id: image
         env:
@@ -78,8 +93,14 @@ jobs:
           context: .
           load: true
           tags: prediction-agent:check
+          build-args: |
+            CODEX_CLI_VERSION=${{ steps.clients.outputs.codex }}
+            CLAUDE_CLI_VERSION=${{ steps.clients.outputs.claude }}
           cache-from: type=gha
       - name: Verify container application and both access paths
+        env:
+          CODEX_CLI_VERSION: ${{ steps.clients.outputs.codex }}
+          CLAUDE_CLI_VERSION: ${{ steps.clients.outputs.claude }}
         run: sh deploy/check-container.sh prediction-agent:check
       - name: Publish amd64 and arm64 images
         uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
@@ -89,5 +110,8 @@ jobs:
           push: true
           tags: ${{ steps.metadata.outputs.tags }}
           labels: ${{ steps.metadata.outputs.labels }}
+          build-args: |
+            CODEX_CLI_VERSION=${{ steps.clients.outputs.codex }}
+            CLAUDE_CLI_VERSION=${{ steps.clients.outputs.claude }}
           cache-from: type=gha
           cache-to: type=gha,mode=max

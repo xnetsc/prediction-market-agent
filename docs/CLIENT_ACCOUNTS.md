@@ -209,6 +209,10 @@ AES-256-CBC + HMAC-SHA256 Encrypt-then-MAC，独立加密/认证子密钥，校�
 
 ## 模型、代理和升级
 
+GitHub Actions 构建发布镜像前会从官方 npm registry 解析 Codex 与 Claude Code 的当时最新稳定版，
+并以精确版本构建和校验镜像；运行中的客户端升级则由下面的插件预下载与确认流程管理，
+两者不共享登录凭据，也不会把 `clients/` 或 `credentials/` 放进镜像。
+
 三个 Provider 各自设置模型与代理使用方式。CLI 模型留空使用客户端默认；OpenRouter 要选择模型 ID。一旦保存，
 调用会原样传入用户选项，不根据可用性暗中换模型。Provider 间的故障转移也只使用各自已保存的选择。
 Codex/Claude 默认 `INHERIT`，跟随程序设置中的统一代理；手动 DIRECT/URL 优先。统一代理默认 HOST，

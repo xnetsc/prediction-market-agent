@@ -1,5 +1,8 @@
 FROM node:22-bookworm-slim AS clients
-RUN npm install --global @openai/codex @anthropic-ai/claude-code && npm cache clean --force
+ARG CODEX_CLI_VERSION=latest
+ARG CLAUDE_CLI_VERSION=latest
+RUN npm install --global "@openai/codex@${CODEX_CLI_VERSION}" "@anthropic-ai/claude-code@${CLAUDE_CLI_VERSION}" \
+    && npm cache clean --force
 
 FROM python:3.13-slim-bookworm
 LABEL org.opencontainers.image.source="https://github.com/xnetsc/prediction-market-agent"

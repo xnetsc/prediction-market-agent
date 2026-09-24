@@ -108,6 +108,11 @@ drop-in、Desktop 设置）都要改配置并重启一个你可能与别的工�
 
 `.github/workflows/container.yml` 在每次 push（所有分支和标签）或手动触发时执行：构建最终安装态镜像，
 启动隔离容器验证 CLI、Web 健康、回环明文访问及公网认证，然后发布 `linux/amd64` 与 `linux/arm64`。
+每次运行先向官方 npm registry 读取 Codex 与 Claude Code 的稳定版 `latest` 版本号，并将同一对精确版本传给
+验证构建和双架构发布构建；版本变化会使 Docker 的客户端安装层失效，避免复用旧缓存。容器冒烟还会核对
+镜像内实际安装版本。registry 无法查询或返回非稳定版时，发布失败，不悄悄沿用旧镜像。直接本地构建
+Dockerfile 时可传 `--build-arg CODEX_CLI_VERSION=<版本>` 和 `CLAUDE_CLI_VERSION=<版本>` 固定版本；
+未传时 Dockerfile 安装构建当时的 `latest`，但本地 Docker 缓存可能复用先前安装层。
 默认镜像名 `ghcr.io/xnetsc/prediction-market-agent`；默认分支更新 `latest`，每次提交发布 `sha-<完整提交号>`，
 分支和 Git 标签也有对应镜像标签。发布使用工作流自带 `GITHUB_TOKEN` 的 `packages: write` 权限，无需保存 PAT。
 实现依据 [GitHub 镜像发布文档](https://docs.github.com/en/actions/tutorials/publish-packages/publish-docker-images)。
