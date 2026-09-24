@@ -3,8 +3,6 @@
 from __future__ import annotations
 
 import json
-import logging
-import statistics
 import threading
 import time
 import urllib.error
@@ -35,7 +33,6 @@ from prediction_market_agent.plugins.evaluators.jev import (
 
 MODEL = "convaiinnovations/laya"
 DEFAULT_ENDPOINT = "http://host.proxy.internal:8899/v1"
-LOG = logging.getLogger(__name__)
 
 
 class LayaDecisionEvaluator(SchemaDecisionEvaluator):
@@ -46,7 +43,7 @@ class LayaDecisionEvaluator(SchemaDecisionEvaluator):
 
     def __init__(
         self, endpoint: str, proxy: str, timeout: int, *, queue_wait_seconds: int = 120,
-        max_questions: int = 6, benchmark_interval_seconds: int = 300,
+        max_questions: int = 6,
     ) -> None:
         super().__init__(
             api_key="",
@@ -59,51 +56,38 @@ class LayaDecisionEvaluator(SchemaDecisionEvaluator):
             protocol="chat_json",
             allow_http=True,
         )
+        self.health_endpoint = _health_url(endpoint)
         self.queue_wait_seconds = max(1, int(queue_wait_seconds))
         self.max_questions = max(1, int(max_questions))
         self._queue = deque()
         self._queue_condition = threading.Condition()
         self._active = False
         self._closed = False
-        self._stop_benchmarks = threading.Event()
-        self._benchmark_thread: threading.Thread | None = None
-        self.benchmark_interval_seconds = max(60, int(benchmark_interval_seconds))
-        self._benchmark_status: dict[str, Any] = {"status": "not_run"}
 
     @property
     def benchmark_status(self) -> dict[str, Any]:
-        with self._queue_condition:
-            return dict(self._benchmark_status)
-
-    def start_benchmarks(self) -> None:
-        """Measure once before serving traffic, then every configured interval."""
-        with self._queue_condition:
-            if self._benchmark_thread is not None or self._closed:
-                return
-        self.run_benchmark()
-        with self._queue_condition:
-            if self._closed:
-                return
-            self._benchmark_thread = threading.Thread(
-                target=self._benchmark_loop, name="laya-benchmark", daemon=True,
+        """Read the service-owned benchmark; never perform inference from the robot."""
+        try:
+            request = urllib.request.Request(
+                self.health_endpoint, headers={"Accept": "application/json"}
             )
-            self._benchmark_thread.start()
+            with _opener(self.proxy).open(request, timeout=2) as response:
+                payload = json.loads(response.read(64 * 1024))
+            benchmark = payload.get("benchmark") if isinstance(payload, dict) else None
+            if isinstance(benchmark, dict) and isinstance(benchmark.get("status"), str):
+                return benchmark
+            return {"status": "unavailable", "error": "Laya 服务未返回测速状态"}
+        except (urllib.error.URLError, OSError, ValueError) as error:
+            return {"status": "unavailable", "error": str(error)[:300]}
 
     def close(self) -> None:
         with self._queue_condition:
             self._closed = True
             self._queue_condition.notify_all()
-        self._stop_benchmarks.set()
-
-    def _benchmark_loop(self) -> None:
-        while not self._stop_benchmarks.wait(self.benchmark_interval_seconds):
-            if self._stop_benchmarks.is_set():
-                return
-            self.run_benchmark()
 
     @contextmanager
-    def _exclusive(self, *, deadline: float | None = None, benchmark: bool = False):
-        """FIFO gate shared by normal calls and the entire benchmark sample group."""
+    def _exclusive(self, *, deadline: float | None = None):
+        """FIFO gate for robot calls; service owns the GPU queue and its benchmark."""
         ticket = object()
         queue_deadline = time.monotonic() + self.queue_wait_seconds
         with self._queue_condition:
@@ -128,8 +112,6 @@ class LayaDecisionEvaluator(SchemaDecisionEvaluator):
                     raise DecisionEvaluatorError("Laya queue wait timed out; no GPU request was sent")
                 self._queue_condition.wait(remaining)
             self._active = True
-            if benchmark:
-                self._benchmark_status = {"status": "running", "started_at": time.time()}
         try:
             yield
         finally:
@@ -137,55 +119,6 @@ class LayaDecisionEvaluator(SchemaDecisionEvaluator):
                 self._active = False
                 self._queue.popleft()
                 self._queue_condition.notify_all()
-
-    def run_benchmark(self) -> dict[str, Any]:
-        """Warm up, then time three representative requests without interleaving traffic."""
-        state = {
-            "workflow": "candidate_evaluation",
-            "candidates": [{
-                "key": "benchmark", "question": "Will this market resolve YES by its deadline?",
-                "description": "Synthetic open prediction market; no trade or external side effects.",
-                "status": "OPEN", "liquidity_usdt": 12000, "volume_usdt": 45000,
-                "prices": [0.48, 0.52],
-            }],
-        }
-        questions = {
-            "route_benchmark": {"type": "choice", "criteria": {
-                "PRIORITIZE": "research now", "DEFER": "research later",
-                "NEEDS_DATA": "missing facts", "REJECT": "unusable",
-            }},
-            "quality_benchmark": {"type": "score", "criteria": {"min": 0, "max": 5}},
-            "series_benchmark": {"type": "noul"},
-            "evidence_benchmark": {"type": "noul"},
-        }
-        latencies: list[float] = []
-        result: dict[str, Any]
-        try:
-            with self._exclusive(benchmark=True):
-                for sample in range(4):
-                    if self._stop_benchmarks.is_set():
-                        raise DecisionEvaluatorError("Laya benchmark stopped")
-                    started = time.monotonic()
-                    # A hung GPU must not hold the plugin queue for the full normal-call timeout.
-                    timed_state = {**state, "_scan_deadline_monotonic": started + min(15, self.timeout)}
-                    SchemaDecisionEvaluator._evaluate(self, timed_state, questions)
-                    if sample:
-                        latencies.append((time.monotonic() - started) * 1000)
-                result = {
-                    "status": "ok", "measured_at": time.time(), "samples": len(latencies),
-                    "median_ms": round(statistics.median(latencies), 1),
-                    "max_ms": round(max(latencies), 1),
-                }
-                with self._queue_condition:
-                    self._benchmark_status = result
-        except Exception as error:
-            result = {"status": "failed", "measured_at": time.time(), "error": str(error)[:300]}
-            with self._queue_condition:
-                self._benchmark_status = result
-            LOG.warning("Laya benchmark failed: %s", error)
-        else:
-            LOG.info("Laya benchmark: median %.1f ms, max %.1f ms", result["median_ms"], result["max_ms"])
-        return dict(result)
 
     @staticmethod
     def _compact_state(state: Any) -> Any:
@@ -282,7 +215,7 @@ class LayaDecisionEvaluator(SchemaDecisionEvaluator):
             deadline = state.get("_scan_deadline_monotonic")
             if deadline is None and isinstance(state.get("run_state"), dict):
                 deadline = state["run_state"].get("_scan_deadline_monotonic")
-        # The same plugin-owned FIFO also holds the complete periodic benchmark.
+        # Service-owned benchmarks return HTTP 429; no local benchmark joins this queue.
         with self._exclusive(deadline=float(deadline) if deadline is not None else None):
             if deadline is not None and time.monotonic() >= float(deadline):
                 raise DecisionEvaluatorBudgetExhausted("scan ended before Laya request started")
@@ -366,11 +299,6 @@ def initialize_plugin(context: PluginInitializationContext) -> PluginSpec:
                 "Laya 插件内部一次只执行一个请求；超过等待时间会明确失败，不会悄悄丢弃候选。扫描总预算仍优先。",
                 required=True, default=120,
             ),
-            PluginConfigField(
-                "LAYA_BENCHMARK_INTERVAL_SECONDS", "测速间隔秒数", "integer",
-                "启动时先测一次，此后默认每 300 秒测一次。测速整组样本独占 Laya 队列，正常调用暂停排队；最小 60 秒。",
-                required=True, default=300,
-            ),
         ),
         load_callback=load, save_callback=save, delete_callback=delete, storage=storage,
     )
@@ -392,9 +320,7 @@ def initialize_plugin(context: PluginInitializationContext) -> PluginSpec:
         evaluator = LayaDecisionEvaluator(
             endpoint, proxy, timeout, queue_wait_seconds=queue_wait,
             max_questions=max_questions,
-            benchmark_interval_seconds=int(values.get("LAYA_BENCHMARK_INTERVAL_SECONDS", 300)),
         )
-        evaluator.start_benchmarks()
         instances.append(evaluator)
         return evaluator
 

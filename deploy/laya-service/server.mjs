@@ -23,6 +23,7 @@ import { spawn } from 'node:child_process';
 import { chromium } from 'playwright';
 import { syncWebtorch } from './sync-webtorch.mjs';
 import { createGpuQueue } from './gpu-queue.mjs';
+import { createBenchmark } from './benchmark.mjs';
 
 /* Node's own fetch ignores HTTPS_PROXY unless it is told not to, and it is told with an environment
  * variable read before any of this runs. On a machine that reaches the model host through a proxy -
@@ -210,6 +211,16 @@ async function serveStatic(request, response, url) {
 let page = null;
 let booted = null;
 const exclusive = createGpuQueue();
+const benchmark = createBenchmark({
+  exclusive,
+  sample: async (state, questions) => {
+    await browser();
+    const result = await page.evaluate(
+      (payload) => window.__laya.decide(payload), { state, questions },
+    );
+    shaped(result.answers, questions);
+  },
+});
 const SDK_CHECK_MS = 6 * 60 * 60 * 1000;
 
 async function refreshSdk() {
@@ -376,6 +387,19 @@ async function completions(request, response, body) {
   }));
 }
 
+function refuseDuringBenchmark(response) {
+  const status = benchmark.snapshot();
+  if (!status.active) return false;
+  response.writeHead(429, {
+    'Content-Type': 'application/json', 'Retry-After': '1',
+  }).end(JSON.stringify({
+    error: { code: 'benchmark_in_progress', type: 'laya_service',
+      message: `Laya benchmark is ${status.status}; inspect /health before retrying` },
+    benchmark: status,
+  }));
+  return true;
+}
+
 const server = createServer(async (request, response) => {
   const url = new URL(request.url, `http://127.0.0.1:${PORT}`);
   if (process.env.LAYA_TRACE) console.log('[req]', request.method, url.pathname);
@@ -383,7 +407,13 @@ const server = createServer(async (request, response) => {
     if (request.method === 'GET' && url.pathname === '/health') {
       const status = page ? await page.evaluate(() => window.__laya.status()) : { ready: false };
       response.writeHead(status.ready ? 200 : 503, { 'Content-Type': 'application/json' })
-        .end(JSON.stringify(status));
+        .end(JSON.stringify({ ...status, benchmark: benchmark.snapshot() }));
+      return;
+    }
+    if (request.method === 'POST' && url.pathname === '/benchmark') {
+      const result = benchmark.trigger();
+      response.writeHead(result.accepted ? 202 : 200, { 'Content-Type': 'application/json' })
+        .end(JSON.stringify(result));
       return;
     }
     if (request.method === 'GET' && /\/v1\/models$/.test(url.pathname)) {
@@ -398,9 +428,12 @@ const server = createServer(async (request, response) => {
       return;
     }
     if (request.method === 'POST' && /chat\/completions$/.test(url.pathname)) {
+      if (refuseDuringBenchmark(response)) return;
       const chunks = [];
       for await (const chunk of request) chunks.push(chunk);
       const body = JSON.parse(Buffer.concat(chunks).toString('utf8') || '{}');
+      // Reading the body yields to the event loop, so a benchmark may have started meanwhile.
+      if (refuseDuringBenchmark(response)) return;
       await exclusive(() => completions(request, response, body));
       return;
     }
@@ -434,6 +467,7 @@ server.listen(PORT, HOST, async () => {
     catch (error) { console.error('GitHub SDK 更新检查失败，继续使用已打包版本：', error.message || error); }
     await ensureLocalModel();
     await browser();
+    benchmark.start();
   }).catch((error) => {
     console.error('模型没能就绪：', (error && error.message) || error);
   });

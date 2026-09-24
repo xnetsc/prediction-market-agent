@@ -374,7 +374,7 @@ class TheLocalDecisionModelIsShippedTests(unittest.TestCase):
 
     def test_the_package_has_everything_but_the_weights(self) -> None:
         root = Path("deploy/laya-service")
-        for name in ("server.mjs", "gpu-queue.mjs", "page.html", "start.sh", "package.json", "README.md"):
+        for name in ("server.mjs", "gpu-queue.mjs", "benchmark.mjs", "page.html", "start.sh", "package.json", "README.md"):
             self.assertTrue((root / name).exists(), name)
         self.assertTrue((root / "vendor" / "webtorch" / "webtorch" / "js" / "webtorch-main.js").exists(),
                         "the SDK travels with it; a package that needs another checkout is not one")

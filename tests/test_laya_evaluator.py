@@ -25,16 +25,28 @@ from prediction_market_agent.plugins.evaluators.jev import SchemaDecisionEvaluat
 class _LayaHandler(BaseHTTPRequestHandler):
     backend = "webgpu"
     requests: list[dict] = []
+    benchmark_active = False
+    attempts = 0
 
     def do_GET(self) -> None:  # noqa: N802
         self._reply({
             "ready": True, "backend": self.backend, "model": "convaiinnovations/laya",
+            "benchmark": {"status": "running" if self.benchmark_active else "ok",
+                          "active": self.benchmark_active, "samples": 3,
+                          "median_ms": 52.0, "max_ms": 60.0, "measured_at": 1},
             "surface": {"takes": {"questions": {
                 "types": {"choice": {}, "score": {}, "noul": {}}, "max": 6,
             }}},
         })
 
     def do_POST(self) -> None:  # noqa: N802
+        self.__class__.attempts += 1
+        if self.benchmark_active:
+            self._reply({
+                "error": {"code": "benchmark_in_progress", "type": "laya_service"},
+                "benchmark": {"status": "running", "active": True},
+            }, status=429, retry_after="1")
+            return
         body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
         self.__class__.requests.append(body)
         asked = json.loads(body["messages"][-1]["content"])
@@ -51,10 +63,12 @@ class _LayaHandler(BaseHTTPRequestHandler):
                 answers[name] = {"type": kind, "noul": 0.9, "confidence": 0.95}
         self._reply({"choices": [{"message": {"content": json.dumps({"answers": answers})}}]})
 
-    def _reply(self, data: dict) -> None:
+    def _reply(self, data: dict, *, status: int = 200, retry_after: str = "") -> None:
         payload = json.dumps(data).encode()
-        self.send_response(200)
+        self.send_response(status)
         self.send_header("Content-Type", "application/json")
+        if retry_after:
+            self.send_header("Retry-After", retry_after)
         self.send_header("Content-Length", str(len(payload)))
         self.end_headers()
         self.wfile.write(payload)
@@ -105,6 +119,8 @@ class LayaPluginTests(unittest.TestCase):
     def setUp(self) -> None:
         _LayaHandler.backend = "webgpu"
         _LayaHandler.requests = []
+        _LayaHandler.benchmark_active = False
+        _LayaHandler.attempts = 0
         self.server = ThreadingHTTPServer(("127.0.0.1", 0), _LayaHandler)
         self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
         self.thread.start()
@@ -131,8 +147,8 @@ class LayaPluginTests(unittest.TestCase):
             evaluator = plugin.factory(None)
             self.assertEqual(evaluator.name, "laya")
             self.assertEqual(evaluator.benchmark_status["status"], "ok")
-            self.assertEqual(len(_LayaHandler.requests), 4)  # warm-up plus 3 timed samples
-            _LayaHandler.requests.clear()
+            self.assertEqual(evaluator.benchmark_status["median_ms"], 52.0)
+            self.assertEqual(_LayaHandler.requests, [])  # The robot never benchmarks itself.
             results = evaluator.evaluate_candidates({}, [
                 {"candidate_id": "one", "title": "First"},
                 {"candidate_id": "two", "title": "Second"},
@@ -251,70 +267,20 @@ class LayaPluginTests(unittest.TestCase):
         self.assertLess(len(json.dumps(captured["state"])), 500)
         self.assertLess(len(captured["questions"]["route_c0"]["instructions"]), 300)
 
-    def test_benchmark_holds_queue_for_all_samples(self) -> None:
-        evaluator = LayaDecisionEvaluator("http://127.0.0.1:8899/v1", "", 3)
-        first_sample = threading.Event()
-        release = threading.Event()
-        calls: list[str] = []
-
-        def fake_request(_self, state, _questions):
-            label = "benchmark" if state.get("workflow") == "candidate_evaluation" else "normal"
-            calls.append(label)
-            if label == "benchmark" and len(calls) == 1:
-                first_sample.set()
-                release.wait(2)
-            return {"answers": {}}
-
-        with patch.object(SchemaDecisionEvaluator, "_evaluate", fake_request):
-            with ThreadPoolExecutor(max_workers=2) as pool:
-                measured = pool.submit(evaluator.run_benchmark)
-                self.assertTrue(first_sample.wait(1))
-                normal = pool.submit(evaluator._evaluate, {}, {"q": {"type": "noul"}})
-                release.set()
-                self.assertEqual(measured.result(timeout=3)["samples"], 3)
-                normal.result(timeout=3)
-        self.assertEqual(calls, ["benchmark"] * 4 + ["normal"])
-
-    def test_periodic_benchmark_and_shutdown(self) -> None:
-        evaluator = LayaDecisionEvaluator("http://127.0.0.1:8899/v1", "", 3)
-        self.assertEqual(evaluator.benchmark_interval_seconds, 300)
-        evaluator.benchmark_interval_seconds = 0.06  # deterministic scheduler test
-        calls = 0
-
-        def fake_request(_self, _state, _questions):
-            nonlocal calls
-            calls += 1
-            return {"answers": {}}
-
-        with patch.object(SchemaDecisionEvaluator, "_evaluate", fake_request):
-            evaluator.start_benchmarks()
-            self.assertEqual(calls, 4)
-            deadline = time.monotonic() + 1
-            while calls < 8 and time.monotonic() < deadline:
-                time.sleep(0.01)
-            self.assertGreaterEqual(calls, 8)
-            evaluator.close()
-            stopped_at = calls
-            time.sleep(0.15)
-            self.assertEqual(calls, stopped_at)
-
-    def test_failed_benchmark_releases_queue_for_normal_calls(self) -> None:
-        evaluator = LayaDecisionEvaluator("http://127.0.0.1:8899/v1", "", 3)
-        calls = 0
-
-        def fake_request(_self, _state, _questions):
-            nonlocal calls
-            calls += 1
-            if calls == 1:
-                raise DecisionEvaluatorBudgetExhausted("synthetic GPU timeout")
-            return {"answers": {}}
-
-        with patch.object(SchemaDecisionEvaluator, "_evaluate", fake_request):
-            self.assertEqual(evaluator.run_benchmark()["status"], "failed")
-            self.assertEqual(
-                evaluator._evaluate({}, {"q": {"type": "noul"}}), {"answers": {}}
-            )
-        self.assertEqual(calls, 2)
+    def test_service_benchmark_429_is_not_retried_or_mistaken_for_model_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            evaluator = self._plugin(Path(directory)).factory(None)
+            _LayaHandler.benchmark_active = True
+            self.assertEqual(evaluator.benchmark_status["status"], "running")
+            with self.assertRaisesRegex(DecisionEvaluatorError, "benchmark running; retry after 1s"):
+                evaluator._evaluate({}, {"q": {"type": "noul"}})
+            self.assertEqual(_LayaHandler.attempts, 1)
+            self.assertEqual(_LayaHandler.requests, [])
+            pool = DecisionEvaluatorPool([evaluator])
+            self.assertEqual(pool.evaluate_candidates({}, [{"candidate_id": "one"}]), [])
+            remaining = pool._cooldown_until["laya"] - time.monotonic()
+            self.assertGreater(remaining, 0)
+            self.assertLessEqual(remaining, 1)
 
     def test_scan_budget_timeout_is_not_reported_as_gpu_failure(self) -> None:
         evaluator = LayaDecisionEvaluator("http://127.0.0.1:8899/v1", "", 3)

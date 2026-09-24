@@ -62,7 +62,11 @@ http://127.0.0.1:8899/v1                # 仅适用于调用方与服务共享�
 
 API 是 OpenRouter 的 chat-completions 形状，所以任何能调 OpenRouter 的东西都能调它：
 
-当前本地模型的 `max_prefixes` 为 6，`/health` 中的 `surface.takes.questions.max` 会给出实际题目上限；“20”指默认配置下单道选择题选项过多时的质量风险，不是每次最多 20 道题。机器人中的 Laya 评估器会自己排队、限制题数并缩短自动粗筛输入；启用时及默认每 5 分钟做一次独占测速，期间插件调用排队。服务端也会让 WebGPU 工作串行，避免客户端超时后下一请求与未结束的计算重叠。
+当前本地模型的 `max_prefixes` 为 6，`/health` 中的 `surface.takes.questions.max` 会给出实际题目上限；“20”指默认配置下单道选择题选项过多时的质量风险，不是每次最多 20 道题。机器人中的 Laya 评估器会自己排队、限制题数并缩短自动粗筛输入。Laya **服务自身**启动时测一次、此后每 5 分钟自动测速（一次预热、三次计时）；机器人不再发起测速。测速等待已接收的推理结束，随后整组独占 WebGPU 队列；测速已排队或执行中，新推理请求立即返回 HTTP 429。服务端对已断开客户端仍在运行的 GPU 工作继续保持独占。
+
+`GET /health` 的 `benchmark` 字段给出实时状态（`queued`、`running`、`ok`、`failed`）和最近测速结果。`POST /benchmark` 可手动触发一次，返回 202；若测速已经排队或执行中，则返回 `accepted: false`，不会重复排队。无需额外的 `GET /benchmark`。测速时，`/v1/chat/completions` 的 429 响应包含 `Retry-After: 1`、`error.code: benchmark_in_progress` 与完整 `benchmark` 状态；客户端可查看该状态自行决定等待、重试或切换其他评估器。机器人遇到该 429 不会在同一次调用里盲目重试，而会走已配置的评估器回退。
+
+该服务默认无鉴权且监听 `0.0.0.0`。`POST /benchmark` 也可被能访问该服务的设备调用；请通过防火墙限制来源，不要暴露公网。
 
 ```bash
 curl -s http://127.0.0.1:8899/v1/chat/completions -H 'content-type: application/json' -d '{

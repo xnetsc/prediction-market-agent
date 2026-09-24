@@ -2056,8 +2056,9 @@ function renderLayaBenchmark(runtime){
     const note=document.getElementById('layaBenchmarkStatus');if(!note)return;
     const value=runtime?.evaluator_benchmarks?.laya;
     if(!value){note.className='status muted';note.textContent='Laya 评估器未启用，暂无测速';return}
-    if(value.status==='running'){note.className='status pending';note.textContent='测速中，插件请求正在排队';return}
+    if(value.status==='queued'||value.status==='running'){note.className='status pending';note.textContent=value.status==='queued'?'测速已排队，服务暂不接收新推理':'服务正在测速，新推理会收到 429；客户端可稍后重试';return}
     if(value.status==='failed'){note.className='status danger';note.textContent='最近测速失败：'+String(value.error||'未知原因');return}
+    if(value.status==='unavailable'){note.className='status danger';note.textContent='无法读取服务测速状态：'+String(value.error||'服务不可用');return}
     if(value.status==='ok'){
         note.className='status good';note.textContent='最近 '+value.samples+' 次中位 '+value.median_ms+'ms · 最慢 '+value.max_ms+'ms · '+new Date(value.measured_at*1000).toLocaleString();return;
     }

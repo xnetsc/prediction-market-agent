@@ -31,6 +31,8 @@ PYTHONPATH=src .venv/bin/python -m pytest -q --ignore=tests/test_api_integration
 
 2026-09-24 逐市场粗筛、盘口 WebSocket 与 Laya 串行测速接入后为 `781 passed, 261 subtests passed`，另有 2 条第三方弃用警告。新增测试覆盖持久队列、逐市场历史与定时复查、独立暂停、WebSocket 断线过期/增量以及启动与定时测速独占。服务端另运行 `node --test tests/laya_gpu_queue.test.mjs tests/webtorch_sync.test.mjs`，4 项通过；它验证断开的调用不会提前释放 GPU 队列。宿主 WebGPU 真实测速三样本中位约 330–343ms；容器新镜像能导入 WebSocket 与 Laya 代码并读取宿主 `/health`，但这不替代公网 WebSocket 长期稳定性观察。
 
+2026-09-24 将测速调度迁至 Laya 服务后，确定性回归为 `780 passed, 261 subtests passed`，2 条第三方弃用警告；Node 队列与 SDK 测试 7 项通过。服务启动测速、定时测速、手动触发、已有推理先完成、测速整组独占及失败后释放队列均有测试；宿主 WebGPU 实测 `/health.benchmark` 返回三样本中位 305ms，手动触发时新推理收到 429、`Retry-After: 1` 和 `benchmark.status: running`。机器人不再发起测速样本。
+
 完整 `pytest` 默认包含生产联网测试，因此在 Binance 受限网络中会保留真实失败，而不是显示全绿。需要只看
 确定性回归时必须显式使用上面的 `--ignore`，不要给联网用例添加 skip。
 

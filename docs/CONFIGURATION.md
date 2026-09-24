@@ -101,7 +101,7 @@ Agent 动作策略或具体交易策略；这些只能由对应插件定义。�
   OpenRouter 中的 Jev 型号走原生 Decisions，其它明确支持 structured output 的型号走 strict schema Chat
   Completions，并默认只复用指定 Provider 的推理 Key；自定义方式填写 Chat Completions Base URL、模型名和
   可选 Key，原生 strict schema 不可用或被忽略时回退到强制函数参数。各方式都不复用 Provider 的模型或代理；
-  另有默认禁用的 `laya` 实例，直接连接外部 WebGPU 服务，独立校验健康状态与 Choice/Score/Noul 协议；启用启动时和默认每 300 秒做独占测速，`LAYA_BENCHMARK_INTERVAL_SECONDS` 可调整周期，测速期间该插件的正常请求排队；
+  另有默认禁用的 `laya` 实例，直接连接外部 WebGPU 服务，独立校验健康状态与 Choice/Score/Noul 协议；测速由 Laya 服务启动时及每 300 秒自行执行，状态包含在 `/health`，测速期间新推理请求收到带状态的 429；
 - 策略插件：策略文本路径和候选筛选字段；
 - 标的发现插件：发现文本、读取预算及其私有参数；
 - 研究插件：预测市场跨平台查询、行情、K 线和业务历史的结果限制；通用搜索/网页由官方 CLI 管理；

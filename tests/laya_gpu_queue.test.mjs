@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { createGpuQueue } from '../deploy/laya-service/gpu-queue.mjs';
+import { createBenchmark } from '../deploy/laya-service/benchmark.mjs';
 
 test('GPU work stays serialized after a caller stops waiting', async () => {
   const exclusive = createGpuQueue();
@@ -37,4 +38,65 @@ test('direct clients cannot grow the GPU queue without bound', async () => {
   release();
   await first;
   assert.equal(await exclusive(async () => 'next'), 'next');
+});
+
+test('benchmark waits for active inference, then holds one exclusive ticket for all samples', async () => {
+  const exclusive = createGpuQueue();
+  let releaseInference;
+  const events = [];
+  const inference = exclusive(async () => {
+    events.push('inference-start');
+    await new Promise((resolve) => { releaseInference = resolve; });
+    events.push('inference-end');
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+  const benchmark = createBenchmark({ exclusive, sample: async () => {
+    events.push('benchmark');
+  } });
+  assert.equal(benchmark.trigger().accepted, true);
+  assert.equal(benchmark.snapshot().status, 'queued');
+  assert.equal(benchmark.snapshot().active, true);
+  assert.equal(benchmark.trigger().accepted, false);
+  assert.deepEqual(events, ['inference-start']);
+  releaseInference();
+  await inference;
+  await benchmark.wait();
+  assert.deepEqual(events, ['inference-start', 'inference-end',
+    'benchmark', 'benchmark', 'benchmark', 'benchmark']);
+  assert.equal(benchmark.snapshot().status, 'ok');
+  assert.equal(benchmark.snapshot().active, false);
+  assert.equal(benchmark.snapshot().samples, 3);
+});
+
+test('failed benchmark publishes failure and releases inference gate', async () => {
+  const exclusive = createGpuQueue();
+  const benchmark = createBenchmark({ exclusive, sample: async () => {
+    throw new Error('GPU unavailable');
+  } });
+  benchmark.trigger();
+  await benchmark.wait();
+  assert.equal(benchmark.snapshot().status, 'failed');
+  assert.match(benchmark.snapshot().error, /GPU unavailable/);
+  assert.equal(benchmark.snapshot().active, false);
+  assert.equal(await exclusive(async () => 'recovered'), 'recovered');
+});
+
+test('service benchmark runs at startup and repeats on its interval without overlap', async () => {
+  const exclusive = createGpuQueue();
+  let calls = 0;
+  const benchmark = createBenchmark({ exclusive, intervalMs: 20, sample: async () => {
+    calls += 1;
+  } });
+  benchmark.start();
+  await benchmark.wait();
+  assert.equal(calls, 4);
+  const deadline = Date.now() + 300;
+  while (calls < 8 && Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+  benchmark.stop();
+  await benchmark.wait();
+  assert.ok(calls >= 8);
+  assert.equal(calls % 4, 0);
+  assert.equal(benchmark.snapshot().status, 'ok');
 });

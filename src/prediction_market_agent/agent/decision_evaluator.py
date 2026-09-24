@@ -70,6 +70,15 @@ class DecisionEvaluatorBudgetExhausted(DecisionEvaluatorError):
     """The scan ended by its own budget, not because a model service failed."""
 
 
+class DecisionEvaluatorRetryLater(DecisionEvaluatorError):
+    """A service reported temporary unavailability with a retry hint."""
+
+    def __init__(self, message: str, retry_after_seconds: float) -> None:
+        super().__init__(message)
+        delay = float(retry_after_seconds)
+        self.retry_after_seconds = max(1.0, min(60.0, delay)) if math.isfinite(delay) else 1.0
+
+
 def _bounded_number(value: Any, minimum: float, maximum: float) -> bool:
     return (
         isinstance(value, (int, float))
@@ -244,7 +253,9 @@ class DecisionEvaluatorPool:
         self.errors[name] = message
         self.fallback_errors[name] = message
         self._last_errors[name] = message
-        self._cooldown_until[name] = time.monotonic() + EVALUATOR_FAILURE_COOLDOWN_SECONDS
+        cooldown = (error.retry_after_seconds if isinstance(error, DecisionEvaluatorRetryLater)
+                    else EVALUATOR_FAILURE_COOLDOWN_SECONDS)
+        self._cooldown_until[name] = time.monotonic() + cooldown
 
     def _succeeded(self, name: str) -> None:
         self.errors = {}

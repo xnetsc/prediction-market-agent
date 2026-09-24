@@ -50,7 +50,7 @@ Prediction 与 Polymarket API 插件，以及 Codex、Claude、OpenRouter Provid
   OpenRouter 方式自动使用官方 Base URL 并默认复用主 OpenRouter Key；
   自定义方式填写自己的 Base URL、模型名和可选 Key。代理始终属于 Jev 插件自己。
 - 另有独立的 `laya` 本地 WebGPU evaluator 插件，默认不启用。先在模型服务页测试连接，再到插件中心的
-  “决策评估器”启用并保存服务地址；它与 Jev 可分别选择，不会进入最终交易决策 Provider 池。启用启动时及默认每 5 分钟独占测速，测速期间该插件的正常调用排队。
+  “决策评估器”启用并保存服务地址；它与 Jev 可分别选择，不会进入最终交易决策 Provider 池。Laya 服务启动时及默认每 5 分钟独占测速，`/health` 返回状态；测速时新推理收到 429，机器人可回退到其他已启用评估器。
 - 预测市场研究工具由插件动态贡献，工具名会动态进入 Agent 控制 schema；内置跨市场、行情刷新、K 线和
   业务历史查询工具集。网页、文件、命令和 skills 使用官方 CLI 自带能力。
 - SQLite 保存每轮完整输入输出、Agent 工具轨迹、风险判定、执行请求/结果、独立采集证据、运行异常、

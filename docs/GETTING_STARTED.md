@@ -107,7 +107,7 @@ unzip laya-service.zip && bash laya-service/start.sh
 
 连接测试不会让模型参与粗筛。继续到「插件中心 → 决策评估器」，启用 `laya`，在其配置中填写同一个服务地址并保存，再点「保存启用与顺序」。`jev` 的配置不会被删除；可按需要单独启用或与 Laya 同时启用。Laya 只用于发现阶段的候选粗筛与续扫，不作最终交易决策。服务断开或未使用 WebGPU 时，插件会显示未就绪；本轮不会把失败的粗筛结果当作交易判断。
 
-插件内部会串行排队，排队与 GPU 执行分别超时；慢 GPU 可在插件配置中调整 `LAYA_QUEUE_WAIT_SECONDS` 和 `LAYA_TIMEOUT_SECONDS`。插件启用启动时做一次测速，此后默认每 5 分钟测一次；测速期间该插件的正常调用排队等候，间隔可通过 `LAYA_BENCHMARK_INTERVAL_SECONDS` 调整。单次能力从服务 `/health` 读取，当前权重最多 6 道题；官方资料提到的“约 20”是单道 `choice` 题的**选项数**质量界线，不是题目数。
+插件内部会串行排队，排队与 GPU 执行分别超时；慢 GPU 可在插件配置中调整 `LAYA_QUEUE_WAIT_SECONDS` 和 `LAYA_TIMEOUT_SECONDS`。Laya 服务自身启动时测速，此后每 5 分钟测一次；`GET /health` 返回最新测速状态，`POST /benchmark` 可手动触发。测速时新推理返回带状态的 429，由客户端决定重试或回退。单次能力从服务 `/health` 读取，当前权重最多 6 道题；官方资料提到的“约 20”是单道 `choice` 题的**选项数**质量界线，不是题目数。
 
 ---
 

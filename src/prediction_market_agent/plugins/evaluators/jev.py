@@ -13,6 +13,7 @@ from prediction_market_agent.agent.decision_evaluator import (
     ContinuationAssessment,
     DecisionEvaluatorBudgetExhausted,
     DecisionEvaluatorError,
+    DecisionEvaluatorRetryLater,
 )
 from prediction_market_agent.plugin_system.config_io import json_file_callbacks
 from prediction_market_agent.plugin_system.discovery import (
@@ -372,6 +373,29 @@ class SchemaDecisionEvaluator:
                         "usage": payload.get("usage") or {}}
             except urllib.error.HTTPError as error:
                 last_error = f"HTTP {error.code}"
+                if error.code == 429 and self.connection_name == "laya":
+                    try:
+                        refusal = json.loads(error.read(64 * 1024))
+                    except (ValueError, OSError):
+                        refusal = {}
+                    if not isinstance(refusal, dict):
+                        refusal = {}
+                    refusal_error = refusal.get("error")
+                    if (isinstance(refusal_error, dict)
+                            and refusal_error.get("code") == "benchmark_in_progress"):
+                        benchmark = refusal.get("benchmark")
+                        if not isinstance(benchmark, dict):
+                            benchmark = {}
+                        try:
+                            retry_after = float(error.headers.get("Retry-After", "1"))
+                        except (TypeError, ValueError):
+                            retry_after = 1.0
+                        raise DecisionEvaluatorRetryLater(
+                            "Laya benchmark " + str(benchmark.get("status") or "running")
+                            + "; retry after " + str(error.headers.get("Retry-After", "1"))
+                            + "s or fall back to another enabled evaluator",
+                            retry_after_seconds=retry_after,
+                        ) from None
                 if error.code in {400, 404, 422} and use_compatibility_fallback():
                     continue
                 if error.code not in {429, 529} or attempt == 2:
