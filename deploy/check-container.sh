@@ -55,11 +55,15 @@ for expected in (
     "laya-service/server.mjs",
     "laya-service/vendor/webtorch/UPSTREAM_SHA",
     "laya-service/vendor/webtorch/webtorch/decision.py",
+    "laya-service/vendor/webtorch/webtorch/js/decision-vision.js",
+    "laya-service/vendor/webtorch/webtorch/js/decision-vision-worker.js",
+    "laya-service/vendor/webtorch/webtorch/js/decision-vision-runtime.js",
 ):
     assert expected in names, expected
 upstream = archive.read("laya-service/vendor/webtorch/UPSTREAM_SHA").decode().strip()
 assert re.fullmatch(r"[0-9a-f]{40}", upstream), upstream
 assert b"usage.input_tokens" in archive.read("laya-service/server.mjs")
+assert b"latency_by_state" in archive.read("laya-service/server.mjs")
 remote = urllib.request.Request(base, headers={"Host": "public.example"})
 assert "初始化管理员" in urllib.request.urlopen(remote).read().decode()
 remote = urllib.request.Request(base + "/api/local", data=body,

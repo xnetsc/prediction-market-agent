@@ -15,9 +15,10 @@
  *   node server.mjs --webtorch /path/to/webtorch [--port 8899]
  */
 import { createServer } from 'node:http';
-import { mkdir, readFile, rename, rm, stat } from 'node:fs/promises';
+import { mkdir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises';
 import { createReadStream, createWriteStream, existsSync } from 'node:fs';
 import { once } from 'node:events';
+import { createHash } from 'node:crypto';
 import { dirname, extname, join, resolve, sep } from 'node:path';
 import { spawn } from 'node:child_process';
 import { chromium } from 'playwright';
@@ -60,7 +61,11 @@ const HEADLESS = option('headless', 'true') !== 'false';
 /* The one model this service exists for. Not a parameter: the SDK's demo page can load anything,
  * and this is a service for laya. */
 const MODEL = 'convaiinnovations/laya';
-const MODEL_DIR = resolve(option('models', process.env.LAYA_MODELS || join(HERE_DIR(), 'models')), 'laya');
+const MODELS_DIR = resolve(option('models', process.env.LAYA_MODELS || join(HERE_DIR(), 'models')));
+const MODEL_DIR = join(MODELS_DIR, 'laya');
+const VISION_MODEL = 'thaitea/laya-vision';
+const VISION_WEB_MODEL = 'thaitea/laya-vision-web';
+const VISION_MODEL_DIR = join(MODELS_DIR, 'laya-vision');
 const ENDPOINT = option('endpoint', process.env.HF_ENDPOINT || 'https://huggingface.co');
 
 function HERE_DIR() { return resolve(new URL('.', import.meta.url).pathname); }
@@ -99,6 +104,17 @@ const WANTED = /^(encoder\/|tokenizer\/|model\.safetensors$|rl_agent_config\.jso
 
 async function present(path) {
   try { return (await stat(path)).size > 0; } catch { return false; }
+}
+
+async function presentSize(path, bytes) {
+  try { return (await stat(path)).size === Number(bytes); } catch { return false; }
+}
+
+async function verifiedFile(path, bytes, sha256) {
+  if (!await presentSize(path, bytes) || !sha256) return false;
+  const hash = createHash('sha256');
+  for await (const chunk of createReadStream(path)) hash.update(chunk);
+  return hash.digest('hex') === sha256;
 }
 
 /** Fetch the model once, to disk, so that every boot after this one reads from here.
@@ -148,12 +164,144 @@ async function ensureLocalModel(log = console.log) {
   return true;
 }
 
+const VISION_FILES = [
+  'laya_web.json', 'tokenizer/tokenizer.json', 'tokenizer/tokenizer_config.json',
+  'vision_fp16.onnx', 'text_fp16.onnx', 'head_fp16.onnx',
+];
+const VISION_SOURCES = [
+  { name: 'modelscope', base: `https://modelscope.cn/models/${VISION_WEB_MODEL}/resolve/master/` },
+  { name: 'huggingface', base: `${ENDPOINT.replace(/\/$/, '')}/${VISION_WEB_MODEL}/resolve/main/` },
+];
+let visionDownload = null;
+let chosenVisionSource = null;
+let visionSourceName = null;
+
+async function probeVisionSource(source) {
+  const started = performance.now();
+  const response = await fetch(source.base + 'laya_web.json', {
+    signal: AbortSignal.timeout(15000), headers: { Accept: 'application/json' },
+  });
+  if (!response.ok) throw new Error(`HTTP ${response.status}`);
+  const bytes = new Uint8Array(await response.arrayBuffer());
+  const manifest = JSON.parse(new TextDecoder().decode(bytes));
+  if (manifest.format_version !== 1 || manifest.source !== VISION_MODEL ||
+      !manifest.files?.['vision_fp16.onnx']) {
+    throw new Error('not the expected vision export');
+  }
+  const latency = performance.now() - started;
+  let sampled = 0, sampleBytesPerSecond = 0;
+  const sampleStarted = performance.now();
+  try {
+    const sample = await fetch(source.base + 'text_fp16.onnx', {
+      signal: AbortSignal.timeout(12000), headers: { Range: 'bytes=0-1048575' },
+    });
+    if (!sample.ok) throw new Error(`sample HTTP ${sample.status}`);
+    const reader = sample.body.getReader();
+    while (sampled < 1048576) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      sampled += value.length;
+    }
+    await reader.cancel();
+    sampleBytesPerSecond = sampled /
+      Math.max(0.001, (performance.now() - sampleStarted) / 1000);
+  } catch { /* a valid manifest remains usable when a range speed sample is blocked */ }
+  return { ...source, manifest, manifestBytes: bytes, latency,
+    sampleBytesPerSecond };
+}
+
+async function chooseVisionSource(log = console.log) {
+  if (chosenVisionSource) return chosenVisionSource;
+  const results = await Promise.allSettled(VISION_SOURCES.map(probeVisionSource));
+  const available = results.filter((item) => item.status === 'fulfilled').map((item) => item.value);
+  if (!available.length) {
+    const detail = results.map((item, index) => `${VISION_SOURCES[index].name}: ${item.reason?.message || item.reason}`).join(' | ');
+    throw new Error(`no Laya Vision source is reachable (${detail})`);
+  }
+  available.sort((a, b) => b.sampleBytesPerSecond - a.sampleBytesPerSecond || a.latency - b.latency);
+  chosenVisionSource = available[0];
+  visionSourceName = chosenVisionSource.name;
+  log(`Laya Vision source: ${chosenVisionSource.name} (${(chosenVisionSource.sampleBytesPerSecond / 1048576).toFixed(1)} MB/s sample)`);
+  return chosenVisionSource;
+}
+
+async function downloadVerified(url, target, expected, sha256, log = console.log) {
+  if (await verifiedFile(target, expected, sha256)) return;
+  const response = await fetch(url);
+  if (!response.ok) throw new Error(`${url}: HTTP ${response.status}`);
+  await mkdir(dirname(target), { recursive: true });
+  const handle = createWriteStream(target + '.part');
+  const hash = createHash('sha256');
+  let read = 0;
+  let announced = 0;
+  for await (const chunk of response.body) {
+    read += chunk.length; hash.update(chunk);
+    if (!handle.write(chunk)) await once(handle, 'drain');
+    if (expected > 20 * 1048576 && read - announced >= 50 * 1048576) {
+      announced = read;
+      log(`  ${target.slice(VISION_MODEL_DIR.length + 1)} ${(read / 1048576).toFixed(0)} / ${(expected / 1048576).toFixed(0)} MB`);
+    }
+  }
+  await new Promise((done, fail) => handle.end((error) => (error ? fail(error) : done())));
+  if (read !== Number(expected) || hash.digest('hex') !== sha256) {
+    throw new Error(`${target}: downloaded bytes or SHA-256 do not match laya_web.json`);
+  }
+  await rename(target + '.part', target);
+}
+
+async function downloadSmallFile(url, target) {
+  if (await present(target)) return;
+  const response = await fetch(url);
+  if (!response.ok) throw new Error(`${url}: HTTP ${response.status}`);
+  const bytes = new Uint8Array(await response.arrayBuffer());
+  if (!bytes.length) throw new Error(`${url}: empty response`);
+  await mkdir(dirname(target), { recursive: true });
+  await writeFile(target + '.part', bytes);
+  await rename(target + '.part', target);
+}
+
+async function ensureLocalVisionModel(log = console.log) {
+  if (visionDownload) return visionDownload;
+  visionDownload = (async () => {
+    try {
+      const manifest = JSON.parse(await readFile(join(VISION_MODEL_DIR, 'laya_web.json'), 'utf8'));
+      const complete = manifest.format_version === 1 && manifest.source === VISION_MODEL &&
+        (await Promise.all(VISION_FILES.filter((name) => name.endsWith('.onnx')).map((name) =>
+          verifiedFile(join(VISION_MODEL_DIR, name), manifest.files?.[name]?.bytes,
+            manifest.files?.[name]?.sha256)))).every(Boolean) &&
+        (await Promise.all(VISION_FILES.filter((name) => name.startsWith('tokenizer/')).map((name) =>
+          present(join(VISION_MODEL_DIR, name))))).every(Boolean);
+      if (complete) {
+        visionSourceName = 'local';
+        return { source: 'local', model: VISION_MODEL };
+      }
+    } catch { /* no complete local vision export yet */ }
+    const source = await chooseVisionSource(log);
+    const manifest = source.manifest;
+    await mkdir(VISION_MODEL_DIR, { recursive: true });
+    for (const name of VISION_FILES.filter((item) => item.endsWith('.onnx'))) {
+      const expected = manifest.files?.[name];
+      if (!expected?.bytes || !expected?.sha256) throw new Error(`${name} is missing from laya_web.json`);
+      await downloadVerified(source.base + name, join(VISION_MODEL_DIR, name),
+        expected.bytes, expected.sha256, log);
+    }
+    for (const name of VISION_FILES.filter((item) => item.startsWith('tokenizer/'))) {
+      await downloadSmallFile(source.base + name, join(VISION_MODEL_DIR, name));
+    }
+    await writeFile(join(VISION_MODEL_DIR, 'laya_web.json'), source.manifestBytes);
+    return { source: source.name, model: VISION_MODEL };
+  })().catch((error) => { visionDownload = null; throw error; });
+  return visionDownload;
+}
+
 async function serveStatic(request, response, url) {
   // `/laya/...` is this service's own page, `/models/...` the weights it keeps on disk, and
   // everything else the webtorch checkout, mounted at the root so the page's relative paths are
   // the ones the SDK's own documentation uses.
   const mount = url.pathname.startsWith('/laya/')
     ? [HERE, url.pathname.slice('/laya/'.length)]
+    : url.pathname.startsWith('/models/laya-vision/')
+      ? [VISION_MODEL_DIR, url.pathname.slice('/models/laya-vision/'.length)]
     : url.pathname.startsWith('/models/')
       ? [MODEL_DIR, url.pathname.slice('/models/laya/'.length)]
       : [WEBTORCH, url.pathname === '/' ? 'index.html' : url.pathname.slice(1)];
@@ -322,6 +470,31 @@ async function browser() {
 
 const QUESTION_TYPES = new Set(['choice', 'score', 'noul']);
 
+function hasVisionState(state) {
+  if (!state || typeof state !== 'object' || Array.isArray(state)) return false;
+  if (state.type === 'image') return Boolean(state.data);
+  if (state.type === 'multimodal') return Boolean(state.image) ||
+    (Array.isArray(state.images) && state.images.length > 0);
+  return Boolean(state.image) || (Array.isArray(state.images) && state.images.length > 0);
+}
+
+const observedLatency = { text: [], vision: [] };
+function recordLatency(mode, milliseconds, usage) {
+  const rows = observedLatency[mode];
+  rows.push({ milliseconds, at: Date.now() / 1000, usage });
+  if (rows.length > 20) rows.shift();
+}
+function latencySnapshot() {
+  return Object.fromEntries(Object.entries(observedLatency).map(([mode, rows]) => {
+    const times = rows.map((item) => item.milliseconds).sort((a, b) => a - b);
+    const last = rows[rows.length - 1];
+    return [mode, { samples: rows.length,
+      median_ms: times.length ? times[Math.floor(times.length / 2)] : null,
+      last_ms: last?.milliseconds ?? null, measured_at: last?.at ?? null,
+      usage: last?.usage || {} }];
+  }));
+}
+
 /** Pull `{state, questions}` out of a chat request: it is what the caller put in the last message. */
 function requested(body) {
   const messages = Array.isArray(body.messages) ? body.messages : [];
@@ -361,9 +534,8 @@ function shaped(answers, questions) {
   return out;
 }
 
-async function completions(request, response, body) {
+async function completions(request, response, body, asked, mode) {
   await browser();
-  const asked = requested(body);
   const started = Date.now();
   const result = await page.evaluate(
     (payload) => window.__laya.decide(payload),
@@ -372,11 +544,13 @@ async function completions(request, response, body) {
   const content = JSON.stringify({ answers: shaped(result.answers, asked.questions) });
   const usage = result.usage || {};
   const promptTokens = Number(usage.input_tokens ?? usage.prompt_tokens ?? usage.tokens ?? 0);
+  const latency = Date.now() - started;
+  recordLatency(mode, latency, usage);
   response.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' }).end(JSON.stringify({
     id: 'laya-' + Date.now().toString(36),
     object: 'chat.completion',
     created: Math.floor(Date.now() / 1000),
-    model: body.model || MODEL,
+    model: mode === 'vision' ? VISION_MODEL : MODEL,
     choices: [{ index: 0, message: { role: 'assistant', content }, finish_reason: 'stop' }],
     usage: {
       prompt_tokens: promptTokens,
@@ -387,10 +561,13 @@ async function completions(request, response, body) {
       encoder_tokens: Number(usage.encoder_tokens ?? promptTokens),
       encoder_passes: Number(usage.encoder_passes ?? 0),
       batched: Boolean(usage.batched),
+      images: Number(usage.images ?? 0),
+      vision_cache_hits: Number(usage.vision_cache_hits ?? 0),
+      vision_cache_misses: Number(usage.vision_cache_misses ?? 0),
     },
     // Free, local, and honest about it: nothing was billed because nothing left the machine.
     cost: 0,
-    latency_ms: Date.now() - started,
+    latency_ms: latency,
   }));
 }
 
@@ -414,7 +591,9 @@ const server = createServer(async (request, response) => {
     if (request.method === 'GET' && url.pathname === '/health') {
       const status = page ? await page.evaluate(() => window.__laya.status()) : { ready: false };
       response.writeHead(status.ready ? 200 : 503, { 'Content-Type': 'application/json' })
-        .end(JSON.stringify({ ...status, benchmark: benchmark.snapshot() }));
+        .end(JSON.stringify({ ...status, benchmark: benchmark.snapshot(),
+          latency_by_state: latencySnapshot(),
+          vision_source: visionSourceName }));
       return;
     }
     if (request.method === 'POST' && url.pathname === '/benchmark') {
@@ -427,8 +606,9 @@ const server = createServer(async (request, response) => {
       response.writeHead(200, { 'Content-Type': 'application/json' }).end(JSON.stringify({
         data: [{
           id: MODEL, name: MODEL, object: 'model',
-          description: 'Typed decision model served locally on WebGPU; no tokens are billed.',
+          description: 'Typed text decisions on local WebGPU; image states route to Laya Vision.',
           supported_parameters: ['response_format', 'structured_outputs'],
+          input_modalities: ['text', 'image'],
           pricing: { prompt: '0', completion: '0' },
         }],
       }));
@@ -437,11 +617,19 @@ const server = createServer(async (request, response) => {
     if (request.method === 'POST' && /chat\/completions$/.test(url.pathname)) {
       if (refuseDuringBenchmark(response)) return;
       const chunks = [];
-      for await (const chunk of request) chunks.push(chunk);
+      let bytes = 0;
+      for await (const chunk of request) {
+        bytes += chunk.length;
+        if (bytes > 24 * 1024 * 1024) throw new Error('request exceeds 24 MB');
+        chunks.push(chunk);
+      }
       const body = JSON.parse(Buffer.concat(chunks).toString('utf8') || '{}');
+      const asked = requested(body);
+      const mode = hasVisionState(asked.state) ? 'vision' : 'text';
       // Reading the body yields to the event loop, so a benchmark may have started meanwhile.
       if (refuseDuringBenchmark(response)) return;
-      await exclusive(() => completions(request, response, body));
+      if (mode === 'vision') await ensureLocalVisionModel();
+      await exclusive(() => completions(request, response, body, asked, mode), { lane: mode });
       return;
     }
     await serveStatic(request, response, url);

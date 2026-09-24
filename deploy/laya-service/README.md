@@ -20,6 +20,11 @@ bash start.sh
 第一次会装 Playwright、按需装一个无头 Chromium、把模型（约 800MB）下载到 `models/laya/`。
 之后每次启动都从本地读取模型权重，不再重复下载权重。
 
+文本请求始终使用这个原有模型。只有第一次收到图片状态时，服务才会额外获取 Laya Vision 的
+FP16 ONNX 导出（约 475MB）到 `models/laya-vision/` 并加载；没有图片请求就不下载、不占这部分显存。
+服务会同时探测魔搭与 Hugging Face 上是否存在同一份导出，并在可用来源中按小样本下载速度选择；
+当前若魔搭没有该仓库，会自动使用 Hugging Face，无需用户选择。完整本地副本在断网时也可继续使用。
+
 服务启动及此后每 6 小时会检查 [GitHub 的 webpytorch 主分支](https://github.com/xnetsc/webpytorch)。
 只有版本变化或资源包缺文件时，才下载本服务使用的 `webtorch/`、浏览器运行文件 `dist/`、`LICENSE` 和 `NOTICE`，逐文件校验 Git blob 哈希后整包替换并重新载入模型；如果新版载入失败，则恢复上一版 SDK。网络检查失败也不会阻止已打包版本启动。`models/`、浏览器数据和机器人凭据不在更新范围内。
 仓库另有每日定时的同步工作流；它把相同的依赖更新提交到仓库，再触发容器镜像重建。运行中的服务与新镜像分别按 GitHub 版本检查，不依赖本地源码目录。
@@ -67,6 +72,30 @@ API 是 OpenRouter 的 chat-completions 形状，所以任何能调 OpenRouter �
 `GET /health` 的 `benchmark` 字段给出实时状态（`queued`、`running`、`ok`、`failed`）和最近测速结果。`POST /benchmark` 可手动触发一次，返回 202；若测速已经排队或执行中，则返回 `accepted: false`，不会重复排队。无需额外的 `GET /benchmark`。测速时，`/v1/chat/completions` 的 429 响应包含 `Retry-After: 1`、`error.code: benchmark_in_progress` 与完整 `benchmark` 状态；客户端可查看该状态自行决定等待、重试或切换其他评估器。机器人遇到该 429 不会在同一次调用里盲目重试，而会走已配置的评估器回退。
 
 一次请求中的每道题都会与共享状态拼成自己的双向编码序列，因此状态文本的 token 数不等于实际编码工作量。响应 `usage.sequence_tokens` 给出每道题的序列长度，`encoder_tokens`、`encoder_passes` 和 `batched` 给出实际执行情况；标准的 `prompt_tokens` 是所有题目序列长度之和。`/health.benchmark.usage` 公开同一组指标，控制台测速状态会显示编码 token 与次数。完全相同的序列在同一请求内只编码一次。
+
+图片与文本沿用同一个 `state/questions → answers` 接口。图片以 base64 传入，不能填写远程 URL：
+
+```json
+{
+  "state": {
+    "type": "multimodal",
+    "text": "读取这张图表",
+    "images": [{"type": "image", "media_type": "image/png", "data": "<base64>"}]
+  },
+  "questions": {
+    "trend": {"type": "noul", "instructions": "走势正在上升", "criteria": {"true": "上升", "false": "未上升"}}
+  }
+}
+```
+
+相同图片的视觉特征按 SHA-256 缓存在服务页面内，后续问题会跳过视觉编码；响应中的
+`usage.vision_cache_hits` / `vision_cache_misses` 可核验是否命中。`/health.latency_by_state`
+分别记录文本与视觉调用延迟。GPU 队列仍只允许一个任务运行，但排队中的文本请求优先于尚未开始的
+视觉请求，避免可选的慢路径拖长原有粗筛。官方 ONNX 导出仍然逐题执行文本图，因此这里没有虚称
+多问题批处理或共享文本前缀。
+
+SDK 代码不捆绑模型权重。`thaitea/laya-vision` 权重使用 CC BY-NC-SA 4.0；部署和使用前须按自己的
+场景确认署名、非商业及相同方式共享要求。
 
 该服务默认无鉴权且监听 `0.0.0.0`。`POST /benchmark` 也可被能访问该服务的设备调用；请通过防火墙限制来源，不要暴露公网。
 

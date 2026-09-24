@@ -58,7 +58,7 @@ export function createBenchmark({ exclusive, sample, now = () => Date.now() }) {
         max_ms: Math.round(Math.max(...latencies) * 10) / 10,
         usage,
       };
-    }).catch((error) => {
+    }, { lane: 'benchmark' }).catch((error) => {
       current = {
         ...current, status: 'failed', active: false, completed_at: now() / 1000,
         error: String(error?.message || error).slice(0, 300),

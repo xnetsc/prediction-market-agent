@@ -92,6 +92,14 @@ def _unit_number(value: Any) -> bool:
     return _bounded_number(value, 0, 1)
 
 
+def _state_has_images(state: Any) -> bool:
+    if not isinstance(state, dict):
+        return False
+    if state.get("type") == "image":
+        return bool(state.get("data"))
+    return bool(state.get("image")) or bool(state.get("images"))
+
+
 @dataclass(frozen=True)
 class CandidateAssessment:
     candidate_id: str
@@ -284,9 +292,13 @@ class DecisionEvaluatorPool:
         """One advisory tool call, with the usual enabled-instance order and failure fallback."""
         self.errors = {}
         self.fallback_errors = {}
+        needs_images = _state_has_images(state)
         for evaluator in self._ordered():
             answer = getattr(evaluator, "answer_questions", None)
             if not callable(answer):
+                continue
+            kinds = set(getattr(evaluator, "state_kinds", ("text", "json")))
+            if needs_images and not kinds.intersection({"image", "multimodal"}):
                 continue
             try:
                 result = answer(state, questions)

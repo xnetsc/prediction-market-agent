@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import tempfile
 import unittest
 from pathlib import Path
@@ -31,6 +32,7 @@ class _Evaluator:
         self.name = name
         self.fail = fail
         self.calls = 0
+        self.state_kinds = ("text", "json")
 
     def answer_questions(self, state, questions):
         self.calls += 1
@@ -122,3 +124,28 @@ class EvaluatorToolTests(unittest.TestCase):
         self.assertEqual(call.call_args.args[0],
                          {"workflow": "agent_fact_check", "facts": FACT_CHECK["state"]})
         self.assertEqual(call.call_args.args[1], FACT_CHECK["questions"])
+
+    def test_multimodal_state_uses_only_an_image_capable_evaluator(self):
+        text = _Evaluator("text")
+        vision = _Evaluator("vision")
+        vision.state_kinds = ("text", "json", "image", "multimodal")
+        state = {"type": "multimodal", "text": "chart", "images": [{
+            "type": "image", "media_type": "image/png",
+            "data": base64.b64encode(b"tiny-image").decode(),
+        }]}
+        result = EvaluatorToolContribution(
+            DecisionEvaluatorPool([text, vision], order_mode="CONFIGURED")
+        ).execute(TOOL_NAME, {"state": state, "questions": FACT_CHECK["questions"]})
+        self.assertEqual((text.calls, vision.calls), (0, 1))
+        self.assertEqual(result["evaluator_name"], "vision")
+
+    def test_multimodal_state_rejects_remote_or_invalid_image_data(self):
+        tool = EvaluatorToolContribution(DecisionEvaluatorPool([_Evaluator("text")]))
+        for image in (
+            {"type": "image_url", "url": "https://example.test/chart.png"},
+            {"type": "image", "media_type": "image/png", "data": "not base64"},
+        ):
+            with self.subTest(image=image), self.assertRaises(ValueError):
+                tool.execute(TOOL_NAME, {"state": {
+                    "type": "multimodal", "text": "chart", "images": [image],
+                }, "questions": FACT_CHECK["questions"]})

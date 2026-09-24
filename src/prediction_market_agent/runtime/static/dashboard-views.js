@@ -2085,8 +2085,12 @@ async function checkLaya(){
         if(!result.reachable){note.className='status danger';note.textContent='连不上：'+(result.detail||'没有响应');return}
         if(!result.ready){note.className='status pending';note.textContent='服务已连接，模型尚未就绪：'+(result.status||'正在加载或启动失败，请查看服务终端日志');return}
         note.className=result.backend==='webgpu'?'status good':'status danger';
+        const stateKinds=result.surface?.takes?.state?.kinds||[];
+        const vision=stateKinds.includes('image')
+            ?'；支持图片状态（首次使用时按需下载视觉模型）'
+            :'；当前服务只声明了文本状态';
         note.textContent=result.backend==='webgpu'
-            ?'已就绪：'+(result.model||'')+'，跑在 GPU 上'
+            ?'已就绪：'+(result.model||'')+'，跑在 GPU 上'+vision
             :'能连上，但跑在 '+(result.backend||'未知')+' 上——粗筛会慢到不可用，检查那台机器的显卡和浏览器';
     }catch(e){note.className='status danger';note.textContent=e.message}
 }

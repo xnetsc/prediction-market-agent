@@ -1688,13 +1688,17 @@ def create_app(config: Config, *, start_robot: bool = True) -> FastAPI:
                     return {"reachable": False, "detail": "服务返回 503，但未提供有效的健康状态"}
             except Exception as error:
                 return {"reachable": False, "detail": str(error)[:200]}
-            return {
+            result = {
                 "reachable": True,
                 "ready": bool(reading.get("ready")),
                 "backend": str(reading.get("backend") or ""),
                 "model": str(reading.get("model") or ""),
                 "status": str(reading.get("status") or ""),
             }
+            for name in ("surface", "vision", "vision_source", "latency_by_state"):
+                if name in reading:
+                    result[name] = reading[name]
+            return result
         if path == "/api/incidents/forget":
             return data.forget_incidents(int(payload.get("until_id", 0)))
         if path == "/api/instructions/forget":

@@ -43,7 +43,7 @@ class LayaDecisionEvaluator(SchemaDecisionEvaluator):
 
     def __init__(
         self, endpoint: str, proxy: str, timeout: int, *, queue_wait_seconds: int = 120,
-        max_questions: int = 6,
+        max_questions: int = 6, state_kinds: tuple[str, ...] | None = None,
     ) -> None:
         super().__init__(
             api_key="",
@@ -59,6 +59,7 @@ class LayaDecisionEvaluator(SchemaDecisionEvaluator):
         self.health_endpoint = _health_url(endpoint)
         self.queue_wait_seconds = max(1, int(queue_wait_seconds))
         self.max_questions = max(1, int(max_questions))
+        self.state_kinds = frozenset(state_kinds or ("text", "json"))
         self._queue = deque()
         self._queue_condition = threading.Condition()
         self._active = False
@@ -176,6 +177,13 @@ class LayaDecisionEvaluator(SchemaDecisionEvaluator):
                                for item in (state.get("candidates") or [])[:1]
                                if isinstance(item, dict)],
             }
+        if workflow == "agent_fact_check":
+            facts = state.get("facts")
+            if isinstance(facts, dict) and (
+                facts.get("type") in {"image", "multimodal"}
+                or "image" in facts or "images" in facts
+            ):
+                return facts
         return state
 
     def _evaluate(self, state: Any, questions: dict[str, Any]) -> dict[str, Any]:
@@ -252,7 +260,7 @@ def _health_url(endpoint: str) -> str:
     return urllib.parse.urlunsplit((parsed.scheme, parsed.netloc, "/health", "", ""))
 
 
-def _check_service(endpoint: str, proxy: str) -> int:
+def _check_service(endpoint: str, proxy: str) -> dict[str, Any]:
     request = urllib.request.Request(_health_url(endpoint), headers={"Accept": "application/json"})
     try:
         with _opener(proxy).open(request, timeout=5) as response:
@@ -266,11 +274,13 @@ def _check_service(endpoint: str, proxy: str) -> int:
     if health.get("model") != MODEL:
         raise ValueError("Laya 服务返回的模型不是 convaiinnovations/laya")
     questions = ((health.get("surface") or {}).get("takes") or {}).get("questions") or {}
+    state = ((health.get("surface") or {}).get("takes") or {}).get("state") or {}
     types = questions.get("types") or {}
     max_questions = int(questions.get("max") or 0)
     if not {"choice", "score", "noul"}.issubset(types) or max_questions < 4:
         raise ValueError("Laya 服务未声明粗筛所需的结构化问答协议")
-    return max_questions
+    state_kinds = tuple(str(kind) for kind in (state.get("kinds") or ("text", "json")))
+    return {"max_questions": max_questions, "state_kinds": state_kinds}
 
 
 def initialize_plugin(context: PluginInitializationContext) -> PluginSpec:
@@ -316,10 +326,11 @@ def initialize_plugin(context: PluginInitializationContext) -> PluginSpec:
         timeout = int(values["LAYA_TIMEOUT_SECONDS"])
         queue_wait = int(values["LAYA_QUEUE_WAIT_SECONDS"])
         proxy = proxy_settings(values)["proxy"]
-        max_questions = _check_service(endpoint, proxy)
+        capabilities = _check_service(endpoint, proxy)
         evaluator = LayaDecisionEvaluator(
             endpoint, proxy, timeout, queue_wait_seconds=queue_wait,
-            max_questions=max_questions,
+            max_questions=capabilities["max_questions"],
+            state_kinds=capabilities["state_kinds"],
         )
         instances.append(evaluator)
         return evaluator

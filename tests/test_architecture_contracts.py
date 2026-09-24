@@ -408,7 +408,10 @@ class TheLocalDecisionModelIsShippedTests(unittest.TestCase):
         self.assertIn("async function ensureLocalModel", server)
         self.assertIn("process.env.LAYA_HOST || '0.0.0.0'", server)
         self.assertIn("createGpuQueue()", server)
-        self.assertIn("await exclusive(() => completions(request, response, body))", server)
+        self.assertIn(
+            "await exclusive(() => completions(request, response, body, asked, mode), { lane: mode })",
+            server,
+        )
 
     def test_laya_reports_the_encoder_work_behind_latency(self) -> None:
         server = Path("deploy/laya-service/server.mjs").read_text()

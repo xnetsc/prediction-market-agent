@@ -15,7 +15,9 @@ const DEFAULT_TARGET = join(ROOT, 'vendor', 'webtorch');
 const REQUIRED = [
   'LICENSE', 'NOTICE', 'webtorch/__init__.py', 'webtorch/_core.py',
   'webtorch/decision.py', 'webtorch/js/webtorch-main.js',
-  'webtorch/js/webtorch-host.js', 'webtorch/modules.json',
+  'webtorch/js/webtorch-host.js', 'webtorch/js/decision-vision.js',
+  'webtorch/js/decision-vision-worker.js', 'webtorch/js/decision-vision-runtime.js',
+  'webtorch/modules.json',
   'dist/wgpy-main.js', 'dist/wgpy-worker.js',
   'dist/wgpy_webgpu-1.0.0-py3-none-any.whl',
   'dist/wgpy_webgl-1.0.0-py3-none-any.whl',
