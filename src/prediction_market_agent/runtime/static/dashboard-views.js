@@ -503,7 +503,8 @@ function renderServiceConnections(){
             select.value=LOGIN_METHODS.get(name)||'auto';select.onchange=()=>LOGIN_METHODS.set(name,select.value);
             controlNode('p',s.message||'',more).className='description';
             const updateText=s.update_message||(s.update_available?'有新版待准备':'尚未检查更新');
-            controlNode('p','客户端版本：'+(s.installed_version||'未检测')+(s.latest_version?' · 最新：'+s.latest_version:'')+' · '+updateText+(s.update_state==='downloading'?'；完成后刷新本页确认升级':''),more).className='description';
+            const downloadMinutes=s.update_state==='downloading'&&s.update_started_at?Math.max(0,Math.floor((Date.now()/1000-s.update_started_at)/60)):null;
+            controlNode('p','客户端版本：'+(s.installed_version||'未检测')+(s.latest_version?' · 最新：'+s.latest_version:'')+' · '+updateText+(downloadMinutes!==null?'（已等待 '+downloadMinutes+' 分钟）':'')+(s.update_state==='downloading'?'；完成后刷新本页确认升级':''),more).className='description';
             if(s.update_checked_at)controlNode('p','最近检查：'+new Date(s.update_checked_at*1000).toLocaleString(),more).className='description';
             const diagnostics=controlNode('details','',more);diagnostics.className='diagnostic-detail';controlNode('summary','连接技术信息',diagnostics);controlNode('p',s.proxy_message||'未提供连接信息',diagnostics);
             const maintenance=controlNode('div','',more);maintenance.className='toolbar';

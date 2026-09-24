@@ -924,6 +924,8 @@ class ClientControl:
                 return
             target = root / f"{version}-{uuid.uuid4().hex[:12]}"
             target.mkdir(parents=True, mode=0o700)
+            with self.lock:
+                self.state["update_started_at"] = time.time()
             env = self.environment()
             npm = shutil.which("npm")
             if not npm:
@@ -933,14 +935,15 @@ class ClientControl:
                 if self.closed:
                     return
                 process = subprocess.Popen([npm, "install", "--prefix", str(target), "--registry=https://registry.npmjs.org",
-                                            "--no-audit", "--no-fund", f"{self.package}@{version}"],
+                                            "--fetch-timeout=1800000", "--no-audit", "--no-fund",
+                                            f"{self.package}@{version}"],
                                            env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                                            start_new_session=True)
                 self.install_process = process
             # Platform binaries can exceed 300 MB unpacked. This runs only in the
             # background prefetch lane, so a slower download must not turn a valid
             # release into a false failure or delay a settings-save request.
-            process.wait(timeout=900)
+            process.wait(timeout=2400)
             if process.returncode:
                 raise ValueError("Package install failed")
             executable = target / "node_modules" / ".bin" / self.name
