@@ -232,6 +232,8 @@ const DISCOVERY_ACTION_LABELS={CONTINUE:'继续深入',PRIORITIZE:'优先',NEEDS
 let RECENT_DELETION_AUDIT=[];
 function renderDiscoveryActivity(data){
     const host=document.getElementById('discoveryActivity');if(!host)return;
+    const summary=document.getElementById('discoveryActivitySummary');
+    if(summary)summary.textContent='采集批次与候选记录 · '+(data.platforms||[]).length+' 平台'+((data.incidents||[]).length?' · '+data.incidents.length+' 条异常':'');
     const blocks=[];
     RECENT_DELETION_AUDIT=data.decision_deletions||[];
     const deletionHost=document.getElementById('deletionAudit');
@@ -253,7 +255,7 @@ function renderDiscoveryActivity(data){
         const nextReview=platform.next_market_review_at?'<p class="muted">下次独立定时复查：'+esc(new Date(platform.next_market_review_at).toLocaleString())+'</p>':'';
         blocks.push('<article class="discovery-platform"><div class="section-heading"><div><h4>'+esc(platform.platform)+'</h4><p class="muted">上次完成采集 '+esc(new Date(platform.latest_observed_at).toLocaleString())+' · 当批 '+platform.latest_batch_count+' 个 · 累计 '+platform.batches+' 批 / '+platform.observations+' 条观察</p></div><span class="badge '+(inProgress?'pending':'ready')+'">'+(inProgress?'本轮未完成':'历史记录')+'</span></div>'+progress+schedule+screeningSummary+nextReview+'<div class="summary-line"><strong>上次粗筛：</strong>'+evaluator+(platform.evaluator_providers?.length?' · 服务 '+esc(platform.evaluator_providers.join(', ')):'')+'</div>'+((plan.reason||plan.queries?.length)?'<details class="discovery-detail"><summary>续扫计划与下轮检索</summary>'+(plan.reason?'<p><strong>续扫计划：</strong>'+esc(plan.reason)+'；'+(plan.next_scan_seconds?'约 '+plan.next_scan_seconds+' 秒后':'按平台最短间隔')+'</p>':'')+(plan.queries?.length?'<p class="muted">下轮检索：'+esc(plan.queries.join('；'))+'</p>':'')+'</details>':'')+(platform.top_candidates?.length?'<details class="discovery-detail"><summary>最近候选 '+platform.top_candidates.length+' 个</summary>'+table(platform.top_candidates,[['最近候选',row=>'<strong>'+esc(row.title)+'</strong><br><span class="muted">'+esc(row.market_topic_id)+'</span>'],['流动性 / 成交量',row=>pnlNumber(row.liquidity_usdt)+' / '+pnlNumber(row.volume_usdt)],['评估器',row=>row.typed_evaluation?esc(DISCOVERY_ACTION_LABELS[row.typed_evaluation.action]||row.typed_evaluation.action)+' · 置信度 '+esc(row.typed_evaluation.confidence??'未知'):'未粗筛']])+'</details>':'')+'</article>');
     }
-    if((data.recent_selections||[]).length)blocks.push('<details class="diagnostic-detail" open><summary>最近进入深度决策的候选 · '+data.recent_selections.length+' 条</summary>'+table(data.recent_selections,[['时间 / 平台',row=>esc(new Date(row.selected_at).toLocaleString())+'<br>'+esc(row.platform)],['候选',row=>'<strong>'+esc(row.title)+'</strong><br><span class="muted">'+esc(row.market_topic_id)+'</span>'],['入选原因',row=>esc(row.reason)],['策略 / 顺位',row=>esc(row.strategy)+' / '+row.position]])+'</details>');
+    if((data.recent_selections||[]).length)blocks.push('<details class="diagnostic-detail"><summary>最近进入深度决策的候选 · '+data.recent_selections.length+' 条</summary>'+table(data.recent_selections,[['时间 / 平台',row=>esc(new Date(row.selected_at).toLocaleString())+'<br>'+esc(row.platform)],['候选',row=>'<strong>'+esc(row.title)+'</strong><br><span class="muted">'+esc(row.market_topic_id)+'</span>'],['入选原因',row=>esc(row.reason)],['策略 / 顺位',row=>esc(row.strategy)+' / '+row.position]])+'</details>');
     host.innerHTML=blocks.length?blocks.join(''):'<div class="empty-state"><strong>还没有市场采集记录</strong><p>平台完成第一次扫描后，这里会显示采集批次、评估器粗筛和候选选择；这不等同于交易决策。</p></div>';
 }
 
@@ -942,13 +944,13 @@ function showLedgerSkeleton(count){
 }
 
 function clearLedgerSkeleton(){
-    for(const node of document.querySelectorAll('#decisions .decision-skeleton'))node.remove();
+    for(const node of document.querySelectorAll('#decisionList .decision-skeleton'))node.remove();
 }
 
 function rememberOpenDetails(){
     /* Only the inner JSON blocks: the entry's own state is carried by `opened` below. */
     OPEN_DETAILS.clear();
-    for(const node of document.querySelectorAll('#decisions [data-detail-key]'))
+    for(const node of document.querySelectorAll('#decisionList [data-detail-key]'))
         if(node.open)OPEN_DETAILS.add(String(node.dataset.detailKey));
 }
 
@@ -956,7 +958,7 @@ function setLedgerLoading(busy){
     /* Silence while a slow query runs reads as "there is nothing here", which is the one thing it
        must not be mistaken for - especially on a page whose whole job is to show you that the
        robot has been doing something. */
-    const root=document.getElementById('decisions');
+    const root=document.getElementById('decisionList');
     if(!root)return;
     if(busy){
         root.setAttribute('aria-busy','true');
@@ -1059,11 +1061,11 @@ async function fillLedger(){
 }
 
 function visibleLedgerCount(){
-    return document.querySelectorAll('#decisions .decision-entry:not([hidden])').length;
+    return document.querySelectorAll('#decisionList .decision-entry:not([hidden])').length;
 }
 
 function sortLedgerEntries(){
-    const list=document.querySelector('#decisions .decision-list');
+    const list=document.querySelector('#decisionList .decision-list');
     if(!list)return;
     const entries=[...list.querySelectorAll(':scope > .decision-entry')];
     entries.sort((a,b)=>ledgerCompare(
@@ -1074,7 +1076,7 @@ function sortLedgerEntries(){
 
 function applyLedgerFilter(){
     let visible=0;
-    for(const entry of document.querySelectorAll('#decisions .decision-entry')){
+    for(const entry of document.querySelectorAll('#decisionList .decision-entry')){
         entry.hidden=!resultMatches(entry.dataset.result,LEDGER_RESULTS);
         if(!entry.hidden)visible+=1;
         // A selection is of rows on screen; one the filter just hid is not something anyone is looking at.
@@ -1102,7 +1104,7 @@ function watchLedgerEnd(){
 
 function appendDecisionEntries(rows){
     /* Returns how many of the new rows are showing, which is what decides whether to keep loading. */
-    const root=document.getElementById('decisions');
+    const root=document.getElementById('decisionList');
     if(!root)return 0;
     const list=root.querySelector('.decision-list')||root;
     const present=new Set([...list.querySelectorAll('.decision-entry')].map(e=>String(e.dataset.id)));
@@ -1115,7 +1117,7 @@ function appendDecisionEntries(rows){
 }
 
 function renderDecisionLedger(rows){
-    const root=document.getElementById('decisions');
+    const root=document.getElementById('decisionList');
     if(!rows.length){root.innerHTML='<div class="empty-state"><strong>'+esc({concluded:'还没有得出结论的记录',running:'此刻没有正在分析的记录',failed:'没有出错的记录'}[LEDGER_TAB]||'还没有符合条件的决策')+'</strong><p>'+esc({concluded:'机器人可能正在分析，或者这一轮没有标的通过筛选。看看「分析中」和「出错」两个标签。',running:'没有正在跑的分析——上一轮已经结束，下一轮还没开始。',failed:'一次都没失败过，或者失败记录已经被删掉了。'}[LEDGER_TAB]||'配置模型和平台后，机器人收到市场事件才会形成记录。')+'</p><a href="#overview">查看运行状态 →</a></div>';return}
     rememberOpenDetails();
     LEDGER_LOADED=rows.length;
@@ -1601,7 +1603,7 @@ function detailsHtml(r){
 function decisionEntriesHtml(rows){
     registerSeenStatuses(rows);
     const opened=new Set(
-        [...document.querySelectorAll('#decisions details.decision-entry[open]')].map(e=>e.dataset.id)
+        [...document.querySelectorAll('#decisionList details.decision-entry[open]')].map(e=>e.dataset.id)
     );
     return rows.map(r=>{
         const readable=r.readable||null;
@@ -1660,7 +1662,7 @@ function ledgerCategoryLabel(match){
     return parts.join(' · ');
 }
 function shownEntries(){
-    return [...document.querySelectorAll('#decisions .decision-entry')].filter(entry=>!entry.hidden);
+    return [...document.querySelectorAll('#decisionList .decision-entry')].filter(entry=>!entry.hidden);
 }
 function renderLedgerBulk(){
     if(typeof document==='undefined'||!document.getElementById)return;
@@ -1707,7 +1709,7 @@ async function forgetPicked(){
         // Taken out where they stand, so the reader keeps their place and whatever they have open.
         for(const id of ids){
             if(kept.has(String(id)))continue;
-            const entry=document.querySelector('#decisions .decision-entry[data-id="'+id+'"]');
+            const entry=document.querySelector('#decisionList .decision-entry[data-id="'+id+'"]');
             if(entry){entry.remove();removed+=1}
         }
         LEDGER_SERVER_OFFSET=Math.max(0,LEDGER_SERVER_OFFSET-removed);

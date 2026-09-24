@@ -111,12 +111,12 @@ const fs = require('node:fs');
                 if(view==='models'){
                     assert.equal(await page.locator('#modelSelectionMode').inputValue(),'QUALITY');
                     assert(await page.locator('a[href="#plugins/decision_evaluator"]').first().isVisible());
-                    await page.locator('#layaPanel button').click();
+                    await page.locator('#layaPanel').getByRole('button',{name:'测试连接'}).click();
                     await page.waitForFunction(()=>document.getElementById('layaStatus').textContent.includes('服务已连接，模型尚未就绪'));
                     layaReady=true;
                     layaEndpoint='http://gpu-host.example:8899/v1';
                     await page.locator('#layaEndpoint').fill(layaEndpoint);
-                    await page.locator('#layaPanel button').click();
+                    await page.locator('#layaPanel').getByRole('button',{name:'测试连接'}).click();
                     await page.waitForFunction(()=>document.getElementById('layaStatus').textContent.includes('跑在 GPU 上'));
                     assert((await page.locator('#layaStatus').innerText()).includes('跑在 GPU 上'));
                 }
@@ -335,13 +335,20 @@ const fs = require('node:fs');
             await page.unroute('**/api/local');
             await page.evaluate(()=>{location.hash='decisions'});
             await page.waitForFunction(()=>document.querySelector('.nav-link[aria-current="page"]').hash==='#decisions');
-            await page.waitForFunction(()=>!document.getElementById('decisions').hasAttribute('aria-busy'));
+            await page.waitForFunction(()=>!document.getElementById('decisionList').hasAttribute('aria-busy'));
             await page.evaluate(()=>renderDiscoveryActivity({
                 platforms:[{platform:'fixture',latest_observed_at:1000000000000,latest_batch_count:100,batches:3,observations:300,evaluator_counts:{},top_candidates:[]}],
                 runtime_platforms:{fixture:{running:true,runtime:{last_started_at:1000000100,current_stage:'discovery'}}},
                 decision_deletions:[{deleted_at:1000000200000,source:'management_console',scope:{},result:{provider_turns:3,agent_steps:6}}],
-                incidents:[],recent_selections:[],
+                incidents:[],recent_selections:[{selected_at:1000000000000,platform:'fixture',title:'Selected fixture',market_topic_id:'topic',reason:'Fixture reason',strategy:'fixture',position:1}],
             }));
+            assert.equal(await page.locator('#discoveryActivityPanel').evaluate(node=>node.open),false);
+            assert.equal(await page.locator('#discoveryActivity').isVisible(),false);
+            assert((await page.locator('#discoveryActivitySummary').innerText()).includes('1 平台'));
+            assert(await page.locator('#screeningPauseButton').isVisible());
+            await page.locator('#discoveryActivityPanel>summary').click();
+            assert(await page.locator('#discoveryActivity').isVisible());
+            assert.equal(await page.locator('#discoveryActivity details').last().evaluate(node=>node.open),false);
             assert((await page.locator('#discoveryActivity').innerText()).includes('当前阶段：采集与粗筛'));
             assert(!(await page.locator('#discoveryActivity').innerText()).includes('删除审计'));
             assert((await page.locator('#deletionAudit').textContent()).includes('不是市场采集时间'));
@@ -363,6 +370,10 @@ const fs = require('node:fs');
             assert((await page.locator('#evaluatorScreenings').innerText()).includes('优先'));
             await page.unroute('**/api/local');
             await page.evaluate(()=>{LEDGER_TAB='concluded';LEDGER_RESULTS=new Set();renderDecisionLedger([{id:'ui-fixture',created_at:new Date().toISOString(),platform:'demo',market_topic_id:'Only a browser fixture',context:{market:{title:'Very long market '.repeat(20)}},final_decision:{action:'HOLD',rationale:'Evidence is incomplete; do not place an order.'},proposed_decision:{action:'HOLD',rationale:'Need research'},status:'NO_ACTION',group:'concluded',result:'HOLD',agent_steps:2,research:[{source:'fixture'}]}])});
+            assert.equal(await page.locator('#decisionRecordsPanel').evaluate(node=>node.open),false);
+            assert.equal(await page.locator('.decision-entry').isVisible(),false);
+            await page.locator('#decisionRecordsPanel>summary').click();
+            assert(await page.locator('.decision-entry').isVisible());
             await page.locator('.decision-entry>summary').click();
             assert.equal(await page.locator('.ledger-four>dt').count(),4);
             await page.locator('.ledger-more>summary').first().click();

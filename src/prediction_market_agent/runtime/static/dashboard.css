@@ -101,7 +101,7 @@ dialog{background:var(--surface)!important;color:var(--ink)!important;border:1px
 
 /* Rows already on screen stay readable while the next page loads; they are simply out of date, and
    blanking them would throw away the only thing the reader currently has. */
-#decisions.is-loading{opacity:.55;transition:opacity .15s}
+#decisionList.is-loading{opacity:.55;transition:opacity .15s}
 
 /* Rows that are on their way. Shaped like the real entry and placed exactly where it will land, so
    the movement answers "is anything happening here" without the reader having to look elsewhere. */
@@ -176,6 +176,15 @@ dialog{background:var(--surface)!important;color:var(--ink)!important;border:1px
 .page-guide{margin:6px 0 10px}
 .page-guide>summary{cursor:pointer;color:var(--muted)}
 .page-guide[open]>summary{margin-bottom:8px}
+
+/* The decision list is a single optional reading area; its rows keep their own disclosure state. */
+.decision-list-panel>summary.section-heading{align-items:center;justify-content:flex-start;gap:12px;margin:0;padding:0;list-style:none;color:var(--ink)}
+.decision-list-panel>summary::-webkit-details-marker{display:none}
+.decision-list-panel>summary::before{content:'▸';flex:none;color:var(--accent);font-size:18px;line-height:1;transition:transform .15s}
+.decision-list-panel[open]>summary::before{transform:rotate(90deg)}
+.decision-list-panel>summary h3,.decision-list-panel>summary h4{margin:0;font-size:17px}
+.decision-list-panel>summary p{margin:4px 0 0;color:var(--muted);font-size:13px}
+.decision-list-panel[open]>summary{margin-bottom:18px}
 
 /* 本地决策模型：一段说明、三步、一条命令。命令要能一眼看全并整行复制。 */
 .laya-why{border-left:3px solid var(--line);padding:6px 12px;margin:8px 0;color:var(--muted)}

@@ -765,6 +765,19 @@ class TheCoreComesFirstTests(unittest.TestCase):
         self.assertIn("process-strip", guide[:900], "the five-step diagram is inside it")
         self.assertNotIn('<details class="page-guide" open', shell)
 
+    def test_long_lists_start_collapsed_without_hiding_controls(self) -> None:
+        shell = self._shell()
+        self.assertIn('<details id="decisionRecordsPanel" class="decision-list-panel">', shell)
+        self.assertIn('<section data-view="decisions" id="decisions" hidden><details id="decisionRecordsPanel"', shell)
+        self.assertIn('<div id="decisionList"></div></details>', shell)
+        self.assertIn('<details id="discoveryActivityPanel" class="decision-list-panel">', shell)
+        self.assertLess(shell.index('id="screeningPauseButton"'),
+                        shell.index('id="discoveryActivityPanel"'))
+        self.assertNotIn('id="decisionRecordsPanel" class="decision-list-panel" open', shell)
+        self.assertNotIn('id="discoveryActivityPanel" class="decision-list-panel" open', shell)
+        views = Path("src/prediction_market_agent/runtime/static/dashboard-views.js").read_text()
+        self.assertNotIn('<details class="diagnostic-detail" open><summary>最近进入深度决策的候选', views)
+
 
 class EachRoundSaysWhatItDidTests(unittest.TestCase):
     """Every discovery round was titled "发现轮次", which distinguishes it from nothing.
