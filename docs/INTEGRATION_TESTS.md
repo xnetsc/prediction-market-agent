@@ -26,6 +26,9 @@ PYTHONPATH=src .venv/bin/python -m pytest -q --ignore=tests/test_api_integration
 - Laya 本地 WebGPU evaluator 的健康协议、单候选四道题上限、结构化输出和 CPU 拒绝；
 - 测试树不允许 `skip`、`xfail` 或 `expectedFailure` 装饰器。
 
+2026-09-24 扫描休眠唤醒修复后为 `762 passed, 261 subtests passed`，另有 2 条第三方弃用警告；
+`tests/test_scan_schedule.py` 模拟等待期间宿主机休眠，检查恢复后按实际时间到点扫描、停止命令仍能打断等待。
+
 完整 `pytest` 默认包含生产联网测试，因此在 Binance 受限网络中会保留真实失败，而不是显示全绿。需要只看
 确定性回归时必须显式使用上面的 `--ignore`，不要给联网用例添加 skip。
 
@@ -138,6 +141,13 @@ iOS Safari、Android 真机、Windows 原生浏览器或真实账号授权验收
 宿主代理测试；`publish` 作业构建安装态镜像，执行 `deploy/check-container.sh`，再发布 amd64/arm64。
 容器检查覆盖 CLI、Codex/Claude/npm、健康端点、回环明文通道和公网认证页。当前工作流不运行完整 pytest，
 所以本地确定性回归和生产 API 矩阵仍是发布前的独立必做项。
+
+若 Docker Hub 暂时不可达，但本机保留了**同仓库、同 Python 3.13 运行时**的上一版安装态镜像，可用
+`deploy/Dockerfile.local-overlay` 离线覆盖当前 `src/` 构建临时验证镜像。它不安装或更新依赖，也不替代
+标准 Dockerfile 的正式构建；必须先核实基础镜像来源和 Python 路径，并在新容器里验证导入与健康状态。
+重建当前服务时仍须保留 Compose 的 `/data`、`/root` 挂载；不要用无挂载的新容器覆盖含密钥的运行数据。
+使用本地标签重建时须通过 `PREDICTION_AGENT_IMAGE=<本地标签> docker compose up -d --no-deps --force-recreate robot`
+显式选择镜像；之后再运行 Compose 时也须带同一变量，否则默认值会切回远端 `latest`。
 
 ## 不能由这些结果推出的结论
 

@@ -5,6 +5,7 @@ import time
 from collections.abc import Callable
 from typing import Any
 
+from ....plugin_system.scan_schedule import wait_until_wall_deadline
 from .config import BinancePluginConfig
 
 
@@ -28,6 +29,7 @@ class BinanceEventLoop:
             "last_finished_at": None,
             "last_error": "",
             "next_delay_seconds": None,
+            "next_run_at": None,
             "holding": False,
             "holding_because": "",
         }
@@ -103,16 +105,20 @@ class BinanceEventLoop:
                     with self._lock:
                         self._status["failures"] = int(self._status["failures"]) + 1
                         self._status["last_error"] = str(error)
+                finished_at = time.time()
+                deadline = finished_at + delay
                 with self._lock:
-                    self._status["last_finished_at"] = int(time.time())
+                    self._status["last_finished_at"] = int(finished_at)
                     self._status["next_delay_seconds"] = delay
-                if self._stop.wait(delay):
+                    self._status["next_run_at"] = int(deadline)
+                if wait_until_wall_deadline(self._stop, deadline):
                     break
                 self._wait_until_decisions_are_possible()
         finally:
             with self._lock:
                 self._status["running"] = False
                 self._status["next_delay_seconds"] = None
+                self._status["next_run_at"] = None
 
     def _wait_until_decisions_are_possible(self) -> None:
         while not self._stop.is_set() and not self._may_decide.is_set():
@@ -147,6 +153,7 @@ class BinanceEventLoop:
             self._thread = None
             self._status["running"] = False
             self._status["next_delay_seconds"] = None
+            self._status["next_run_at"] = None
 
     def status(self) -> dict[str, object]:
         with self._lock:

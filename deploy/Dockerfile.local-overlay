@@ -1,0 +1,7 @@
+# Offline update from an already-installed image when base registries are unavailable.
+# Only use with a base image built from this repository and the same Python runtime.
+ARG BASE_IMAGE=prediction-market-agent:local-base
+FROM ${BASE_IMAGE}
+
+COPY src /app/src
+COPY src/prediction_market_agent /usr/local/lib/python3.13/site-packages/prediction_market_agent

@@ -5,6 +5,7 @@ import time
 from collections.abc import Callable
 from typing import Any
 
+from ....plugin_system.scan_schedule import wait_until_wall_deadline
 from .config import PolymarketPluginConfig
 
 
@@ -30,6 +31,7 @@ class PolymarketEventLoop:
             "last_finished_at": None,
             "last_error": "",
             "next_delay_seconds": None,
+            "next_run_at": None,
             "current_stage": "idle",
             "holding": False,
             "holding_because": "",
@@ -120,17 +122,21 @@ class PolymarketEventLoop:
                     with self._lock:
                         self._status["failures"] = int(self._status["failures"]) + 1
                         self._status["last_error"] = str(error)
+                finished_at = time.time()
+                deadline = finished_at + delay
                 with self._lock:
-                    self._status["last_finished_at"] = int(time.time())
+                    self._status["last_finished_at"] = int(finished_at)
                     self._status["next_delay_seconds"] = delay
+                    self._status["next_run_at"] = int(deadline)
                     self._status["current_stage"] = "waiting"
-                if self._stop.wait(delay):
+                if wait_until_wall_deadline(self._stop, deadline):
                     break
                 self._wait_until_decisions_are_possible()
         finally:
             with self._lock:
                 self._status["running"] = False
                 self._status["next_delay_seconds"] = None
+                self._status["next_run_at"] = None
                 self._status["current_stage"] = "idle"
 
     def _wait_until_decisions_are_possible(self) -> None:
@@ -176,6 +182,7 @@ class PolymarketEventLoop:
             self._thread = None
             self._status["running"] = False
             self._status["next_delay_seconds"] = None
+            self._status["next_run_at"] = None
             self._status["settling"] = still_running
             if still_running:
                 self._status["settling_reason"] = (
