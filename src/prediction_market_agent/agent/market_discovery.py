@@ -207,7 +207,16 @@ Return the selected topics in priority order, each with the specific observation
 slot: the number that changed, the dated catalyst, the inconsistency found. "High volume" and
 "looks interesting" are not reasons. Name the prior or lesson you relied on when one applied, so
 the next review can measure whether it held. If nothing clears the gates this cycle, return fewer
-topics, or none. An empty cycle is a valid and sometimes correct answer."""
+topics, or none. An empty cycle is a valid and sometimes correct answer.
+
+Screening normally revisits every tradeable contract in a durable queue. Use
+`screening_skips` only for exact candidate IDs you explicitly want to defer, with a reason and a
+bounded number of seconds. A changed price, status or deadline can wake one early. Do not use this
+to hide an entire event because one contract had a bad book.
+
+Use `scheduled_reviews` when a specific market/token must be researched after a known delay.
+These appointments wake independently of the venue's broad scanning interval and its screening
+backlog. Name IDs obtained from the supplied facts or tools; use empty arrays otherwise."""
 
 
 DiscoveryPrior = LearnedPrior

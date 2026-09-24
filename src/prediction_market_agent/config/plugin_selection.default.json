@@ -23,5 +23,6 @@
   "decision_strategy": "general_agent",
   "strategy_evolution": true,
   "robot_paused": false,
+  "screening_paused": false,
   "paused_platforms": []
 }

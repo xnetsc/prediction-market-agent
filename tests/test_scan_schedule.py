@@ -55,6 +55,10 @@ class ScanScheduleTests(unittest.TestCase):
                 source = Path(
                     f"src/prediction_market_agent/plugins/api/_{platform}/runtime.py"
                 ).read_text()
-                self.assertIn("wait_until_wall_deadline(self._stop, deadline)", source)
+                if platform == "polymarket":
+                    self.assertIn("self._wait_for_scan_or_review(", source)
+                    self.assertIn("self._stop.wait(remaining)", source)
+                else:
+                    self.assertIn("wait_until_wall_deadline(self._stop, deadline)", source)
                 self.assertIn('self._status["next_run_at"] = int(deadline)', source)
                 self.assertNotIn("self._stop.wait(delay)", source)

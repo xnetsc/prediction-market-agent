@@ -5,3 +5,4 @@ FROM ${BASE_IMAGE}
 
 COPY src /app/src
 COPY src/prediction_market_agent /usr/local/lib/python3.13/site-packages/prediction_market_agent
+COPY deploy/laya-service /opt/laya-service

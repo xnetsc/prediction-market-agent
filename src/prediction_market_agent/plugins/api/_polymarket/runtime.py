@@ -5,7 +5,6 @@ import time
 from collections.abc import Callable
 from typing import Any
 
-from ....plugin_system.scan_schedule import wait_until_wall_deadline
 from .config import PolymarketPluginConfig
 
 
@@ -49,6 +48,10 @@ class PolymarketEventLoop:
             raise ValueError("Polymarket runtime requires a callable submit_scan service")
         # Optional: a plugin that never asks keeps its fixed interval and nothing changes.
         pacing = services.get("next_scan_delay")
+        next_review_at = services.get("next_review_at")
+        review_due = services.get("review_due")
+        next_screening_at = services.get("next_screening_at")
+        screen_pending = services.get("screen_pending")
         discover = services.get("discover_markets")
         if not callable(discover):
             raise ValueError("Polymarket runtime requires a callable discover_markets service")
@@ -69,7 +72,8 @@ class PolymarketEventLoop:
             self._status.update({"running": True, "last_error": ""})
             self._thread = threading.Thread(
                 target=self._run,
-                args=(callback, discover, settings, pacing),
+                args=(callback, discover, settings, pacing, next_review_at, review_due,
+                      next_screening_at, screen_pending),
                 name="prediction-polymarket-runtime",
                 daemon=True,
             )
@@ -81,6 +85,10 @@ class PolymarketEventLoop:
         discover: Callable[..., Any],
         settings: PolymarketPluginConfig,
         pacing: Callable[..., dict] | None = None,
+        next_review_at: Callable[[], int | None] | None = None,
+        review_due: Callable[[], dict[str, Any]] | None = None,
+        next_screening_at: Callable[[], int | None] | None = None,
+        screen_pending: Callable[[], dict[str, Any]] | None = None,
     ) -> None:
         consecutive_failures = 0
         try:
@@ -129,7 +137,10 @@ class PolymarketEventLoop:
                     self._status["next_delay_seconds"] = delay
                     self._status["next_run_at"] = int(deadline)
                     self._status["current_stage"] = "waiting"
-                if wait_until_wall_deadline(self._stop, deadline):
+                if self._wait_for_scan_or_review(
+                    deadline, next_review_at, review_due,
+                    next_screening_at, screen_pending,
+                ):
                     break
                 self._wait_until_decisions_are_possible()
         finally:
@@ -138,6 +149,73 @@ class PolymarketEventLoop:
                 self._status["next_delay_seconds"] = None
                 self._status["next_run_at"] = None
                 self._status["current_stage"] = "idle"
+
+    def _wait_for_scan_or_review(
+        self, scan_deadline: float,
+        next_review_at: Callable[[], int | None] | None,
+        review_due: Callable[[], dict[str, Any]] | None,
+        next_screening_at: Callable[[], int | None] | None = None,
+        screen_pending: Callable[[], dict[str, Any]] | None = None,
+    ) -> bool:
+        """Keep appointments on wall time without changing the broad scan's cadence."""
+        while not self._stop.is_set():
+            now = time.time()
+            if now >= scan_deadline:
+                return False
+            due_at: int | None = None
+            if callable(next_review_at) and callable(review_due):
+                try:
+                    due_at = next_review_at()
+                except Exception as error:
+                    with self._lock:
+                        self._status["last_error"] = f"scheduled review lookup: {error}"
+            if due_at is not None and due_at <= now and self._may_decide.is_set():
+                with self._lock:
+                    self._status["current_stage"] = "scheduled_review"
+                try:
+                    result = review_due() if callable(review_due) else {}
+                except Exception as error:
+                    with self._lock:
+                        self._status["last_error"] = f"scheduled review: {error}"
+                    if self._stop.wait(10):
+                        return True
+                else:
+                    if result.get("waiting_for_provider") and self._stop.wait(10):
+                        return True
+                with self._lock:
+                    self._status["current_stage"] = "waiting"
+                continue
+            screening_at: int | None = None
+            if callable(next_screening_at) and callable(screen_pending):
+                try:
+                    screening_at = next_screening_at()
+                except Exception as error:
+                    with self._lock:
+                        self._status["last_error"] = f"screening queue lookup: {error}"
+            if screening_at is not None and screening_at <= now and self._may_decide.is_set():
+                with self._lock:
+                    self._status["current_stage"] = "market_screening"
+                try:
+                    result = screen_pending() if callable(screen_pending) else {}
+                except Exception as error:
+                    with self._lock:
+                        self._status["last_error"] = f"market screening: {error}"
+                    if self._stop.wait(10):
+                        return True
+                else:
+                    if not result.get("attempted") and self._stop.wait(1):
+                        return True
+                with self._lock:
+                    self._status["current_stage"] = "waiting"
+                continue
+            remaining = min(10.0, max(0.0, scan_deadline - now))
+            if due_at is not None and due_at > now:
+                remaining = min(remaining, due_at - now)
+            if screening_at is not None and screening_at > now:
+                remaining = min(remaining, screening_at - now)
+            if self._stop.wait(remaining):
+                return True
+        return True
 
     def _wait_until_decisions_are_possible(self) -> None:
         while not self._stop.is_set() and not self._may_decide.is_set():

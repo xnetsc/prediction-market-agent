@@ -162,7 +162,7 @@ OpenRouter、模型和新扩展安装只在 `#models` 管理，不在插件中�
 - `examples/api_plugins/static_demo.py`：标准化读取、私有 JSON、线上 HTTP 写传输和卸载。
 - `examples/decision_provider_plugins/static_provider.py`：严格 schema 的结构化 Provider。
 - `plugins/evaluators/jev.py` 与 `examples/plugin_configs/jev.json`：Jev 独立 evaluator、OpenRouter/自定义连接、共享/独立 Key 和独立代理配置。
-- `plugins/evaluators/laya.py`：另一个默认禁用的 evaluator 实例，连接外部 WebGPU 服务并验证类型化问答；与 Jev 共用类别，不共用凭据或端点配置。
+- `plugins/evaluators/laya.py`：另一个默认禁用的 evaluator 实例，连接外部 WebGPU 服务并验证类型化问答；与 Jev 共用类别，不共用凭据或端点配置。插件内部 FIFO 排队、启动与定时独占测速；随附服务另有有界 GPU 队列。
 - `examples/decision_strategy_plugins/example_strategy.py`：策略文本和私有候选筛选。
 - `examples/market_discovery_plugins/example_discovery.py`：私有发现文本、读取预算和进化开关。
 - `examples/research_tool_plugins/static_evidence.py`：动态加入 Agent 控制 schema 的工具。

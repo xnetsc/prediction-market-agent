@@ -85,6 +85,7 @@ class PluginManagementService:
             "decision_strategy": strategy,
             "strategy_evolution": managed.strategy_evolution,
             "robot_paused": managed.robot_paused,
+            "screening_paused": managed.screening_paused,
             "paused_platforms": list(managed.paused_platforms),
             "plugins": result,
         }
@@ -221,6 +222,7 @@ class PluginManagementService:
                 "decision_strategy": strategy,
                 "strategy_evolution": evolution,
                 "robot_paused": self._managed().robot_paused,
+                "screening_paused": self._managed().screening_paused,
                 "paused_platforms": list(self._managed().paused_platforms),
             },
         )
@@ -253,6 +255,8 @@ class PluginManagementService:
                 },
                 "decision_strategy": managed.decision_strategy,
                 "robot_paused": robot_paused,
+                "screening_paused": managed.screening_paused,
+                "strategy_evolution": managed.strategy_evolution,
                 "paused_platforms": list(normalized),
             },
         )
@@ -260,6 +264,20 @@ class PluginManagementService:
             "robot_paused": robot_paused,
             "paused_platforms": list(normalized),
         }
+
+    def save_screening_control(self, *, paused: bool) -> dict[str, bool]:
+        """Pause only the optional coarse-screening worker, not market reviews or decisions."""
+        if not isinstance(paused, bool):
+            raise ValueError("screening_paused must be a boolean")
+        managed = self._managed()
+        save_managed_config(
+            self.config.management_file,
+            {**managed.to_dict(), "screening_paused": paused},
+        )
+        return {"screening_paused": paused}
+
+    def screening_control(self) -> dict[str, bool]:
+        return {"screening_paused": self._managed().screening_paused}
 
     def install_plugin(
         self, kind: str, name: str, source: str, target_directory: str

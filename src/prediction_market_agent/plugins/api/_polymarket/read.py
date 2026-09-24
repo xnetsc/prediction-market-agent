@@ -96,12 +96,6 @@ class PolymarketReadClient:
             raise RuntimeError("Polymarket Gamma event response must be an object")
         return value
 
-    def get_order_book(self, token_id: str) -> dict[str, Any]:
-        value = self._get(self.clob_url, "/book", {"token_id": token_id})
-        if not isinstance(value, dict):
-            raise RuntimeError("Polymarket CLOB book response must be an object")
-        return value
-
     def get_price_history(
         self, token_id: str, *, interval: str = "1d", fidelity: int = 5
     ) -> list[dict[str, Any]]:

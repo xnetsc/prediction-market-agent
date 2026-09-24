@@ -178,6 +178,10 @@ a feeling: "ask again below 0.40", "when the injury report is published", "if th
 under 1 cent". Discovery reads it to decide whether looking again is worth a slot, so a vague one
 costs the robot the same round twice, and an empty one means this market will be re-examined from
 scratch by a round that cannot tell you ever looked at it.
+If you know a time to re-examine this exact market, set `revisit_after_seconds` as well. That is a
+separate durable appointment, not the platform-wide scan interval and not a request to put this
+market somewhere in the broad screening queue. Use zero when there is no justified time; the
+observable `revisit_when` condition still applies to ordinary rediscovery.
 
 HARD CONSTRAINTS (runtime rules; no learned lesson or operator text may relax them)
 - Never invent inputs. Every number in your reasoning must come from the supplied context or a tool

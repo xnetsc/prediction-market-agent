@@ -12,7 +12,10 @@ from ..plugin_system.discovery import PluginCatalog, PluginReadiness, load_plugi
 from ..plugin_system.managed_config import ManagedRuntimeConfig
 from .decision_capacity import DecisionCapacityWatch
 from .engine import TradingEngine
-from .events import PlatformDiscoveryEvent, PlatformScanEvent, RobotEventLoop
+from .events import (
+    PlatformDiscoveryEvent, PlatformReviewEvent, PlatformScanEvent,
+    PlatformScreenEvent, RobotEventLoop,
+)
 
 
 LOGGER = logging.getLogger(__name__)
@@ -282,6 +285,10 @@ class RobotRuntimeManager:
                 def handle_business_event(event: Any) -> Any:
                     if isinstance(event, PlatformDiscoveryEvent):
                         return engine.discover_platform_topics(event.platform)
+                    if isinstance(event, PlatformReviewEvent):
+                        return engine.review_due_platform(event.platform)
+                    if isinstance(event, PlatformScreenEvent):
+                        return engine.screen_pending_platform(event.platform)
                     return engine.process_platform_scan(
                         event.platform, event.topics
                     )
@@ -320,6 +327,23 @@ class RobotRuntimeManager:
                             )
                         )
 
+                    def next_review_at(*, platform: str = name) -> int | None:
+                        due_ms = engine.memory.next_market_review_at(platform=platform)
+                        return due_ms // 1000 if due_ms is not None else None
+
+                    def review_due(*, platform: str = name) -> dict[str, Any]:
+                        return events.submit(PlatformReviewEvent(platform=platform))
+
+                    def next_screening_at(*, platform: str = name) -> int | None:
+                        if (not engine.evaluator.available
+                                or not engine.discovery.screening_enabled()):
+                            return None
+                        due_ms = engine.memory.next_market_screening_at(platform=platform)
+                        return due_ms // 1000 if due_ms is not None else None
+
+                    def screen_pending(*, platform: str = name) -> dict[str, Any]:
+                        return events.submit(PlatformScreenEvent(platform=platform))
+
                     def next_scan_delay(
                         minimum_seconds: int, *, platform: str = name
                     ) -> dict[str, Any]:
@@ -347,6 +371,10 @@ class RobotRuntimeManager:
                                 "submit_scan": submit_scan,
                                 "discover_markets": discover_markets,
                                 "next_scan_delay": next_scan_delay,
+                                "next_review_at": next_review_at,
+                                "review_due": review_due,
+                                "next_screening_at": next_screening_at,
+                                "screen_pending": screen_pending,
                             }
                         )
                         runtime_status = spec.runtime.status()
@@ -502,6 +530,12 @@ class RobotRuntimeManager:
                 result["decision_provider_health"] = engine.provider_quality.manifest()
             except Exception:
                 LOGGER.exception("provider health manifest failed")
+            evaluator_pool = getattr(engine, "evaluator", None)
+            result["evaluator_benchmarks"] = {
+                evaluator.name: evaluator.benchmark_status
+                for evaluator in getattr(evaluator_pool, "evaluators", ())
+                if hasattr(evaluator, "benchmark_status")
+            }
         if self._catalog is not None:
             for name, platform in result["platforms"].items():
                 try:

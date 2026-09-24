@@ -34,6 +34,7 @@ from prediction_market_agent.plugin_system.contracts import (
     FUNDING_TIMEOUT_SECONDS,
 )
 from .read import PolymarketReadClient
+from .market_stream import MarketBookStream
 from .write import PolymarketWriteTransport
 from .config import PolymarketPluginConfig
 
@@ -107,6 +108,9 @@ class PolymarketApiPlugin:
             raise ValueError("Polymarket plugin configuration mapping is required")
         self.settings = PolymarketPluginConfig.from_mapping(environment)
         self.client = PolymarketReadClient(self.settings)
+        self.market_stream = MarketBookStream(
+            self.settings.market_ws_url, proxy=self.settings.http_proxy or None
+        )
         self._write_transport = PolymarketWriteTransport(self.settings)
         self.funding_requests = FundingRequests(
             Path(self.settings.funding_request_file)
@@ -121,6 +125,7 @@ class PolymarketApiPlugin:
             else Path('config/plugins/polymarket_operator_notes.json')
         )
         self._events: list[dict[str, Any]] = []
+        self._event_by_id: dict[str, dict[str, Any]] = {}
 
     def sync_time(self) -> None:
         self.client.sync_time()
@@ -619,6 +624,7 @@ class PolymarketApiPlugin:
         if offset == 0:
             self._events = []
         self._events.extend(batch)
+        self._event_by_id.update((str(item.get("id", "")), item) for item in batch)
         topics = tuple(self._topic(item) for item in batch)
         return TopicPage(topics, len(batch) == limit, offset + len(batch))
 
@@ -633,8 +639,48 @@ class PolymarketApiPlugin:
             offset=offset, limit=limit, after=stamp(after_ms), before=stamp(before_ms)
         )
         self._events.extend(item for item in batch if item not in self._events)
+        self._event_by_id.update((str(item.get("id", "")), item) for item in batch)
         topics = tuple(self._topic(item) for item in batch)
         return TopicPage(topics, len(batch) == limit, offset + len(batch))
+
+    def screening_candidates(self, topic: Topic) -> list[dict[str, Any]]:
+        """Use the markets already embedded in Gamma's event listing; no detail HTTP read."""
+        raw = self._event_by_id.get(str(topic.topic_id)) or {}
+        candidates: list[dict[str, Any]] = []
+        for item in raw.get("markets") or []:
+            if not isinstance(item, dict):
+                continue
+            market = self._market(item)
+            if market.status != "OPEN" or not any(outcome.outcome_id for outcome in market.outcomes):
+                continue
+            candidate_id = f"{topic.topic_id}:{market.market_id}"
+            outcomes = [
+                {"name": outcome.name, "token_id": outcome.outcome_id,
+                 "displayed_probability": outcome.displayed_probability}
+                for outcome in market.outcomes
+            ]
+            candidates.append({
+                "candidate_id": candidate_id,
+                "topic_id": topic.topic_id,
+                "market_id": market.market_id,
+                "title": market.title or topic.title,
+                "question": market.question,
+                "event_title": topic.title,
+                "description": topic.description[:600],
+                "category": topic.category,
+                "status": market.status,
+                "liquidity_usdt": market.liquidity_usdt,
+                "volume_usdt": market.volume_usdt,
+                "end_time_ms": market.end_time_ms,
+                "outcomes": outcomes,
+                # A changed price, status or deadline reopens a previously skipped contract.
+                "material_key": json.dumps(
+                    [market.status, market.end_time_ms,
+                     [outcome.displayed_probability for outcome in market.outcomes]],
+                    separators=(",", ":"),
+                ),
+            })
+        return candidates
 
     def get_topic(self, topic_id: str) -> TopicDetail:
         raw = self.client.get_event(topic_id)
@@ -668,7 +714,7 @@ class PolymarketApiPlugin:
 
     def get_order_book(self, market_id: str, outcome_id: str) -> OrderBook:
         del market_id
-        raw = self.client.get_order_book(outcome_id)
+        raw = self.market_stream.get_book(outcome_id)
 
         def levels(name: str) -> tuple[PriceLevel, ...]:
             return tuple(
@@ -758,6 +804,7 @@ class PolymarketApiPlugin:
         return None
 
     def close(self) -> None:
+        self.market_stream.close()
         self._write_transport.close()
 
     def search_market_candidates(

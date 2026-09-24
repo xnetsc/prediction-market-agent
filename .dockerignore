@@ -12,6 +12,8 @@ docs/REQUIREMENTS_STATUS.md
 build
 dist
 !deploy/laya-service/vendor/webtorch/dist
+deploy/laya-service/models
+deploy/laya-service/node_modules
 __pycache__
 .pytest_cache
 tests

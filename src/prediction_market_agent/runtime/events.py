@@ -24,7 +24,23 @@ class PlatformDiscoveryEvent:
     created_at: int = field(default_factory=lambda: int(time.time()))
 
 
-BusinessEvent = PlatformScanEvent | PlatformDiscoveryEvent
+@dataclass(frozen=True)
+class PlatformReviewEvent:
+    """A due market-specific appointment, independent of broad discovery cadence."""
+
+    platform: str
+    created_at: int = field(default_factory=lambda: int(time.time()))
+
+
+@dataclass(frozen=True)
+class PlatformScreenEvent:
+    """One due background screening chunk; not a full discovery or trading decision."""
+
+    platform: str
+    created_at: int = field(default_factory=lambda: int(time.time()))
+
+
+BusinessEvent = PlatformScanEvent | PlatformDiscoveryEvent | PlatformReviewEvent | PlatformScreenEvent
 
 
 @dataclass

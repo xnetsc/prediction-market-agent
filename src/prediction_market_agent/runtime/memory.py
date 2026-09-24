@@ -228,6 +228,46 @@ class SessionMemory:
             );
             CREATE INDEX IF NOT EXISTS idx_topic_observation
                 ON topic_observations(platform, market_topic_id, observed_at DESC);
+            CREATE TABLE IF NOT EXISTS market_screening_queue (
+                platform TEXT NOT NULL,
+                candidate_id TEXT NOT NULL,
+                topic_id TEXT NOT NULL,
+                market_id TEXT NOT NULL,
+                active INTEGER NOT NULL DEFAULT 1,
+                candidate_json TEXT NOT NULL,
+                material_key TEXT NOT NULL,
+                first_seen_at INTEGER NOT NULL,
+                last_seen_at INTEGER NOT NULL,
+                next_due_at INTEGER NOT NULL,
+                last_screened_at INTEGER NOT NULL DEFAULT 0,
+                assessment_json TEXT NOT NULL DEFAULT '{}',
+                failure_count INTEGER NOT NULL DEFAULT 0,
+                last_error TEXT NOT NULL DEFAULT '',
+                skip_until INTEGER NOT NULL DEFAULT 0,
+                skip_material_key TEXT NOT NULL DEFAULT '',
+                skip_reason TEXT NOT NULL DEFAULT '',
+                PRIMARY KEY (platform, candidate_id)
+            );
+            CREATE INDEX IF NOT EXISTS idx_market_screening_due
+                ON market_screening_queue(platform, next_due_at, first_seen_at);
+            CREATE TABLE IF NOT EXISTS scheduled_market_reviews (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                platform TEXT NOT NULL,
+                topic_id TEXT NOT NULL,
+                market_id TEXT NOT NULL DEFAULT '',
+                token_id TEXT NOT NULL DEFAULT '',
+                due_at INTEGER NOT NULL,
+                reason TEXT NOT NULL,
+                source_decision_id INTEGER,
+                created_at INTEGER NOT NULL,
+                completed_at INTEGER NOT NULL DEFAULT 0,
+                last_error TEXT NOT NULL DEFAULT ''
+            );
+            CREATE INDEX IF NOT EXISTS idx_scheduled_market_reviews_due
+                ON scheduled_market_reviews(platform, completed_at, due_at);
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_scheduled_market_review_source
+                ON scheduled_market_reviews(source_decision_id)
+                WHERE source_decision_id IS NOT NULL;
             CREATE INDEX IF NOT EXISTS idx_topic_observation_batch
                 ON topic_observations(platform, observed_at DESC);
             CREATE TABLE IF NOT EXISTS discovery_selections (
@@ -777,6 +817,7 @@ class SessionMemory:
         status: str,
         error: str = "",
     ) -> None:
+        now = int(time.time() * 1000)
         cursor = self.connection.execute(
             """
             UPDATE decision_ledger SET
@@ -786,7 +827,7 @@ class SessionMemory:
             WHERE id = ?
             """,
             (
-                int(time.time() * 1000),
+                now,
                 provider,
                 self._json(research or []),
                 model_raw_output,
@@ -801,6 +842,24 @@ class SessionMemory:
         )
         if cursor.rowcount != 1:
             raise ValueError(f"Unknown decision ledger id: {decision_id}")
+        revisit_after = int((final_decision or {}).get("revisit_after_seconds") or 0)
+        if revisit_after > 0 and status not in self.FAILED_STATUSES:
+            identity = self.connection.execute(
+                """SELECT platform, market_topic_id, market_id, token_id, strategy_name
+                   FROM decision_ledger WHERE id = ?""",
+                (int(decision_id),),
+            ).fetchone()
+            if identity and identity[1] and "discovery" not in str(identity[4]):
+                self.connection.execute(
+                    """INSERT OR IGNORE INTO scheduled_market_reviews (
+                           platform, topic_id, market_id, token_id, due_at, reason,
+                           source_decision_id, created_at
+                       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (str(identity[0]), str(identity[1]), str(identity[2]), str(identity[3]),
+                     now + min(revisit_after, 2592000) * 1000,
+                     str((final_decision or {}).get("revisit_when") or "")[:200],
+                     int(decision_id), now),
+                )
         self.connection.commit()
 
     def recalled_context(
@@ -1949,6 +2008,320 @@ class SessionMemory:
                 "status": status,
             })
         return items
+
+    def queue_market_screening(
+        self, *, platform: str, candidates: list[dict[str, Any]],
+        topic_ids: list[str] | None = None, observed_at: int | None = None
+    ) -> int:
+        """Retain every listed contract until it receives a typed screening answer.
+
+        A material price/status change wakes an explicitly skipped contract. Unchanged contracts
+        are revisited on their own due time; listing order cannot repeatedly starve the tail.
+        """
+        now = int(observed_at if observed_at is not None else time.time() * 1000)
+        queued = 0
+        for candidate in candidates:
+            candidate_id = str(candidate.get("candidate_id") or "")
+            topic_id = str(candidate.get("topic_id") or "")
+            if not candidate_id or not topic_id:
+                continue
+            key = str(candidate.get("material_key") or "")
+            self.connection.execute(
+                """
+                INSERT INTO market_screening_queue (
+                    platform, candidate_id, topic_id, market_id, candidate_json, material_key,
+                    first_seen_at, last_seen_at, next_due_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(platform, candidate_id) DO UPDATE SET
+                    topic_id = excluded.topic_id,
+                    market_id = excluded.market_id,
+                    active = 1,
+                    candidate_json = excluded.candidate_json,
+                    material_key = excluded.material_key,
+                    last_seen_at = excluded.last_seen_at,
+                    next_due_at = CASE
+                        WHEN market_screening_queue.material_key != excluded.material_key
+                        THEN excluded.next_due_at
+                        ELSE market_screening_queue.next_due_at END,
+                    assessment_json = CASE
+                        WHEN market_screening_queue.material_key != excluded.material_key
+                        THEN '{}' ELSE market_screening_queue.assessment_json END,
+                    last_screened_at = CASE
+                        WHEN market_screening_queue.material_key != excluded.material_key
+                        THEN 0 ELSE market_screening_queue.last_screened_at END,
+                    failure_count = CASE
+                        WHEN market_screening_queue.material_key != excluded.material_key
+                        THEN 0 ELSE market_screening_queue.failure_count END,
+                    last_error = CASE
+                        WHEN market_screening_queue.material_key != excluded.material_key
+                        THEN '' ELSE market_screening_queue.last_error END,
+                    skip_until = CASE
+                        WHEN market_screening_queue.material_key != excluded.material_key
+                        THEN 0 ELSE market_screening_queue.skip_until END,
+                    skip_reason = CASE
+                        WHEN market_screening_queue.material_key != excluded.material_key
+                        THEN '' ELSE market_screening_queue.skip_reason END
+                """,
+                (
+                    str(platform), candidate_id, topic_id,
+                    str(candidate.get("market_id") or ""), self._json(candidate), key,
+                    now, now, now,
+                ),
+            )
+            queued += 1
+        by_topic: dict[str, list[str]] = {}
+        for candidate in candidates:
+            topic_id = str(candidate.get("topic_id") or "")
+            candidate_id = str(candidate.get("candidate_id") or "")
+            if topic_id and candidate_id:
+                by_topic.setdefault(topic_id, []).append(candidate_id)
+        for topic_id in topic_ids or []:
+            keep = by_topic.get(str(topic_id), [])
+            if keep:
+                placeholders = ",".join("?" for _ in keep)
+                self.connection.execute(
+                    f"""UPDATE market_screening_queue SET active = 0
+                        WHERE platform = ? AND topic_id = ? AND candidate_id NOT IN ({placeholders})""",
+                    (str(platform), str(topic_id), *keep),
+                )
+            else:
+                self.connection.execute(
+                    "UPDATE market_screening_queue SET active = 0 WHERE platform = ? AND topic_id = ?",
+                    (str(platform), str(topic_id)),
+                )
+        self.connection.commit()
+        return queued
+
+    def due_market_screening(
+        self, *, platform: str, limit: int, now_ms: int | None = None
+    ) -> list[dict[str, Any]]:
+        now = int(now_ms if now_ms is not None else time.time() * 1000)
+        rows = self.connection.execute(
+            """
+            SELECT candidate_json, assessment_json, last_screened_at FROM market_screening_queue
+            WHERE platform = ? AND active = 1 AND next_due_at <= ? AND skip_until <= ?
+            ORDER BY next_due_at, first_seen_at, rowid LIMIT ?
+            """,
+            (str(platform), now, now, max(1, int(limit))),
+        ).fetchall()
+        candidates = []
+        for raw, assessment_raw, screened_at in rows:
+            candidate = json.loads(raw)
+            if screened_at:
+                assessment = json.loads(assessment_raw or "{}")
+                if isinstance(assessment, dict) and assessment.get("action"):
+                    candidate["prior_screen"] = {
+                        "action": assessment["action"],
+                        "confidence": assessment.get("confidence"),
+                    }
+            candidates.append(candidate)
+        return candidates
+
+    def recent_market_decisions(
+        self, *, platform: str, market_ids: list[str], limit_per_market: int = 2
+    ) -> dict[str, list[dict[str, Any]]]:
+        """Only decisions for the exact contract, never another contract in its event."""
+        ids = list(dict.fromkeys(str(item) for item in market_ids if str(item)))
+        if not ids:
+            return {}
+        marks = ",".join("?" for _ in ids)
+        rows = self.connection.execute(
+            f"""SELECT market_id, final_decision_json FROM (
+                  SELECT market_id, final_decision_json,
+                         ROW_NUMBER() OVER (
+                             PARTITION BY market_id ORDER BY created_at DESC, id DESC
+                         ) AS rank_in_market
+                  FROM decision_ledger
+                  WHERE platform = ? AND market_id IN ({marks})
+                    AND final_decision_json IS NOT NULL
+                ) WHERE rank_in_market <= ?""",
+            (str(platform), *ids, max(1, int(limit_per_market))),
+        ).fetchall()
+        result: dict[str, list[dict[str, Any]]] = {}
+        for market_id, raw in rows:
+            items = result.setdefault(str(market_id), [])
+            if len(items) >= max(1, int(limit_per_market)):
+                continue
+            try:
+                decision = json.loads(raw)
+            except (TypeError, ValueError):
+                continue
+            if isinstance(decision, dict) and decision.get("action"):
+                items.append({
+                    "action": str(decision["action"]),
+                    "revisit_when": str(decision.get("revisit_when") or "")[:100],
+                })
+        return result
+
+    def next_market_screening_at(self, *, platform: str) -> int | None:
+        row = self.connection.execute(
+            """SELECT MIN(MAX(next_due_at, skip_until)) FROM market_screening_queue
+               WHERE platform = ? AND active = 1""", (str(platform),)
+        ).fetchone()
+        return int(row[0]) if row and row[0] is not None else None
+
+    def complete_market_screening(
+        self, *, platform: str, candidate_id: str, assessment: dict[str, Any] | None,
+        error: str = "", now_ms: int | None = None,
+    ) -> None:
+        now = int(now_ms if now_ms is not None else time.time() * 1000)
+        if assessment is None:
+            self.connection.execute(
+                """
+                UPDATE market_screening_queue SET
+                    failure_count = failure_count + 1,
+                    last_error = ?,
+                    next_due_at = ? + MIN(300000, 5000 * (1 << MIN(failure_count, 6)))
+                WHERE platform = ? AND candidate_id = ?
+                """,
+                (str(error)[:300], now, str(platform), str(candidate_id)),
+            )
+        else:
+            self.connection.execute(
+                """
+                UPDATE market_screening_queue SET
+                    assessment_json = ?, last_screened_at = ?, next_due_at = ?,
+                    failure_count = 0, last_error = ''
+                WHERE platform = ? AND candidate_id = ?
+                """,
+                (self._json(assessment), now, now + 15 * 60 * 1000,
+                 str(platform), str(candidate_id)),
+            )
+        self.connection.commit()
+
+    def market_screening_for_topics(
+        self, *, platform: str, topic_ids: list[str]
+    ) -> dict[str, list[dict[str, Any]]]:
+        if not topic_ids:
+            return {}
+        result: dict[str, list[dict[str, Any]]] = {}
+        for start in range(0, len(topic_ids), 500):
+            chunk = topic_ids[start:start + 500]
+            placeholders = ",".join("?" for _ in chunk)
+            rows = self.connection.execute(
+                f"""SELECT topic_id, candidate_id, candidate_json, assessment_json,
+                           last_screened_at, last_error, next_due_at, skip_until
+                    FROM market_screening_queue
+                    WHERE platform = ? AND active = 1 AND topic_id IN ({placeholders})""",
+                (str(platform), *chunk),
+            ).fetchall()
+            for row in rows:
+                result.setdefault(str(row[0]), []).append({
+                    "candidate_id": str(row[1]),
+                    "candidate": json.loads(row[2]),
+                    "assessment": json.loads(row[3] or "{}"),
+                    "last_screened_at": int(row[4]),
+                    "last_error": str(row[5]),
+                    "next_due_at": int(row[6]),
+                    "skip_until": int(row[7]),
+                })
+        return result
+
+    def market_screening_counts(self, *, platform: str) -> dict[str, int]:
+        now = int(time.time() * 1000)
+        row = self.connection.execute(
+            """SELECT COUNT(*),
+                      SUM(CASE WHEN last_screened_at > 0 THEN 1 ELSE 0 END),
+                      SUM(CASE WHEN next_due_at <= ? AND skip_until <= ? THEN 1 ELSE 0 END),
+                      SUM(CASE WHEN last_error != '' THEN 1 ELSE 0 END)
+               FROM market_screening_queue WHERE platform = ? AND active = 1""",
+            (now, now, str(platform)),
+        ).fetchone()
+        return {
+            "known": int(row[0] or 0), "screened": int(row[1] or 0),
+            "due": int(row[2] or 0), "failed": int(row[3] or 0),
+        }
+
+    def skip_market_screening(
+        self, *, platform: str, candidate_id: str, for_seconds: int, reason: str
+    ) -> bool:
+        """Only a named model instruction can defer a known contract's coarse screening."""
+        seconds = int(for_seconds)
+        if not 60 <= seconds <= 2592000 or not str(reason).strip():
+            return False
+        until = int(time.time() * 1000) + seconds * 1000
+        cursor = self.connection.execute(
+            """UPDATE market_screening_queue SET
+                   skip_until = ?, skip_material_key = material_key, skip_reason = ?,
+                   next_due_at = MIN(next_due_at, ?)
+               WHERE platform = ? AND candidate_id = ? AND active = 1""",
+            (until, str(reason)[:300], until, str(platform), str(candidate_id)),
+        )
+        self.connection.commit()
+        return cursor.rowcount == 1
+
+    def schedule_market_review(
+        self, *, platform: str, topic_id: str, market_id: str,
+        token_id: str, after_seconds: int, reason: str,
+        source_decision_id: int | None = None,
+    ) -> int:
+        if not topic_id or not market_id or not token_id or not reason.strip():
+            raise ValueError("a scheduled review needs exact topic, market and token IDs and a reason")
+        seconds = int(after_seconds)
+        if not 1 <= seconds <= 2592000:
+            raise ValueError("scheduled review delay must be within 30 days")
+        now = int(time.time() * 1000)
+        due = now + seconds * 1000
+        existing = self.connection.execute(
+            """SELECT id FROM scheduled_market_reviews
+               WHERE platform = ? AND topic_id = ? AND market_id = ? AND token_id = ?
+                 AND completed_at = 0 AND due_at <= ?
+               ORDER BY due_at LIMIT 1""",
+            (platform, topic_id, market_id, token_id, due),
+        ).fetchone()
+        if existing:
+            return int(existing[0])
+        cursor = self.connection.execute(
+            """INSERT INTO scheduled_market_reviews (
+                   platform, topic_id, market_id, token_id, due_at, reason,
+                   source_decision_id, created_at
+               ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+            (platform, topic_id, market_id, token_id, due,
+             reason[:300], source_decision_id, now),
+        )
+        self.connection.commit()
+        return int(cursor.lastrowid)
+
+    def next_market_review_at(self, *, platform: str) -> int | None:
+        row = self.connection.execute(
+            """SELECT MIN(due_at) FROM scheduled_market_reviews
+               WHERE platform = ? AND completed_at = 0""", (str(platform),)
+        ).fetchone()
+        return int(row[0]) if row and row[0] is not None else None
+
+    def due_market_reviews(
+        self, *, platform: str, limit: int = 1, now_ms: int | None = None
+    ) -> list[dict[str, Any]]:
+        now = int(now_ms if now_ms is not None else time.time() * 1000)
+        rows = self.connection.execute(
+            """SELECT id, topic_id, market_id, token_id, due_at, reason
+               FROM scheduled_market_reviews
+               WHERE platform = ? AND completed_at = 0 AND due_at <= ?
+               ORDER BY due_at, id LIMIT ?""",
+            (str(platform), now, max(1, int(limit))),
+        ).fetchall()
+        return [
+            {"id": int(row[0]), "topic_id": str(row[1]), "market_id": str(row[2]),
+             "token_id": str(row[3]), "due_at": int(row[4]), "reason": str(row[5])}
+            for row in rows
+        ]
+
+    def finish_market_review(self, review_id: int, *, error: str = "") -> None:
+        now = int(time.time() * 1000)
+        if error:
+            # An outage is not a completed appointment. Retry independently of the broad scan.
+            self.connection.execute(
+                """UPDATE scheduled_market_reviews SET due_at = ?, last_error = ?
+                   WHERE id = ? AND completed_at = 0""",
+                (now + 60_000, str(error)[:300], int(review_id)),
+            )
+        else:
+            self.connection.execute(
+                """UPDATE scheduled_market_reviews SET completed_at = ?, last_error = ''
+                   WHERE id = ? AND completed_at = 0""",
+                (now, int(review_id)),
+            )
+        self.connection.commit()
 
     def save_survey_plan(
         self, *, platform: str, queries: list[str], next_scan_seconds: int, reason: str

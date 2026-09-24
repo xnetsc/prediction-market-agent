@@ -213,6 +213,21 @@ async function refreshAttention(m){
 }
 
 const DISCOVERY_STAGE_LABELS={discovery_continuation:'继续扫描判断',market_selection:'候选选择'};
+let SCREENING_PAUSED=false;
+function renderScreeningControl(state){
+    SCREENING_PAUSED=Boolean(state.screening_paused);
+    const button=document.getElementById('screeningPauseButton'),status=document.getElementById('screeningPauseStatus');
+    if(button){button.disabled=false;button.textContent=SCREENING_PAUSED?'恢复粗筛轮询':'暂停粗筛轮询'}
+    if(status){status.className='status '+(SCREENING_PAUSED?'pending':'good');status.textContent=SCREENING_PAUSED?'粗筛已暂停；待处理队列保留':'粗筛运行中'}
+}
+async function toggleScreeningPause(){
+    const button=document.getElementById('screeningPauseButton'),status=document.getElementById('screeningPauseStatus');
+    if(!button)return;
+    button.disabled=true;
+    if(status){status.className='status pending';status.textContent='正在保存粗筛状态…'}
+    try{renderScreeningControl(await post('/api/screening/control',{screening_paused:!SCREENING_PAUSED}))}
+    catch(error){button.disabled=false;if(status){status.className='status danger';status.textContent=error.message}}
+}
 const DISCOVERY_ACTION_LABELS={CONTINUE:'继续深入',PRIORITIZE:'优先',NEEDS_DATA:'需要更多数据',DEFER:'暂缓',REJECT:'拒绝',DROP:'淘汰',UNKNOWN:'未知'};
 let RECENT_DELETION_AUDIT=[];
 function renderDiscoveryActivity(data){
@@ -233,7 +248,10 @@ function renderDiscoveryActivity(data){
         const progress=inProgress?'<p class="pending">平台当前轮次自 '+esc(new Date(started).toLocaleString())+' 开始，当前阶段：'+stage+'；尚未写入新采集。下方数字属于上一次完成的批次。</p>':'';
         const nextRunAt=Number(current.next_run_at||0)*1000;
         const schedule=live.running&&current.current_stage==='waiting'&&nextRunAt?'<p class="muted">下次扫描不早于 '+esc(new Date(nextRunAt).toLocaleString())+(current.holding?'；正在等待可用模型':'；主机休眠恢复后会按此时间补扫')+'</p>':'';
-        blocks.push('<article class="discovery-platform"><div class="section-heading"><div><h4>'+esc(platform.platform)+'</h4><p class="muted">上次完成采集 '+esc(new Date(platform.latest_observed_at).toLocaleString())+' · 当批 '+platform.latest_batch_count+' 个 · 累计 '+platform.batches+' 批 / '+platform.observations+' 条观察</p></div><span class="badge '+(inProgress?'pending':'ready')+'">'+(inProgress?'本轮未完成':'历史记录')+'</span></div>'+progress+schedule+'<div class="summary-line"><strong>上次粗筛：</strong>'+evaluator+(platform.evaluator_providers?.length?' · 服务 '+esc(platform.evaluator_providers.join(', ')):'')+'</div>'+((plan.reason||plan.queries?.length)?'<details class="discovery-detail"><summary>续扫计划与下轮检索</summary>'+(plan.reason?'<p><strong>续扫计划：</strong>'+esc(plan.reason)+'；'+(plan.next_scan_seconds?'约 '+plan.next_scan_seconds+' 秒后':'按平台最短间隔')+'</p>':'')+(plan.queries?.length?'<p class="muted">下轮检索：'+esc(plan.queries.join('；'))+'</p>':'')+'</details>':'')+(platform.top_candidates?.length?'<details class="discovery-detail"><summary>最近候选 '+platform.top_candidates.length+' 个</summary>'+table(platform.top_candidates,[['最近候选',row=>'<strong>'+esc(row.title)+'</strong><br><span class="muted">'+esc(row.market_topic_id)+'</span>'],['流动性 / 成交量',row=>pnlNumber(row.liquidity_usdt)+' / '+pnlNumber(row.volume_usdt)],['评估器',row=>row.typed_evaluation?esc(DISCOVERY_ACTION_LABELS[row.typed_evaluation.action]||row.typed_evaluation.action)+' · 置信度 '+esc(row.typed_evaluation.confidence??'未知'):'未粗筛']])+'</details>':'')+'</article>');
+        const coverage=platform.market_screening_counts;
+        const screeningSummary=coverage?'<div class="summary-line"><strong>逐市场粗筛队列：</strong>已发现 '+coverage.known+' · 已粗筛 '+coverage.screened+' · 待处理 '+coverage.due+' · 失败 '+coverage.failed+'</div>':'';
+        const nextReview=platform.next_market_review_at?'<p class="muted">下次独立定时复查：'+esc(new Date(platform.next_market_review_at).toLocaleString())+'</p>':'';
+        blocks.push('<article class="discovery-platform"><div class="section-heading"><div><h4>'+esc(platform.platform)+'</h4><p class="muted">上次完成采集 '+esc(new Date(platform.latest_observed_at).toLocaleString())+' · 当批 '+platform.latest_batch_count+' 个 · 累计 '+platform.batches+' 批 / '+platform.observations+' 条观察</p></div><span class="badge '+(inProgress?'pending':'ready')+'">'+(inProgress?'本轮未完成':'历史记录')+'</span></div>'+progress+schedule+screeningSummary+nextReview+'<div class="summary-line"><strong>上次粗筛：</strong>'+evaluator+(platform.evaluator_providers?.length?' · 服务 '+esc(platform.evaluator_providers.join(', ')):'')+'</div>'+((plan.reason||plan.queries?.length)?'<details class="discovery-detail"><summary>续扫计划与下轮检索</summary>'+(plan.reason?'<p><strong>续扫计划：</strong>'+esc(plan.reason)+'；'+(plan.next_scan_seconds?'约 '+plan.next_scan_seconds+' 秒后':'按平台最短间隔')+'</p>':'')+(plan.queries?.length?'<p class="muted">下轮检索：'+esc(plan.queries.join('；'))+'</p>':'')+'</details>':'')+(platform.top_candidates?.length?'<details class="discovery-detail"><summary>最近候选 '+platform.top_candidates.length+' 个</summary>'+table(platform.top_candidates,[['最近候选',row=>'<strong>'+esc(row.title)+'</strong><br><span class="muted">'+esc(row.market_topic_id)+'</span>'],['流动性 / 成交量',row=>pnlNumber(row.liquidity_usdt)+' / '+pnlNumber(row.volume_usdt)],['评估器',row=>row.typed_evaluation?esc(DISCOVERY_ACTION_LABELS[row.typed_evaluation.action]||row.typed_evaluation.action)+' · 置信度 '+esc(row.typed_evaluation.confidence??'未知'):'未粗筛']])+'</details>':'')+'</article>');
     }
     if((data.recent_selections||[]).length)blocks.push('<details class="diagnostic-detail" open><summary>最近进入深度决策的候选 · '+data.recent_selections.length+' 条</summary>'+table(data.recent_selections,[['时间 / 平台',row=>esc(new Date(row.selected_at).toLocaleString())+'<br>'+esc(row.platform)],['候选',row=>'<strong>'+esc(row.title)+'</strong><br><span class="muted">'+esc(row.market_topic_id)+'</span>'],['入选原因',row=>esc(row.reason)],['策略 / 顺位',row=>esc(row.strategy)+' / '+row.position]])+'</details>');
     host.innerHTML=blocks.length?blocks.join(''):'<div class="empty-state"><strong>还没有市场采集记录</strong><p>平台完成第一次扫描后，这里会显示采集批次、评估器粗筛和候选选择；这不等同于交易决策。</p></div>';
@@ -2034,6 +2052,23 @@ function discoveryTitle(r){
 
 // 本地决策模型：它跑在容器外面，所以这里能做的只有一件事——替用户确认那台机器上的服务真的在答，
 // 以及答的是不是 GPU 那条路径。连不上和跑在 CPU 上是两种不同的坏，要分开说。
+function renderLayaBenchmark(runtime){
+    const note=document.getElementById('layaBenchmarkStatus');if(!note)return;
+    const value=runtime?.evaluator_benchmarks?.laya;
+    if(!value){note.className='status muted';note.textContent='Laya 评估器未启用，暂无测速';return}
+    if(value.status==='running'){note.className='status pending';note.textContent='测速中，插件请求正在排队';return}
+    if(value.status==='failed'){note.className='status danger';note.textContent='最近测速失败：'+String(value.error||'未知原因');return}
+    if(value.status==='ok'){
+        note.className='status good';note.textContent='最近 '+value.samples+' 次中位 '+value.median_ms+'ms · 最慢 '+value.max_ms+'ms · '+new Date(value.measured_at*1000).toLocaleString();return;
+    }
+    note.className='status muted';note.textContent='尚未完成测速';
+}
+async function refreshLayaBenchmark(){
+    const note=document.getElementById('layaBenchmarkStatus');
+    if(note){note.className='status pending';note.textContent='正在读取测速结果…'}
+    try{renderLayaBenchmark(await get('/api/runtime'))}
+    catch(error){if(note){note.className='status danger';note.textContent=error.message}}
+}
 async function checkLaya(){
     const note=document.getElementById('layaStatus');
     const endpoint=(document.getElementById('layaEndpoint')?.value||'').trim();

@@ -62,6 +62,8 @@ http://127.0.0.1:8899/v1                # 仅适用于调用方与服务共享�
 
 API 是 OpenRouter 的 chat-completions 形状，所以任何能调 OpenRouter 的东西都能调它：
 
+当前本地模型的 `max_prefixes` 为 6，`/health` 中的 `surface.takes.questions.max` 会给出实际题目上限；“20”指默认配置下单道选择题选项过多时的质量风险，不是每次最多 20 道题。机器人中的 Laya 评估器会自己排队、限制题数并缩短自动粗筛输入；启用时及默认每 5 分钟做一次独占测速，期间插件调用排队。服务端也会让 WebGPU 工作串行，避免客户端超时后下一请求与未结束的计算重叠。
+
 ```bash
 curl -s http://127.0.0.1:8899/v1/chat/completions -H 'content-type: application/json' -d '{
   "model": "convaiinnovations/laya",

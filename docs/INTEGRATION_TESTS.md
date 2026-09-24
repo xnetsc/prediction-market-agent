@@ -29,6 +29,8 @@ PYTHONPATH=src .venv/bin/python -m pytest -q --ignore=tests/test_api_integration
 2026-09-24 扫描休眠唤醒修复后为 `762 passed, 261 subtests passed`，另有 2 条第三方弃用警告；
 `tests/test_scan_schedule.py` 模拟等待期间宿主机休眠，检查恢复后按实际时间到点扫描、停止命令仍能打断等待。
 
+2026-09-24 逐市场粗筛、盘口 WebSocket 与 Laya 串行测速接入后为 `781 passed, 261 subtests passed`，另有 2 条第三方弃用警告。新增测试覆盖持久队列、逐市场历史与定时复查、独立暂停、WebSocket 断线过期/增量以及启动与定时测速独占。服务端另运行 `node --test tests/laya_gpu_queue.test.mjs tests/webtorch_sync.test.mjs`，4 项通过；它验证断开的调用不会提前释放 GPU 队列。宿主 WebGPU 真实测速三样本中位约 330–343ms；容器新镜像能导入 WebSocket 与 Laya 代码并读取宿主 `/health`，但这不替代公网 WebSocket 长期稳定性观察。
+
 完整 `pytest` 默认包含生产联网测试，因此在 Binance 受限网络中会保留真实失败，而不是显示全绿。需要只看
 确定性回归时必须显式使用上面的 `--ignore`，不要给联网用例添加 skip。
 
@@ -143,7 +145,7 @@ iOS Safari、Android 真机、Windows 原生浏览器或真实账号授权验收
 所以本地确定性回归和生产 API 矩阵仍是发布前的独立必做项。
 
 若 Docker Hub 暂时不可达，但本机保留了**同仓库、同 Python 3.13 运行时**的上一版安装态镜像，可用
-`deploy/Dockerfile.local-overlay` 离线覆盖当前 `src/` 构建临时验证镜像。它不安装或更新依赖，也不替代
+`deploy/Dockerfile.local-overlay` 离线覆盖当前 `src/` 与随附 Laya 服务构建临时验证镜像。它不安装或更新依赖，也不替代
 标准 Dockerfile 的正式构建；必须先核实基础镜像来源和 Python 路径，并在新容器里验证导入与健康状态。
 重建当前服务时仍须保留 Compose 的 `/data`、`/root` 挂载；不要用无挂载的新容器覆盖含密钥的运行数据。
 使用本地标签重建时须通过 `PREDICTION_AGENT_IMAGE=<本地标签> docker compose up -d --no-deps --force-recreate robot`

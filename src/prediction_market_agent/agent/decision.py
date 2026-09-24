@@ -31,6 +31,7 @@ DECISION_SCHEMA: dict[str, Any] = {
         # round has no way to tell "I looked and there is nothing here" from "nobody has looked",
         # and spends its slots looking again at what was already settled.
         "revisit_when": {"type": "string", "maxLength": 200},
+        "revisit_after_seconds": {"type": "integer", "minimum": 0, "maximum": 2592000},
         "priors": {
             "type": "array",
             "maxItems": 4,
@@ -48,6 +49,7 @@ DECISION_SCHEMA: dict[str, Any] = {
         "rationale",
         "headline",
         "revisit_when",
+        "revisit_after_seconds",
         "priors",
     ],
 }
@@ -102,6 +104,7 @@ class Decision:
     rationale: str
     priors: tuple[str, ...] = ()
     revisit_when: str = ""
+    revisit_after_seconds: int = 0
     """What would have to change for this answer to be different, in the round's own words.
 
     A binary market priced fairly returns HOLD, and it will still be priced fairly the next time it
@@ -129,6 +132,7 @@ class Decision:
                 rationale=str(value["rationale"]),
                 priors=tuple(str(item) for item in value.get("priors") or ())[:4],
                 revisit_when=str(value.get("revisit_when") or "").strip()[:200],
+                revisit_after_seconds=int(value.get("revisit_after_seconds") or 0),
                 headline=str(value.get("headline") or "").strip()[:90],
             )
         except (KeyError, TypeError, ValueError) as error:
@@ -143,6 +147,8 @@ class Decision:
             raise DecisionProviderError("quantity_fraction is outside [0, 1]")
         if decision.limit_price is not None and not 0 < decision.limit_price < 1:
             raise DecisionProviderError("limit_price must be null or in (0, 1)")
+        if not 0 <= decision.revisit_after_seconds <= 2592000:
+            raise DecisionProviderError("revisit_after_seconds must be within 30 days")
         if not 0 <= decision.confidence <= 1 or not 0 <= decision.estimated_probability <= 1:
             raise DecisionProviderError("probability fields are outside [0, 1]")
         if decision.order_type == "LIMIT" and decision.action in {"BUY", "SELL"}:

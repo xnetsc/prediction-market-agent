@@ -44,6 +44,7 @@ class ManagedRuntimeConfig:
     decision_strategy: str = ""
     strategy_evolution: bool = True
     robot_paused: bool = False
+    screening_paused: bool = False
     paused_platforms: tuple[str, ...] = ()
     source_path: Path | None = None
 
@@ -74,6 +75,9 @@ class ManagedRuntimeConfig:
         robot_paused = raw.get("robot_paused", False)
         if not isinstance(robot_paused, bool):
             raise ValueError("Managed plugin setting robot_paused must be a boolean")
+        screening_paused = raw.get("screening_paused", False)
+        if not isinstance(screening_paused, bool):
+            raise ValueError("Managed plugin setting screening_paused must be a boolean")
         paused_platforms = _string_list(
             raw.get("paused_platforms", []), "paused_platforms"
         )
@@ -83,6 +87,7 @@ class ManagedRuntimeConfig:
             decision_strategy=strategy,
             strategy_evolution=evolution,
             robot_paused=robot_paused,
+            screening_paused=screening_paused,
             paused_platforms=paused_platforms or (),
             source_path=source,
         )
@@ -97,6 +102,7 @@ class ManagedRuntimeConfig:
             "decision_strategy": self.decision_strategy,
             "strategy_evolution": self.strategy_evolution,
             "robot_paused": self.robot_paused,
+            "screening_paused": self.screening_paused,
             "paused_platforms": list(self.paused_platforms),
         }
 
@@ -128,6 +134,7 @@ def save_managed_config(path: Path, value: dict[str, Any]) -> ManagedRuntimeConf
         "decision_strategy": value.get("decision_strategy", ""),
         "strategy_evolution": value.get("strategy_evolution", True),
         "robot_paused": value.get("robot_paused", False),
+        "screening_paused": value.get("screening_paused", False),
         "paused_platforms": value.get("paused_platforms", []),
     }
     encoded = json.dumps(candidate, ensure_ascii=False, indent=2) + "\n"

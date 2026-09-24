@@ -17,6 +17,7 @@ from prediction_market_agent.plugin_system.discovery import (
     close_plugin_instances,
 )
 from prediction_market_agent.plugins.api._polymarket.config import PolymarketPluginConfig
+from prediction_market_agent.plugins.api._polymarket.market_stream import DEFAULT_MARKET_WS_URL
 from prediction_market_agent.plugins.api._polymarket.runtime import PolymarketEventLoop
 from prediction_market_agent.plugins.api._polymarket.adapter import PolymarketApiPlugin
 
@@ -26,7 +27,8 @@ def initialize_plugin(context: PluginInitializationContext) -> PluginSpec:
     load, save, delete, storage = json_file_callbacks(path)
     fields = (
         PluginConfigField("POLYMARKET_GAMMA_URL", "Gamma URL", "string", "Polymarket 事件发现与元数据 Gamma API 的 HTTPS 根地址。", required=True, default=PRODUCTION.gamma_url),
-        PluginConfigField("POLYMARKET_CLOB_URL", "CLOB URL", "string", "Polymarket 订单簿行情和订单交易 API 的 HTTPS 根地址。", required=True, default=PRODUCTION.clob_url),
+        PluginConfigField("POLYMARKET_CLOB_URL", "CLOB URL", "string", "Polymarket 账户、历史及订单交易 API 的 HTTPS 根地址；实时订单簿不再轮询此地址。", required=True, default=PRODUCTION.clob_url),
+        PluginConfigField("POLYMARKET_MARKET_WS_URL", "盘口 WebSocket URL", "string", "订阅已发现市场的实时订单簿；断线或快照过期时暂停该盘口的交易判断。沿用本插件的代理设置。", required=True, default=DEFAULT_MARKET_WS_URL),
         PluginConfigField("POLYMARKET_DATA_URL", "Data API URL", "string", "Polymarket 持仓和账户数据 API 的 HTTPS 根地址。", required=True, default=PRODUCTION.data_url),
         PluginConfigField("POLYMARKET_RELAYER_URL", "Relayer URL", "string", "Polymarket gasless 交易、赎回和转账 relayer 的 HTTPS 根地址。", required=True, default=PRODUCTION.relayer_url),
         PluginConfigField("POLYMARKET_BRIDGE_URL", "Bridge URL", "string", "Polymarket 官方充值桥 API 的 HTTPS 根地址；插件用它实时读取支持的源链代币合约并生成本账户的充值地址。", required=True, default="https://bridge.polymarket.com"),

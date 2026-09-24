@@ -1465,7 +1465,7 @@ class ScreeningBudgetTests(unittest.TestCase):
             self.assertEqual(engine._scan_audit[0]["llm_skipped"],
                              "provider_timeout_exceeds_scan_budget")
 
-    def test_a_large_venue_page_does_not_require_one_laya_call_per_topic(self) -> None:
+    def test_a_large_venue_page_has_no_fixed_screening_count_limit(self) -> None:
         class LargePage(FakePlugin):
             def topic_page_size(self) -> int:
                 return 100
@@ -1498,7 +1498,8 @@ class ScreeningBudgetTests(unittest.TestCase):
             )
             surveyed, _ = engine._adaptive_survey(LargePage(100), engine.strategy.budget())
             self.assertEqual(len(surveyed), 100)
-            self.assertLessEqual(len(evaluator.screened), 24)
+            self.assertEqual(len(evaluator.screened), 100)
+            self.assertEqual(engine.memory.market_screening_counts(platform="fake")["screened"], 100)
             self.assertEqual(engine._scan_audit[0]["screened_items"], len(evaluator.screened))
             self.assertEqual(engine._scan_audit[0]["llm_skipped"], "single_candidate_screening_budget")
             self.assertEqual(provider.requests, [])
@@ -1531,5 +1532,8 @@ class ScreeningBudgetTests(unittest.TestCase):
                 surveyed, _ = engine._adaptive_survey(LargePage(100), engine.strategy.budget())
             self.assertEqual(len(surveyed), 100)
             self.assertEqual(engine._scan_audit[0]["stop"], "resource_time_limit")
-            self.assertEqual(engine._scan_audit[0]["screened_items"], 4)
-            self.assertEqual(engine._scan_audit[0]["attempted_items"], 4)
+            self.assertGreater(engine._scan_audit[0]["screened_items"], 0)
+            self.assertEqual(engine._scan_audit[0]["screened_items"],
+                             engine._scan_audit[0]["attempted_items"])
+            self.assertLess(engine._scan_audit[0]["screened_items"], 100)
+            self.assertEqual(engine.memory.market_screening_counts(platform="fake")["known"], 100)

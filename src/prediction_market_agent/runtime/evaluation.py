@@ -256,6 +256,7 @@ class MarketEvaluationMixin:
         outcome: Outcome,
         seconds_remaining: float,
         funding_followup: dict[str, Any] | None = None,
+        scheduled_review: dict[str, Any] | None = None,
     ) -> None:
         if self._decisions_this_cycle >= self._max_decisions_this_cycle:
             return
@@ -321,6 +322,7 @@ class MarketEvaluationMixin:
             # Present only when this round exists because an earlier one stopped for money. It
             # carries the old reasoning as something to re-check, never as a conclusion to resume.
             **({"delayed_funding_answer": funding_followup} if funding_followup else {}),
+            **({"scheduled_review": scheduled_review} if scheduled_review else {}),
             # Conditions the operator attached to the money. They are not preferences: obeying
             # them comes before anything the strategy text would otherwise choose.
             **({"operator_instructions": instructions} if instructions.get("count") else {}),

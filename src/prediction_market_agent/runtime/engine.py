@@ -9,6 +9,7 @@ from typing import Any
 from ..core.config import Config
 from ..plugin_system.contracts import Topic
 from ..plugin_system.discovery import PluginCatalog
+from ..plugin_system.managed_config import ManagedRuntimeConfig
 from .actions import ExecutionActionsMixin
 from .bootstrap import PlatformRuntime, bootstrap_engine
 from .broker import ExecutionError
@@ -96,6 +97,9 @@ class TradingEngine(MarketEvaluationMixin, ExecutionActionsMixin):
             cross_platform_search=self.search_market_candidates,
             research_contributions=self.research_contributions,
             operator_instructions=self.operator_instructions.payload,
+            screening_enabled=lambda: not ManagedRuntimeConfig.load(
+                config.management_file
+            ).screening_paused,
         )
         self.decision_evolution = DecisionEvolution(
             memory=self.memory,
@@ -144,6 +148,86 @@ class TradingEngine(MarketEvaluationMixin, ExecutionActionsMixin):
             except KeyError as error:
                 raise ValueError(f"Unknown active platform: {platform}") from error
             return tuple(self._collect_platform_topics(runtime))
+
+    def review_due_platform(self, platform: str) -> dict[str, Any]:
+        """Honor a market-specific appointment without waiting behind the broad scan queue."""
+        with self._cycle_lock:
+            runtime = self.platforms[platform]
+            due = self.memory.due_market_reviews(platform=platform, limit=1)
+            if not due:
+                return {"reviewed": 0}
+            if not self.can_decide(platform):
+                # Keep the appointment due. The platform loop will retry once capacity returns.
+                return {"reviewed": 0, "waiting_for_provider": True}
+            task = due[0]
+            try:
+                detail = runtime.plugin.get_topic(task["topic_id"])
+                market = next(
+                    (item for item in detail.markets if item.market_id == task["market_id"]),
+                    None,
+                )
+                if market is None or market.status != "OPEN":
+                    self.memory.record_runtime_incident(
+                        platform=platform, stage="scheduled_market_review", severity="info",
+                        message=f"{task['topic_id']}:{task['market_id']} is no longer tradable",
+                        fallback="定时复查完成；不提交交易判断",
+                    )
+                    self.memory.finish_market_review(task["id"])
+                    return {"reviewed": 0, "closed": True}
+                outcome = next(
+                    (item for item in market.outcomes if item.outcome_id == task["token_id"]),
+                    None,
+                )
+                if outcome is None:
+                    self.memory.finish_market_review(task["id"])
+                    return {"reviewed": 0, "token_missing": True}
+                now_ms = int(time.time() * 1000)
+                deadline = market.end_time_ms or detail.end_time_ms
+                if deadline is None or deadline <= now_ms:
+                    self.memory.finish_market_review(task["id"])
+                    return {"reviewed": 0, "expired": True}
+                self._decisions_this_cycle = 0
+                self._max_decisions_this_cycle = self.config.decision_max_attempts
+                self._screened_out = {}
+                previous = self.memory.latest_decision_reference(
+                    platform=platform, market_topic_id=task["topic_id"],
+                    token_id=task["token_id"],
+                )
+                self._evaluate_outcome(
+                    runtime, detail.topic, detail, market, outcome,
+                    (deadline - now_ms) / 1000.0,
+                    scheduled_review={
+                        "original_due_at": task["due_at"],
+                        "previous_revisit_condition": task["reason"],
+                        "notice": "A due appointment from an earlier decision; recheck fresh facts, not its conclusion.",
+                    },
+                )
+                latest = self.memory.latest_decision_reference(
+                    platform=platform, market_topic_id=task["topic_id"],
+                    token_id=task["token_id"],
+                )
+                if (latest is None or latest["round_id"] == (previous or {}).get("round_id")
+                        or latest["status"] in self.memory.FAILED_STATUSES
+                        or latest["status"] == "STARTED"):
+                    raise RuntimeError("scheduled review did not produce a completed decision")
+            except Exception as error:
+                self.memory.finish_market_review(task["id"], error=str(error))
+                self.memory.record_runtime_incident(
+                    platform=platform, stage="scheduled_market_review", severity="warning",
+                    message=str(error)[:300], fallback="定时复查保留，稍后独立重试",
+                    details={"topic_id": task["topic_id"], "market_id": task["market_id"]},
+                )
+                return {"reviewed": 0, "retry": True}
+            self.memory.finish_market_review(task["id"])
+            runtime.store.save(runtime.state)
+            return {"reviewed": 1, "topic_id": task["topic_id"],
+                    "market_id": task["market_id"]}
+
+    def screen_pending_platform(self, platform: str) -> dict[str, int]:
+        """Continue the durable full-market sweep during the venue's ordinary wait."""
+        with self._cycle_lock:
+            runtime = self.platforms[platform]
+            return self.discovery.screen_pending(runtime.plugin)
 
     def can_decide(self, platform: str) -> bool:
         """Whether work that exists to reach a decision should start now.

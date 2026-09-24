@@ -213,6 +213,8 @@ wallet address/id 齐全；直接集成测试不走该 readiness 门，因此仍
 
 插件使用 Gamma、CLOB、Data 和 Relayer/RPC，写端基于官方 `polymarket-client`：
 
+市场发现仍低频读取 Gamma 事件目录，并把事件内每个开放、可交易合约分别交给持久粗筛队列；盘口不再调用 CLOB 的即时 HTTP `/book`，改为订阅官方市场 WebSocket 的完整快照和价格增量。连接断开、快照过期或订阅未返回时，盘口读取明确失败，不用旧价假装当前报价。`POLYMARKET_MARKET_WS_URL` 可单独配置，仍沿用该插件解析后的网络代理。账户、交易和必要对账的 HTTP 接口不受此更改影响。
+
 - 限价/市价 BUY、SELL；
 - authenticated cancel；
 - 从可赎回持仓映射 token 到 condition 后提交赎回；

@@ -22,6 +22,7 @@ import { dirname, extname, join, resolve, sep } from 'node:path';
 import { spawn } from 'node:child_process';
 import { chromium } from 'playwright';
 import { syncWebtorch } from './sync-webtorch.mjs';
+import { createGpuQueue } from './gpu-queue.mjs';
 
 /* Node's own fetch ignores HTTPS_PROXY unless it is told not to, and it is told with an environment
  * variable read before any of this runs. On a machine that reaches the model host through a proxy -
@@ -208,14 +209,8 @@ async function serveStatic(request, response, url) {
 
 let page = null;
 let booted = null;
-let modelWork = Promise.resolve();
+const exclusive = createGpuQueue();
 const SDK_CHECK_MS = 6 * 60 * 60 * 1000;
-
-function exclusive(task) {
-  const result = modelWork.catch(() => {}).then(task);
-  modelWork = result.catch(() => {});
-  return result;
-}
 
 async function refreshSdk() {
   const result = await syncWebtorch({ target: WEBTORCH, keepPrevious: true });
@@ -412,7 +407,11 @@ const server = createServer(async (request, response) => {
     await serveStatic(request, response, url);
   } catch (error) {
     // The caller gets the reason in the shape its client already knows how to read.
-    response.writeHead(500, { 'Content-Type': 'application/json' }).end(JSON.stringify({
+    const queueFull = error && error.code === 'GPU_QUEUE_FULL';
+    response.writeHead(queueFull ? 429 : 500, {
+      'Content-Type': 'application/json',
+      ...(queueFull ? { 'Retry-After': '1' } : {}),
+    }).end(JSON.stringify({
       error: { message: String((error && error.message) || error), type: 'laya_service' },
     }));
   }

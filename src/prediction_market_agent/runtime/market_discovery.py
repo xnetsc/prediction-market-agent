@@ -2,11 +2,14 @@ from __future__ import annotations
 
 import logging
 import math
+import threading
 import time
+from dataclasses import asdict
 from typing import Any, Callable
 
 from ..agent.decision import DecisionCancelled, DecisionProviderError
 from ..agent.decision_evaluator import (
+    CandidateAssessment,
     DEFAULT_SCREENING_CONFIDENCE,
     MIN_SCREENING_CONFIDENCE,
     is_high_confidence,
@@ -60,12 +63,38 @@ DISCOVERY_SCHEMA: dict[str, Any] = {
             "maxItems": 8,
             "items": {"type": "string", "minLength": 1, "maxLength": 120},
         },
+        "screening_skips": {
+            "type": "array", "maxItems": 32,
+            "items": {
+                "type": "object", "additionalProperties": False,
+                "properties": {
+                    "candidate_id": {"type": "string", "minLength": 1},
+                    "for_seconds": {"type": "integer", "minimum": 60, "maximum": 2592000},
+                    "reason": {"type": "string", "minLength": 1, "maxLength": 300},
+                },
+                "required": ["candidate_id", "for_seconds", "reason"],
+            },
+        },
+        "scheduled_reviews": {
+            "type": "array", "maxItems": 16,
+            "items": {
+                "type": "object", "additionalProperties": False,
+                "properties": {
+                    "topic_id": {"type": "string", "minLength": 1},
+                    "market_id": {"type": "string", "minLength": 1},
+                    "token_id": {"type": "string", "minLength": 1},
+                    "after_seconds": {"type": "integer", "minimum": 1, "maximum": 2592000},
+                    "reason": {"type": "string", "minLength": 1, "maxLength": 300},
+                },
+                "required": ["topic_id", "market_id", "token_id", "after_seconds", "reason"],
+            },
+        },
         "pacing_reason": {"type": "string", "maxLength": 300},
         "headline": {"type": "string", "minLength": 1, "maxLength": 90},
     },
     "required": [
         "selections", "skipped_reason", "next_scan_seconds", "next_survey_queries",
-        "pacing_reason", "headline",
+        "screening_skips", "scheduled_reviews", "pacing_reason", "headline",
     ],
 }
 
@@ -73,8 +102,10 @@ DISCOVERY_MISSION = (
     "Select the markets on this platform that deserve this cycle's decision slots. Return topic_id "
     "values taken verbatim from the candidate list. Returning fewer than the maximum, or none, is "
     "correct when nothing clears the gates. The headline is the one line a trader reads first: what "
-    "this round found, or why it found nothing - for example \"Picked 2 of 24: NATO clash volume up "
-    "67%\" or \"Nothing picked: every live book is wider than the edge\"."
+    "this round found, or why it found nothing. Screening every tradeable contract is the default; "
+    "only put an exact known candidate_id in screening_skips when you explicitly want its coarse "
+    "screening deferred for a bounded time. Scheduled_reviews are separate market-specific "
+    "appointments; give exact topic, market and token IDs, or an empty array."
 )
 
 DISCOVERY_CONTROL_MISSION = (
@@ -199,6 +230,7 @@ class DiscoveryEngine:
         cross_platform_search: Callable[[str, int], dict[str, Any]] | None = None,
         research_contributions: list[Any] | None = None,
         operator_instructions: Callable[[str], list[dict[str, Any]]] | None = None,
+        screening_enabled: Callable[[], bool] | None = None,
     ) -> None:
         self.memory = memory
         self.strategy = strategy
@@ -214,12 +246,17 @@ class DiscoveryEngine:
         self._screening_history: dict[str, dict[str, Any]] = {}
         self._screening_calibration: dict[str, Any] = {}
         self._screening_threshold = DEFAULT_SCREENING_CONFIDENCE
+        # The discovery queue has one consumer even when multiple runtime entry points race.
+        # This protects its SQLite state and venue resources; Laya separately serializes every
+        # request to its own GPU, including Agent tool calls outside this discovery path.
+        self._screening_worker = threading.BoundedSemaphore(1)
         self._selection_ids: dict[tuple[str, str], int] = {}
         self.evolution_enabled = evolution_enabled
         self.cross_platform_search = cross_platform_search
         # What the operator attached to their money, asked for per round: a slot spent on something
         # they ruled out is a slot spent against them.
         self.operator_instructions = operator_instructions
+        self.screening_enabled = screening_enabled or (lambda: True)
         # The gates ask about resolution wording and deadlines, and a candidate that does not carry
         # them was being rejected as unverifiable - while the tools that could have gone and found
         # them were offered only at the decision stage. Discovery could see that something was
@@ -251,6 +288,153 @@ class DiscoveryEngine:
         if known:
             candidate["history"] = known
         return candidate
+
+    def _queue_screening_page(self, plugin: PredictionMarketApiPlugin, topics: list[Topic]) -> None:
+        market_candidates = getattr(plugin, "screening_candidates", None)
+        candidates: list[dict[str, Any]] = []
+        for topic in topics:
+            if callable(market_candidates):
+                candidates.extend(market_candidates(topic))
+            elif topic.status == "OPEN":
+                candidate = self._evaluation_candidate(topic)
+                candidate["market_id"] = ""
+                candidate["material_key"] = f"{topic.status}:{topic.volume_usdt}:{topic.liquidity_usdt}"
+                candidates.append(candidate)
+        self.memory.queue_market_screening(
+            platform=plugin.name, candidates=candidates,
+            topic_ids=[topic.topic_id for topic in topics],
+        )
+
+    def _drain_screening_queue(
+        self, plugin: PredictionMarketApiPlugin, *, started: float, page_number: int,
+        source: str, topics_seen: int, max_chunks: int | None = None,
+    ) -> tuple[int, int]:
+        if not self._screening_worker.acquire(blocking=False):
+            return 0, 0
+        try:
+            return self._drain_screening_queue_locked(
+                plugin, started=started, page_number=page_number,
+                source=source, topics_seen=topics_seen, max_chunks=max_chunks,
+            )
+        finally:
+            self._screening_worker.release()
+
+    def _drain_screening_queue_locked(
+        self, plugin: PredictionMarketApiPlugin, *, started: float, page_number: int,
+        source: str, topics_seen: int, max_chunks: int | None = None,
+    ) -> tuple[int, int]:
+        """Work the durable queue until this cycle's clock runs out, never discarding its tail."""
+        if not self.screening_enabled() or self.evaluator is None or not self.evaluator.available:
+            return 0, 0
+        screened = attempted = 0
+        chunks = 0
+        per_candidate = bool(getattr(self.evaluator, "per_candidate_requests", False))
+        chunk_size = 1 if per_candidate else 32
+        while time.monotonic() < started + self.max_scan_seconds:
+            if not self.screening_enabled():
+                break
+            if max_chunks is not None and chunks >= max_chunks:
+                break
+            candidates = self.memory.due_market_screening(
+                platform=plugin.name, limit=chunk_size
+            )
+            if not candidates:
+                break
+            chunks += 1
+            attempted += len(candidates)
+            exact_decisions = self.memory.recent_market_decisions(
+                platform=plugin.name,
+                market_ids=[str(item.get("market_id") or "") for item in candidates],
+            )
+            for candidate in candidates:
+                market_id = str(candidate.get("market_id") or "")
+                known = (
+                    {"decided": exact_decisions.get(market_id, []),
+                     "screened": [candidate["prior_screen"]]
+                     if candidate.get("prior_screen") else []}
+                    if market_id else self._screening_history.get(str(candidate.get("topic_id") or ""))
+                )
+                if known:
+                    candidate["history"] = known
+            state = {
+                "platform": plugin.name, "pages_scanned": page_number,
+                "topics_seen": topics_seen, "source": source,
+                "screening_calibration": self._screening_calibration,
+                "screening_feedback": screening_feedback(self._screening_calibration),
+                "_scan_deadline_monotonic": started + self.max_scan_seconds,
+            }
+            request_started = time.monotonic()
+            answers = self.evaluator.evaluate_candidates(state, candidates)
+            # A measured Laya call on this host takes about 0.5 s for one market/four
+            # questions. One worker already prevents overlap; a small latency-proportional
+            # breather smooths faster GPUs without hard-coding this machine's throughput.
+            if per_candidate:
+                breather = min(0.5, max(0.005, (time.monotonic() - request_started) * 0.1))
+                remaining = started + self.max_scan_seconds - time.monotonic()
+                if remaining > breather:
+                    time.sleep(breather)
+            self._evaluator_candidate_errors.update(self.evaluator.errors)
+            for name, error in getattr(self.evaluator, "fallback_errors", {}).items():
+                self.memory.record_runtime_incident(
+                    platform=plugin.name, stage="evaluator_fallback",
+                    severity="warning", message=f"{name}: {error}",
+                    fallback="本次粗筛改用下一个已启用评估器",
+                )
+            by_id = {answer.candidate_id: answer for answer in answers}
+            for candidate in candidates:
+                candidate_id = str(candidate["candidate_id"])
+                answer = by_id.get(candidate_id)
+                self.memory.complete_market_screening(
+                    platform=plugin.name, candidate_id=candidate_id,
+                    assessment=asdict(answer) if answer is not None else None,
+                    error="; ".join(f"{name}: {error}" for name, error in self.evaluator.errors.items())
+                    or "incomplete typed screening answer",
+                )
+                screened += answer is not None
+            if not answers:
+                break
+        return screened, attempted
+
+    def screen_pending(self, plugin: PredictionMarketApiPlugin) -> dict[str, int]:
+        """One background chunk between broad scans; due reviews get the next turn first."""
+        screened, attempted = self._drain_screening_queue(
+            plugin, started=time.monotonic(), page_number=0,
+            source="background", topics_seen=0, max_chunks=1,
+        )
+        return {"screened": screened, "attempted": attempted}
+
+    def _topic_screening_assessments(
+        self, *, platform: str, topics: list[Topic]
+    ) -> dict[str, CandidateAssessment]:
+        """A partially screened multi-market event cannot be rejected as a whole."""
+        rows = self.memory.market_screening_for_topics(
+            platform=platform, topic_ids=[topic.topic_id for topic in topics]
+        )
+        now = int(time.time() * 1000)
+        aggregated: dict[str, CandidateAssessment] = {}
+        action_rank = {"REJECT": 0, "DEFER": 1, "NEEDS_DATA": 2, "PRIORITIZE": 3}
+        for topic_id, markets in rows.items():
+            available = [
+                item["assessment"] for item in markets
+                if item["last_screened_at"] and item["next_due_at"] > now
+                and not item["last_error"] and item["assessment"].get("action") in action_rank
+            ]
+            if not available:
+                continue
+            best = max(available, key=lambda item: (
+                action_rank[item["action"]], float(item.get("quality") or 0.0)
+            ))
+            if len(available) != len(markets) and best["action"] in {"DEFER", "REJECT"}:
+                continue
+            aggregated[topic_id] = CandidateAssessment(
+                candidate_id=topic_id, action=best["action"],
+                quality=float(best.get("quality") or 0.0),
+                confidence=best.get("confidence"), recurring=best.get("recurring"),
+                probabilities=best.get("probabilities") or {},
+                provider=str(best.get("provider") or ""),
+                evaluator_name=str(best.get("evaluator_name") or ""),
+            )
+        return aggregated
 
     def _llm_continuation(
         self, *, platform: str, scan_state: dict[str, Any], frontier: list[dict[str, Any]],
@@ -444,55 +628,20 @@ class DiscoveryEngine:
                     active.discard(source)
                 else:
                     cursors[source] = page.next_offset
-                # A local evaluator may need one request per candidate. Sending an entire venue
-                # page (often 100 topics) before checking the clock can hold a scan open for many
-                # minutes, preventing even its observation record from being written. The venue's
-                # ordered page remains in the survey; spend the remaining screening budget on its
-                # leading candidates and leave the rest for ordinary agent selection.
-                remaining = max(0.0, self.max_scan_seconds - (time.monotonic() - started))
-                per_candidate = bool(getattr(self.evaluator, "per_candidate_requests", False))
-                screening_limit = (
-                    min(len(fresh), 24, max(0, int(remaining / 2)))
-                    if per_candidate
-                    else len(fresh)
+                # Record every contract before evaluating any. The clock only yields this cycle;
+                # it never silently drops the rest of the page or repeatedly favors its head.
+                self._queue_screening_page(plugin, fresh)
+                screened_items, attempted_items = self._drain_screening_queue(
+                    plugin, started=started, page_number=page_number,
+                    source=source, topics_seen=len(seen),
                 )
-                candidates = [self._evaluation_candidate(topic) for topic in fresh[:screening_limit]]
-                answers: list[Any] = []
-                attempted_items = 0
-                if self.evaluator is not None and self.evaluator.available:
-                    screening_state = {
-                        "platform": plugin.name,
-                        "pages_scanned": page_number,
-                        "topics_seen": len(seen),
-                        "source": source,
-                        # How this screener's own verdicts have turned out here so far, so a
-                        # round can be better calibrated than the one before it.
-                        "screening_calibration": self._screening_calibration,
-                        "screening_feedback": screening_feedback(self._screening_calibration),
-                    }
-                    screening_state["_scan_deadline_monotonic"] = started + self.max_scan_seconds
-                    chunk_size = 4 if per_candidate else max(1, len(candidates))
-                    for offset in range(0, len(candidates), chunk_size):
-                        if per_candidate and time.monotonic() >= started + self.max_scan_seconds:
-                            break
-                        chunk = candidates[offset:offset + chunk_size]
-                        attempted_items += len(chunk)
-                        chunk_answers = self.evaluator.evaluate_candidates(screening_state, chunk)
-                        answers.extend(chunk_answers)
-                        self._evaluator_candidate_errors.update(self.evaluator.errors)
-                        for name, error in getattr(self.evaluator, "fallback_errors", {}).items():
-                            self.memory.record_runtime_incident(
-                                platform=plugin.name, stage="evaluator_fallback",
-                                severity="warning", message=f"{name}: {error}",
-                                fallback="本次粗筛改用下一个已启用评估器",
-                            )
-                        if not chunk_answers and self.evaluator.errors:
-                            break
-                assessments.update({answer.candidate_id: answer for answer in answers})
+                assessments.update(self._topic_screening_assessments(
+                    platform=plugin.name, topics=list(seen.values())
+                ))
                 if time.monotonic() - started >= self.max_scan_seconds:
                     self._scan_audit.append({
                         "source": source, "items": len(page.topics),
-                        "screened_items": len(answers), "attempted_items": attempted_items,
+                        "screened_items": screened_items, "attempted_items": attempted_items,
                         "stop": "resource_time_limit",
                     })
                     save_resume("resource_time_limit")
@@ -515,7 +664,7 @@ class DiscoveryEngine:
                     "source": source,
                     "items": len(page.topics),
                     "new_items": len(fresh),
-                    "screened_items": len(answers),
+                    "screened_items": screened_items,
                     "attempted_items": attempted_items,
                     "has_more": bool(page.has_more),
                     "next_offset": page.next_offset,
@@ -589,7 +738,7 @@ class DiscoveryEngine:
                     "llm": llm,
                     "llm_skipped": (
                         "decisive_typed_evaluation" if typed_is_decisive
-                        else "single_candidate_screening_budget" if per_candidate
+                        else "single_candidate_screening_budget" if getattr(self.evaluator, "per_candidate_requests", False)
                         else "provider_timeout_exceeds_scan_budget" if continuation_budgeted
                         else None
                     ),
@@ -608,7 +757,10 @@ class DiscoveryEngine:
                         if "PAUSE_AND_RESUME" in actions:
                             save_resume("joint_pause")
                         else:
-                            self.memory.clear_survey_resume(plugin.name)
+                            # A decision to stop sampling this round doesn't mean the
+                            # venue's catalog is exhausted. Resume its remaining pages
+                            # next round so every market eventually reaches the queue.
+                            save_resume("frontier_selected_catalog_continues")
                         active.clear()
                         break
                     if typed_stop != llm_stop:
@@ -624,7 +776,7 @@ class DiscoveryEngine:
                     if action == "PAUSE_AND_RESUME":
                         save_resume("evaluator_pause")
                     else:
-                        self.memory.clear_survey_resume(plugin.name)
+                        save_resume("frontier_selected_catalog_continues")
                     active.clear()
                     break
             if time_exhausted or not progressed:
@@ -1212,6 +1364,57 @@ class DiscoveryEngine:
             next_scan_seconds=int(result.value.get("next_scan_seconds", 0) or 0),
             reason=str(result.value.get("pacing_reason", "")),
         )
+        known = self.memory.market_screening_for_topics(
+            platform=platform,
+            topic_ids=[topic.topic_id for topic in pool] + list(toolbox.found),
+        )
+        known_ids = {
+            row["candidate_id"] for rows in known.values() for row in rows
+        }
+        known_tokens = {
+            (topic_id, str(row["candidate"].get("market_id") or ""),
+             str(outcome.get("token_id") or ""))
+            for topic_id, rows in known.items() for row in rows
+            for outcome in row["candidate"].get("outcomes") or []
+            if isinstance(outcome, dict)
+        }
+        for topic_id, verified in toolbox.verified.items():
+            for market in verified.get("market_options") or []:
+                market_id = str(market.get("market_id") or "")
+                for outcome in market.get("outcomes") or []:
+                    if isinstance(outcome, dict):
+                        known_tokens.add((str(topic_id), market_id,
+                                          str(outcome.get("outcome_id") or "")))
+        applied_skips: list[dict[str, Any]] = []
+        for item in result.value.get("screening_skips") or []:
+            if not isinstance(item, dict):
+                continue
+            candidate_id = str(item.get("candidate_id") or "")
+            if candidate_id in known_ids and self.memory.skip_market_screening(
+                platform=platform, candidate_id=candidate_id,
+                for_seconds=int(item.get("for_seconds") or 0),
+                reason=str(item.get("reason") or ""),
+            ):
+                applied_skips.append(item)
+        scheduled_reviews: list[dict[str, Any]] = []
+        for item in result.value.get("scheduled_reviews") or []:
+            if not isinstance(item, dict):
+                continue
+            key = (str(item.get("topic_id") or ""), str(item.get("market_id") or ""),
+                   str(item.get("token_id") or ""))
+            if key not in known_tokens:
+                self.memory.record_runtime_incident(
+                    platform=platform, stage="scheduled_market_review", severity="warning",
+                    message=f"模型指定了未经核实的定时复查标的：{key[0]}:{key[1]}:{key[2]}",
+                    fallback="未创建定时任务；下轮可先核实精确合约和 token ID",
+                )
+                continue
+            self.memory.schedule_market_review(
+                platform=platform, topic_id=key[0], market_id=key[1], token_id=key[2],
+                after_seconds=int(item.get("after_seconds") or 0),
+                reason=str(item.get("reason") or ""),
+            )
+            scheduled_reviews.append(item)
         self.memory.complete_decision(
             decision_id,
             provider=result.provider,
@@ -1223,6 +1426,8 @@ class DiscoveryEngine:
                 "headline": str(result.value.get("headline", "")).strip()[:90],
                 "next_scan_seconds": int(result.value.get("next_scan_seconds", 0) or 0),
                 "next_survey_queries": list(result.value.get("next_survey_queries", []) or []),
+                "screening_skips": applied_skips,
+                "scheduled_reviews": scheduled_reviews,
                 "pacing_reason": str(result.value.get("pacing_reason", "")),
             },
             status="OK" if selections else "NO_ACTION",

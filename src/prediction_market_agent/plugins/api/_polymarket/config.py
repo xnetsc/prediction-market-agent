@@ -5,12 +5,14 @@ from dataclasses import dataclass
 from typing import Any
 
 from prediction_market_agent.plugin_system.config_io import resolve_plugin_proxy
+from .market_stream import DEFAULT_MARKET_WS_URL
 
 
 @dataclass(frozen=True)
 class PolymarketPluginConfig:
     gamma_url: str
     clob_url: str
+    market_ws_url: str
     data_url: str
     relayer_url: str
     bridge_url: str
@@ -41,6 +43,7 @@ class PolymarketPluginConfig:
         value = cls(
             gamma_url=get("POLYMARKET_GAMMA_URL", "").strip(),
             clob_url=get("POLYMARKET_CLOB_URL", "").strip(),
+            market_ws_url=get("POLYMARKET_MARKET_WS_URL", DEFAULT_MARKET_WS_URL).strip(),
             data_url=get("POLYMARKET_DATA_URL", "").strip(),
             relayer_url=get("POLYMARKET_RELAYER_URL", "").strip(),
             bridge_url=get(
@@ -84,6 +87,8 @@ class PolymarketPluginConfig:
         }.items():
             if not url.startswith("https://"):
                 raise ValueError(f"{name} must start with https://")
+        if not value.market_ws_url.startswith("wss://"):
+            raise ValueError("POLYMARKET_MARKET_WS_URL must start with wss://")
         if value.chain_id <= 0:
             raise ValueError("POLYMARKET_CHAIN_ID must be positive")
         if min(
@@ -106,6 +111,7 @@ class PolymarketPluginConfig:
         return {
             "gamma_url": self.gamma_url,
             "clob_url": self.clob_url,
+            "market_ws_url": self.market_ws_url,
             "data_url": self.data_url,
             "relayer_url": self.relayer_url,
             "bridge_url": self.bridge_url,

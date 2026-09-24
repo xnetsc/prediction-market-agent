@@ -83,6 +83,8 @@ Agent 动作策略或具体交易策略；这些只能由对应插件定义。�
 
 `model_selection_mode` 默认 `QUALITY`：决策 Provider 和发现评估器各自在已启用且可用的实例中优先选实测质量较高者，同分按启用顺序。设为 `CONFIGURED` 时两类都强制按启用顺序、忽略质量。每次只调用一个实例，失败才尝试下一个；这个设置不会改变各 Provider 内已选的具体模型。
 
+管理选择文件的 `screening_paused` 默认为 `false`，只控制持久化逐市场粗筛队列的自动消费；决策页可保存切换，重启后保持。它不暂停平台扫描、交易决策或单市场定时复查，也不改变 `robot_paused` 和 `paused_platforms`。
+
 显式保存空 `decision_strategy` 表示不启用用户策略插件，不能回退到进程启动时的旧插件；此时使用框架内置
 决策策略。内置策略没有配置卡片，但当前生效全文可以导出。
 
@@ -92,13 +94,14 @@ Agent 动作策略或具体交易策略；这些只能由对应插件定义。�
 如何持久化，只调用插件提供的回调。内置插件当前使用 `config/plugins/*.json`：
 
 - API 插件：端点、认证、钱包、代理、交易账户起始资金和平台参数；
+  Polymarket 的 `POLYMARKET_MARKET_WS_URL` 默认是官方市场订阅端点，盘口只从 WebSocket 的完整快照及后续增量构造；插件代理仍按 `POLYMARKET_HTTP_PROXY` 的 `INHERIT`/直连/独立配置解析。HTTP 保留市场目录、账户、交易及必要对账，不再用于即时盘口读取；断线或数据过期时不返回旧盘口。
 - Provider 插件：客户端路径、模型、凭证、代理和超时；OpenRouter 的远端端点固定在其插件实现内；
 - typed evaluator 插件：发现粗筛的类型协议、模型、直接请求/解析参数和独立代理；它不参与交易决策。
   当前 `jev` 插件实例默认选 Jev；
   OpenRouter 中的 Jev 型号走原生 Decisions，其它明确支持 structured output 的型号走 strict schema Chat
   Completions，并默认只复用指定 Provider 的推理 Key；自定义方式填写 Chat Completions Base URL、模型名和
   可选 Key，原生 strict schema 不可用或被忽略时回退到强制函数参数。各方式都不复用 Provider 的模型或代理；
-  另有默认禁用的 `laya` 实例，直接连接外部 WebGPU 服务，独立校验健康状态与 Choice/Score/Noul 协议；
+  另有默认禁用的 `laya` 实例，直接连接外部 WebGPU 服务，独立校验健康状态与 Choice/Score/Noul 协议；启用启动时和默认每 300 秒做独占测速，`LAYA_BENCHMARK_INTERVAL_SECONDS` 可调整周期，测速期间该插件的正常请求排队；
 - 策略插件：策略文本路径和候选筛选字段；
 - 标的发现插件：发现文本、读取预算及其私有参数；
 - 研究插件：预测市场跨平台查询、行情、K 线和业务历史的结果限制；通用搜索/网页由官方 CLI 管理；
