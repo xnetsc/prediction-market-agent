@@ -51,6 +51,11 @@ class ExecutionActionsMixin:
         market_topic_id = detail.topic.topic_id
         market_id = market.market_id
         request = decision.to_dict()
+        if getattr(self, "stop_requested", lambda: False)():
+            return self._record_no_action(
+                platform, market_topic_id, token_id, "PAUSED", request,
+                {"status": "NO_ACTION", "reason": "Pause saved before execution"}, decision_id,
+            )
         if decision.action == "HOLD":
             return self._record_no_action(
                 platform,
@@ -120,6 +125,11 @@ class ExecutionActionsMixin:
                 symbol=position.symbol,
                 direction=position.direction,
                 order_type=decision.order_type,
+            )
+        if getattr(self, "stop_requested", lambda: False)():
+            return self._record_no_action(
+                platform, market_topic_id, token_id, "PAUSED", request,
+                {"status": "NO_ACTION", "reason": "Pause saved before order placement"}, decision_id,
             )
         order = runtime.gateway.place_order(
             quote, reason=decision.rationale, decision_id=decision_id

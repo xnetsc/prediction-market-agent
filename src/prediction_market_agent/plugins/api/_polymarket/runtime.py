@@ -98,6 +98,8 @@ class PolymarketEventLoop:
                     self._status["current_stage"] = "discovery"
                 try:
                     topics = discover()
+                    if self._stop.is_set():
+                        break
                     with self._lock:
                         self._status["current_stage"] = "decision"
                     callback(topics)

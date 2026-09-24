@@ -237,6 +237,8 @@ class TradingEngine(MarketEvaluationMixin, ExecutionActionsMixin):
         fills with failures that only restate the outage - so the work is not started. The plugins
         are told separately and stand down; this is the check that does not depend on them.
         """
+        if getattr(self, "stop_requested", lambda: False)():
+            return False
         reading = self.provider_quality.capacity()
         if not reading["available"]:
             LOGGER.info(
@@ -311,6 +313,8 @@ class TradingEngine(MarketEvaluationMixin, ExecutionActionsMixin):
             LOGGER.exception("could not read pending funding continuations")
             return
         for entry in waiting:
+            if getattr(self, "stop_requested", lambda: False)():
+                break
             try:
                 answer = runtime.plugin.funding_status(str(entry["request_id"]))
             except Exception:

@@ -57,6 +57,7 @@ class SetupGuideTests(unittest.TestCase):
     def test_paused_partial_and_management_only_are_distinct(self):
         manifest={'plugins':{},'robot_paused':False}
         for runtime,automatic,state in [({'robot_paused':True},True,'paused'),
+            ({'robot_paused':True,'running':True},True,'pausing'),
             ({'running':True,'platforms':{'a':{'running':True},'b':{'running':False}}},True,'partial'),
             ({'running':True},True,'running'),({'running':False},False,'management_only')]:
             with self.subTest(state=state):self.assertEqual(setup_guide(runtime,manifest,automatic_start=automatic)['state'],state)

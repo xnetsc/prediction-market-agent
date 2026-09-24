@@ -258,6 +258,8 @@ class MarketEvaluationMixin:
         funding_followup: dict[str, Any] | None = None,
         scheduled_review: dict[str, Any] | None = None,
     ) -> None:
+        if getattr(self, "stop_requested", lambda: False)():
+            return
         if self._decisions_this_cycle >= self._max_decisions_this_cycle:
             return
         platform = runtime.plugin.name
@@ -514,6 +516,19 @@ class MarketEvaluationMixin:
                     decision.notional_usdt, action_rule.adjusted_value
                 ),
             )
+        if getattr(self, "stop_requested", lambda: False)():
+            execution = self._record_no_action(
+                platform, market_topic_id, token_id, "PAUSED", decision.to_dict(),
+                {"status": "NO_ACTION", "reason": "Pause saved before execution"}, decision_id,
+            )
+            self.memory.complete_decision(
+                decision_id, provider=result.provider, research=result.research_trace,
+                model_raw_output=result.raw_output,
+                proposed_decision=result.decision.to_dict(),
+                risk_decision=asdict(action_rule), execution=execution,
+                status="NO_ACTION",
+            )
+            return
         try:
             execution = self._execute_decision(
                 runtime,

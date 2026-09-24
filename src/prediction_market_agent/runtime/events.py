@@ -62,11 +62,13 @@ class RobotEventLoop:
         self._processed = 0
         self._failures = 0
         self._last_error = ""
+        self._accepting = False
 
     def start(self) -> None:
         with self._lock:
             if self._thread is not None and self._thread.is_alive():
                 return
+            self._accepting = True
             self._thread = threading.Thread(
                 target=self._run,
                 name="prediction-business-events",
@@ -81,6 +83,10 @@ class RobotEventLoop:
                 if envelope is None:
                     return
                 try:
+                    with self._lock:
+                        accepting = self._accepting
+                    if not accepting:
+                        raise RuntimeError("Robot is pausing; queued event was not processed")
                     envelope.result = self._handler(envelope.event)
                     with self._lock:
                         self._processed += 1
@@ -97,10 +103,10 @@ class RobotEventLoop:
 
     def submit(self, event: BusinessEvent) -> Any:
         with self._lock:
-            if self._thread is None or not self._thread.is_alive():
+            if self._thread is None or not self._thread.is_alive() or not self._accepting:
                 raise RuntimeError("Robot event loop is not running")
-        envelope = _Envelope(event)
-        self._queue.put(envelope)
+            envelope = _Envelope(event)
+            self._queue.put(envelope)
         envelope.completed.wait()
         if envelope.error is not None:
             raise envelope.error
@@ -108,6 +114,7 @@ class RobotEventLoop:
 
     def stop(self) -> None:
         with self._lock:
+            self._accepting = False
             thread = self._thread
             if thread is None:
                 return
@@ -116,6 +123,11 @@ class RobotEventLoop:
             thread.join()
         with self._lock:
             self._thread = None
+
+    def request_pause(self) -> None:
+        """Reject new and queued work without waiting for the active handler."""
+        with self._lock:
+            self._accepting = False
 
     def status(self) -> dict[str, Any]:
         with self._lock:

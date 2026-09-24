@@ -12,7 +12,10 @@ import threading
 import time
 
 from prediction_market_agent.runtime.controller import RobotRuntimeManager
+from prediction_market_agent.runtime.events import RobotEventLoop, PlatformDiscoveryEvent
 from prediction_market_agent.plugins.api._polymarket.runtime import PolymarketEventLoop
+from prediction_market_agent.core.config import ApplicationConfigStore
+from prediction_market_agent.plugin_system.managed_config import save_managed_config
 
 
 class ReadingTheStateNeverQueuesTests(unittest.TestCase):
@@ -49,6 +52,130 @@ class ReadingTheStateNeverQueuesTests(unittest.TestCase):
         manager = self._manager()
         answer = manager.status()
         self.assertNotIn("settling", answer)
+
+    def test_saved_pause_survives_a_refresh_while_the_old_runtime_is_still_busy(self) -> None:
+        root = Path(tempfile.mkdtemp())
+        application = root / "application.json"
+        ApplicationConfigStore(application).save({"working_directory": str(root)})
+        manager = RobotRuntimeManager(application)
+        manager._status.update(running=True, robot_paused=False,
+                               platforms={"polymarket": {"running": True, "paused": False}})
+        manager._status_locked()
+        save_managed_config(root / "bot_management.json", {
+            "robot_paused": True, "paused_platforms": ["polymarket"],
+        })
+        holding = threading.Event()
+        release = threading.Event()
+
+        def hold() -> None:
+            with manager._lock:
+                manager._busy_since = time.time()
+                holding.set()
+                release.wait(5)
+
+        worker = threading.Thread(target=hold, daemon=True)
+        worker.start()
+        self.assertTrue(holding.wait(2))
+        try:
+            answer = manager.status()
+        finally:
+            release.set()
+            worker.join(2)
+        self.assertTrue(answer["robot_paused"])
+        self.assertTrue(answer["platforms"]["polymarket"]["paused"])
+        self.assertTrue(answer["running"], "an in-flight call must not be reported as stopped")
+        self.assertTrue(answer["settling"])
+        self.assertIn("暂停已保存", answer["settling_reason"])
+
+
+class PauseClosesTheBusinessEventGateTests(unittest.TestCase):
+    def test_pause_blocks_the_next_decision_and_order_execution(self) -> None:
+        from prediction_market_agent.runtime.engine import TradingEngine
+        from prediction_market_agent.runtime.actions import ExecutionActionsMixin
+
+        engine = TradingEngine.__new__(TradingEngine)
+        engine.stop_requested = lambda: True
+        self.assertFalse(engine.can_decide("polymarket"))
+
+        class PausedAction(ExecutionActionsMixin):
+            stop_requested = staticmethod(lambda: True)
+
+            def _record_no_action(self, *args):
+                return {"status": "NO_ACTION", "action": args[3]}
+
+        action = PausedAction()
+        decision = SimpleNamespace(to_dict=lambda: {"action": "BUY"})
+        runtime = SimpleNamespace(plugin=SimpleNamespace(name="polymarket"),
+                                  gateway=SimpleNamespace(place_order=lambda *a, **k: self.fail("order placed")))
+        detail = SimpleNamespace(topic=SimpleNamespace(topic_id="topic"))
+        market = SimpleNamespace(market_id="market")
+        result = action._execute_decision(
+            runtime, decision, detail=detail, market=market, token_id="token",
+            bid=0.4, ask=0.6, decision_id=1,
+        )
+        self.assertEqual(result, {"status": "NO_ACTION", "action": "PAUSED"})
+
+    def test_new_and_queued_events_do_not_run_after_pause(self) -> None:
+        entered = threading.Event()
+        release = threading.Event()
+        seen = []
+
+        def handle(event):
+            seen.append(event.platform)
+            entered.set()
+            release.wait(5)
+
+        loop = RobotEventLoop(handle)
+        loop.start()
+        results = []
+
+        def submit(name):
+            try:
+                loop.submit(PlatformDiscoveryEvent(platform=name))
+            except RuntimeError as error:
+                results.append(str(error))
+
+        active = threading.Thread(target=submit, args=("active",), daemon=True)
+        queued = threading.Thread(target=submit, args=("queued",), daemon=True)
+        active.start()
+        self.assertTrue(entered.wait(2))
+        queued.start()
+        deadline = time.time() + 2
+        while loop.status()["queued"] != 1 and time.time() < deadline:
+            time.sleep(0.01)
+        self.assertEqual(loop.status()["queued"], 1)
+        loop.request_pause()
+        with self.assertRaises(RuntimeError):
+            loop.submit(PlatformDiscoveryEvent(platform="late"))
+        release.set()
+        active.join(2)
+        queued.join(2)
+        loop.stop()
+        self.assertEqual(seen, ["active"])
+        self.assertEqual(len(results), 1)
+
+    def test_discovery_finishing_after_stop_cannot_enter_decision(self) -> None:
+        loop = PolymarketEventLoop(lambda: SimpleNamespace(
+            scan_interval_seconds=60, error_backoff_seconds=30, error_backoff_max_seconds=900,
+        ))
+        entered = threading.Event()
+        release = threading.Event()
+        decisions = []
+
+        def discover():
+            entered.set()
+            release.wait(5)
+            return []
+
+        loop.start({"discover_markets": discover,
+                    "submit_scan": lambda topics: decisions.append(topics)})
+        self.assertTrue(entered.wait(2))
+        stopping = threading.Thread(target=loop.stop, daemon=True)
+        stopping.start()
+        self.assertTrue(loop._stop.wait(2))
+        release.set()
+        stopping.join(6)
+        self.assertEqual(decisions, [])
 
 
 class StoppingDoesNotWaitOutAModelCallTests(unittest.TestCase):

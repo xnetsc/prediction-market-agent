@@ -39,7 +39,7 @@ def setup_guide(runtime, manifest, *, automatic_start):
     # to the operator that is a pause, and the reason is the models, not the configuration.
     capacity=runtime.get("decision_capacity") or {}
     ai_paused=running and capacity.get("available") is False
-    state="management_only" if not automatic_start else "ai_paused" if ai_paused else "partial" if partial else "running" if running else "paused" if paused else "not_running"
+    state="management_only" if not automatic_start else "pausing" if paused and running else "paused" if paused else "ai_paused" if ai_paused else "partial" if partial else "running" if running else "not_running"
     return {"state":state,"steps":steps,"remaining":sum(s["required"] and not s["ready"] for s in steps),
             "automatic_start":automatic_start,"runtime_reasons":runtime.get("global_reasons",[]) if automatic_start else [],
             "decision_capacity":capacity if ai_paused else None,

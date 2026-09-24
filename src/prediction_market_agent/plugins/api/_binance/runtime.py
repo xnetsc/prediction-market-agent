@@ -77,6 +77,8 @@ class BinanceEventLoop:
                     self._status["last_started_at"] = int(time.time())
                 try:
                     topics = discover()
+                    if self._stop.is_set():
+                        break
                     callback(topics)
                     consecutive_failures = 0
                     # The configured interval is how often this plugin is willing to be asked, not

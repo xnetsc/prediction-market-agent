@@ -56,6 +56,17 @@ class RobotRuntimeManager:
         self._reconcile_request_lock = threading.Lock()
         self._reconcile_generation = 0
         self._reconcile_thread: threading.Thread | None = None
+        self._pause_requested = threading.Event()
+
+    def record_saved_pause(self, paused: bool) -> None:
+        """Close the business-event gate immediately after the pause is saved."""
+        if paused:
+            self._pause_requested.set()
+            events = self._events
+            if events is not None:
+                events.request_pause()
+        else:
+            self._pause_requested.clear()
 
     @staticmethod
     def _safe_readiness(catalog: PluginCatalog, kind: str, name: str) -> PluginReadiness:
@@ -66,6 +77,8 @@ class RobotRuntimeManager:
 
     def _stop_locked(self) -> None:
         catalog, engine, events = self._catalog, self._engine, self._events
+        if events is not None:
+            events.request_pause()
         capacity, self._capacity = self._capacity, None
         if capacity is not None:
             capacity.stop()
@@ -280,9 +293,12 @@ class RobotRuntimeManager:
         )
         try:
             engine = TradingEngine(runtime_config, catalog=catalog)
+            engine.stop_requested = self._pause_requested.is_set
             self._engine = engine
             if start_runtimes:
                 def handle_business_event(event: Any) -> Any:
+                    if self._pause_requested.is_set():
+                        raise RuntimeError("Robot is pausing; no new business event may start")
                     if isinstance(event, PlatformDiscoveryEvent):
                         return engine.discover_platform_topics(event.platform)
                     if isinstance(event, PlatformReviewEvent):
@@ -506,11 +522,34 @@ class RobotRuntimeManager:
                 "正在按你的设置重启机器人。上一轮可能正卡在一次模型调用里，要等它自己结束；"
                 "这里显示的是它开始重启前的状态。"
             )
-            return stale
+            return self._with_saved_control(stale)
         try:
-            return self._status_locked()
+            return self._with_saved_control(self._status_locked())
         finally:
             self._lock.release()
+
+    def _with_saved_control(self, status: dict[str, Any]) -> dict[str, Any]:
+        """Show the durable operator choice even while a previous reconcile holds the lock."""
+        try:
+            config = Config.load(self.application_config_file)
+            managed = ManagedRuntimeConfig.load(config.management_file)
+        except Exception:
+            LOGGER.exception("could not read saved runtime control")
+            return status
+        result = dict(status)
+        previous_pause = bool(result.get("robot_paused"))
+        result["robot_paused"] = managed.robot_paused
+        platforms = {name: dict(value) for name, value in result.get("platforms", {}).items()}
+        for name, platform in platforms.items():
+            platform["paused"] = name in managed.paused_platforms
+        result["platforms"] = platforms
+        if previous_pause != managed.robot_paused or (managed.robot_paused and result.get("running")):
+            result["settling"] = True
+            result["settling_reason"] = (
+                "暂停已保存，正在等待当前调用结束；不会接收新的业务事件。"
+                if managed.robot_paused else "恢复运行已保存，正在启动已就绪的平台。"
+            )
+        return result
 
     def _status_locked(self) -> dict[str, Any]:
         """The fresh answer, built while holding the lock, and kept as the snapshot."""
