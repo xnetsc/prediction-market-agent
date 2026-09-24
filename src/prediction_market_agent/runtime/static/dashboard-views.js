@@ -2060,7 +2060,9 @@ function renderLayaBenchmark(runtime){
     if(value.status==='failed'){note.className='status danger';note.textContent='最近测速失败：'+String(value.error||'未知原因');return}
     if(value.status==='unavailable'){note.className='status danger';note.textContent='无法读取服务测速状态：'+String(value.error||'服务不可用');return}
     if(value.status==='ok'){
-        note.className='status good';note.textContent='最近 '+value.samples+' 次中位 '+value.median_ms+'ms · 最慢 '+value.max_ms+'ms · '+new Date(value.measured_at*1000).toLocaleString();return;
+        const usage=value.usage||{};
+        const work=Number.isFinite(Number(usage.encoder_tokens))&&Number.isFinite(Number(usage.encoder_passes))?' · 编码 '+Number(usage.encoder_tokens)+' token / '+Number(usage.encoder_passes)+' 次':'';
+        note.className='status good';note.textContent='最近 '+value.samples+' 次中位 '+value.median_ms+'ms · 最慢 '+value.max_ms+'ms'+work+' · '+new Date(value.measured_at*1000).toLocaleString();return;
     }
     note.className='status muted';note.textContent='尚未完成测速';
 }

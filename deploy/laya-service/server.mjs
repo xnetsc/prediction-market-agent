@@ -219,6 +219,7 @@ const benchmark = createBenchmark({
       (payload) => window.__laya.decide(payload), { state, questions },
     );
     shaped(result.answers, questions);
+    return { usage: result.usage || {} };
   },
 });
 const SDK_CHECK_MS = 6 * 60 * 60 * 1000;
@@ -370,6 +371,7 @@ async function completions(request, response, body) {
   );
   const content = JSON.stringify({ answers: shaped(result.answers, asked.questions) });
   const usage = result.usage || {};
+  const promptTokens = Number(usage.input_tokens ?? usage.prompt_tokens ?? usage.tokens ?? 0);
   response.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' }).end(JSON.stringify({
     id: 'laya-' + Date.now().toString(36),
     object: 'chat.completion',
@@ -377,9 +379,14 @@ async function completions(request, response, body) {
     model: body.model || MODEL,
     choices: [{ index: 0, message: { role: 'assistant', content }, finish_reason: 'stop' }],
     usage: {
-      prompt_tokens: Number(usage.prompt_tokens || usage.tokens || 0),
+      prompt_tokens: promptTokens,
       completion_tokens: 0,
-      total_tokens: Number(usage.prompt_tokens || usage.tokens || 0),
+      total_tokens: promptTokens,
+      questions: Number(usage.questions ?? 0),
+      sequence_tokens: usage.sequence_tokens || {},
+      encoder_tokens: Number(usage.encoder_tokens ?? promptTokens),
+      encoder_passes: Number(usage.encoder_passes ?? 0),
+      batched: Boolean(usage.batched),
     },
     // Free, local, and honest about it: nothing was billed because nothing left the machine.
     cost: 0,

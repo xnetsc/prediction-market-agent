@@ -12,7 +12,7 @@ from prediction_market_agent.agent.decision_evaluator import CandidateAssessment
 from prediction_market_agent.plugins.api._polymarket.adapter import PolymarketApiPlugin
 from prediction_market_agent.plugins.api._polymarket.runtime import PolymarketEventLoop
 from prediction_market_agent.runtime.memory import SessionMemory
-from prediction_market_agent.runtime.market_discovery import DiscoveryEngine
+from prediction_market_agent.runtime.market_discovery import DiscoveryEngine, _screening_breather
 from prediction_market_agent.plugin_system.managed_config import (
     ManagedRuntimeConfig, save_managed_config,
 )
@@ -25,6 +25,11 @@ class MarketScreeningQueueTests(unittest.TestCase):
         self.path = Path(self.temp.name) / "sessions.sqlite3"
         self.memory = SessionMemory(self.path)
         self.addCleanup(self.memory.close)
+
+    def test_screening_breather_tracks_observed_call_not_fixed_benchmark(self) -> None:
+        self.assertEqual(_screening_breather(0.01), 0.005)
+        self.assertAlmostEqual(_screening_breather(0.22), 0.022)
+        self.assertEqual(_screening_breather(8.0), 0.5)
 
     @staticmethod
     def candidate(number: int, price: str = "0.40") -> dict:

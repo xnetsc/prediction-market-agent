@@ -52,6 +52,7 @@ test('benchmark waits for active inference, then holds one exclusive ticket for 
   await new Promise((resolve) => setImmediate(resolve));
   const benchmark = createBenchmark({ exclusive, sample: async () => {
     events.push('benchmark');
+    return { usage: { input_tokens: 480, encoder_tokens: 480, encoder_passes: 4 } };
   } });
   assert.equal(benchmark.trigger().accepted, true);
   assert.equal(benchmark.snapshot().status, 'queued');
@@ -66,6 +67,8 @@ test('benchmark waits for active inference, then holds one exclusive ticket for 
   assert.equal(benchmark.snapshot().status, 'ok');
   assert.equal(benchmark.snapshot().active, false);
   assert.equal(benchmark.snapshot().samples, 3);
+  assert.deepEqual(benchmark.snapshot().usage,
+    { input_tokens: 480, encoder_tokens: 480, encoder_passes: 4 });
 });
 
 test('failed benchmark publishes failure and releases inference gate', async () => {

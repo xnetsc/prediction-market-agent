@@ -410,6 +410,24 @@ class TheLocalDecisionModelIsShippedTests(unittest.TestCase):
         self.assertIn("createGpuQueue()", server)
         self.assertIn("await exclusive(() => completions(request, response, body))", server)
 
+    def test_laya_reports_the_encoder_work_behind_latency(self) -> None:
+        server = Path("deploy/laya-service/server.mjs").read_text()
+        benchmark = Path("deploy/laya-service/benchmark.mjs").read_text()
+        dashboard = Path("src/prediction_market_agent/runtime/static/dashboard-views.js").read_text()
+        self.assertIn("usage.input_tokens", server)
+        self.assertIn("encoder_tokens", server)
+        self.assertIn("observed?.usage", benchmark)
+        self.assertIn("编码 '+Number(usage.encoder_tokens)+' token", dashboard)
+
+    def test_sdk_updates_rebuild_the_downloadable_service(self) -> None:
+        workflow = Path(".github/workflows/sync-webtorch.yml").read_text()
+        container_check = Path("deploy/check-container.sh").read_text()
+        self.assertIn("cron: '17 * * * *'", workflow)
+        self.assertIn("repository_dispatch:", workflow)
+        self.assertIn("gh workflow run container.yml --ref main", workflow)
+        self.assertIn('base + "/laya-service.zip"', container_check)
+        self.assertIn("laya-service/vendor/webtorch/UPSTREAM_SHA", container_check)
+
     def test_the_repository_has_a_getting_started_path(self) -> None:
         guide = Path("docs/GETTING_STARTED.md").read_text()
         for step in ("启动", "接一个 AI 模型服务", "接一个交易平台", "入金", "让它跑起来", "本地粗筛模型"):

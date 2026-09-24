@@ -2,7 +2,9 @@ name: Sync webtorch SDK
 
 on:
   schedule:
-    - cron: '17 3 * * *'
+    - cron: '17 * * * *'
+  repository_dispatch:
+    types: [webtorch-main-updated]
   workflow_dispatch:
 
 permissions:

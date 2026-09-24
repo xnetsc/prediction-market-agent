@@ -160,3 +160,7 @@ iOS Safari、Android 真机、Windows 原生浏览器或真实账号授权验收
 - 一次真实 schema 返回不保证所有 OpenRouter 模型、路由端点或未来请求都可用。
 - Chrome 响应式验收不等于所有移动设备、辅助技术或浏览器扩展行为一致。
 - 历史决策、模型输出、纸面盈亏和测试通过都不构成收益保证。
+
+2026-09-24 延迟核查后，宿主 WebGPU 的四个不同问题测速报告 513 个实际编码 token、4 次前向，中位 338ms；包含两个完全相同序列的固定四题请求报告 412 个输入 token、309 个实际编码 token、3 次前向，热态 211–222ms，答案与改动前一致。服务的 `prompt_tokens` 已从错误的 0 修正为 SDK `input_tokens`，`/health.benchmark.usage` 与控制台同步显示序列长度和编码次数。粗筛间隔仍按刚完成的真实请求耗时动态计算，并新增边界测试。
+
+同机 Chrome 已有缓存中的 ONNX int8/WASM 版本加载时 18/18 个分片均命中缓存，初始化 2.1s、单题预热 495ms；220 个输入 token、3 道题的两次热态运行分别为 1230ms、1386ms。该结果仅用于区分 CPU/WASM 与当前 WebGPU 路径，不等同于其 int4/WebGPU 版本。完整回归为 788 passed、271 subtests，另有 2 项 Binance 生产联网测试因当前出口 HTTP 451 失败；定向 46 项与 Node 6 项通过。

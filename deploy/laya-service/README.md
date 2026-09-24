@@ -66,6 +66,8 @@ API 是 OpenRouter 的 chat-completions 形状，所以任何能调 OpenRouter �
 
 `GET /health` 的 `benchmark` 字段给出实时状态（`queued`、`running`、`ok`、`failed`）和最近测速结果。`POST /benchmark` 可手动触发一次，返回 202；若测速已经排队或执行中，则返回 `accepted: false`，不会重复排队。无需额外的 `GET /benchmark`。测速时，`/v1/chat/completions` 的 429 响应包含 `Retry-After: 1`、`error.code: benchmark_in_progress` 与完整 `benchmark` 状态；客户端可查看该状态自行决定等待、重试或切换其他评估器。机器人遇到该 429 不会在同一次调用里盲目重试，而会走已配置的评估器回退。
 
+一次请求中的每道题都会与共享状态拼成自己的双向编码序列，因此状态文本的 token 数不等于实际编码工作量。响应 `usage.sequence_tokens` 给出每道题的序列长度，`encoder_tokens`、`encoder_passes` 和 `batched` 给出实际执行情况；标准的 `prompt_tokens` 是所有题目序列长度之和。`/health.benchmark.usage` 公开同一组指标，控制台测速状态会显示编码 token 与次数。完全相同的序列在同一请求内只编码一次。
+
 该服务默认无鉴权且监听 `0.0.0.0`。`POST /benchmark` 也可被能访问该服务的设备调用；请通过防火墙限制来源，不要暴露公网。
 
 ```bash
@@ -86,3 +88,5 @@ curl -s http://127.0.0.1:8899/v1/chat/completions -H 'content-type: application/
 | `--headless false` | 无头 | 想看看浏览器里发生了什么时用 |
 
 需要 `curl` 访问 GitHub 检查 SDK；模型只在首次缺失时下载。代理：SDK 检查使用 curl 的代理环境变量；服务也会读 `HTTPS_PROXY` / `HTTP_PROXY`。
+
+本仓库的自动同步每小时检查一次 SDK 主分支；检测到随附文件变化后提交 vendor 更新，并显式触发多架构容器构建。工作流也接受 `webtorch-main-updated` repository dispatch 以支持即时通知。容器发布前会从实际运行的 UI 下载 `laya-service.zip`，核对启动文件、SDK 提交标记和当前服务代码。

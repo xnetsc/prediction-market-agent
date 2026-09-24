@@ -10,13 +10,13 @@ export const BENCHMARK_STATE = {
 };
 
 export const BENCHMARK_QUESTIONS = {
-  route_benchmark: { type: 'choice', criteria: {
+  route_benchmark: { type: 'choice', instructions: 'Choose the next research action from supplied facts only.', criteria: {
     PRIORITIZE: 'research now', DEFER: 'research later',
     NEEDS_DATA: 'missing facts', REJECT: 'unusable',
   } },
-  quality_benchmark: { type: 'score', criteria: { min: 0, max: 5 } },
-  series_benchmark: { type: 'noul' },
-  evidence_benchmark: { type: 'noul' },
+  quality_benchmark: { type: 'score', instructions: 'Rate current research value.', criteria: { min: 0, max: 5 } },
+  series_benchmark: { type: 'noul', instructions: 'This is one window in a recurring market series.' },
+  evidence_benchmark: { type: 'noul', instructions: 'The supplied facts are enough to prioritize without another read.' },
 };
 
 export function createBenchmark({ exclusive, sample, now = () => Date.now(), intervalMs = 300000 }) {
@@ -44,9 +44,11 @@ export function createBenchmark({ exclusive, sample, now = () => Date.now(), int
     running = exclusive(async () => {
       current = { ...current, status: 'running' };
       const latencies = [];
+      let usage = {};
       for (let index = 0; index < 4; index += 1) {
         const start = now();
-        await sample(BENCHMARK_STATE, BENCHMARK_QUESTIONS);
+        const observed = await sample(BENCHMARK_STATE, BENCHMARK_QUESTIONS);
+        if (observed?.usage && typeof observed.usage === 'object') usage = observed.usage;
         if (index > 0) latencies.push(now() - start);
       }
       current = {
@@ -54,6 +56,7 @@ export function createBenchmark({ exclusive, sample, now = () => Date.now(), int
         completed_at: now() / 1000, samples: latencies.length,
         median_ms: Math.round(median(latencies) * 10) / 10,
         max_ms: Math.round(Math.max(...latencies) * 10) / 10,
+        usage,
       };
     }).catch((error) => {
       current = {

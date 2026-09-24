@@ -35,6 +35,12 @@ from .memory import SessionMemory
 
 LOGGER = logging.getLogger(__name__)
 
+
+def _screening_breather(elapsed_seconds: float) -> float:
+    """A bounded 10% gap based on the request just observed, not a synthetic benchmark."""
+    return min(0.5, max(0.005, float(elapsed_seconds) * 0.1))
+
+
 DISCOVERY_SCHEMA: dict[str, Any] = {
     "type": "object",
     "additionalProperties": False,
@@ -365,11 +371,11 @@ class DiscoveryEngine:
             }
             request_started = time.monotonic()
             answers = self.evaluator.evaluate_candidates(state, candidates)
-            # A measured Laya call on this host takes about 0.5 s for one market/four
-            # questions. One worker already prevents overlap; a small latency-proportional
-            # breather smooths faster GPUs without hard-coding this machine's throughput.
+            # Pace from this real request rather than the service's fixed benchmark: candidate
+            # sequence lengths vary, and the observed call already includes queue and GPU time.
+            # One worker prevents overlap; this small proportional gap follows faster hardware.
             if per_candidate:
-                breather = min(0.5, max(0.005, (time.monotonic() - request_started) * 0.1))
+                breather = _screening_breather(time.monotonic() - request_started)
                 remaining = started + self.max_scan_seconds - time.monotonic()
                 if remaining > breather:
                     time.sleep(breather)
