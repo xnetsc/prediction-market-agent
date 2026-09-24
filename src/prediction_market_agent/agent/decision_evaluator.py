@@ -11,6 +11,46 @@ MIN_SCREENING_CONFIDENCE = 0.80
 EVALUATOR_FAILURE_COOLDOWN_SECONDS = 30
 
 
+def screening_feedback(calibration: dict[str, Any]) -> dict[str, Any]:
+    """Bounded, sample-aware guidance; full-decision actions are not realized P&L."""
+
+    by_action = calibration.get("by_screening_action") or {}
+    guidance: list[str] = [
+        "Coarse screening allocates research only. No book, fees, contract deadline or fair-value "
+        "estimate in the supplied facts means NEEDS_DATA or DEFER, not an event-wide REJECT."
+    ]
+    counts: dict[str, int] = {}
+    for action in ("PRIORITIZE", "NEEDS_DATA", "DEFER", "REJECT"):
+        outcomes = by_action.get(action) or {}
+        counts[action] = sum(
+            max(0, int(outcomes.get(result) or 0)) for result in ("BUY", "SELL", "HOLD")
+        )
+    prioritized = by_action.get("PRIORITIZE") or {}
+    if counts["PRIORITIZE"] >= 20:
+        hold = max(0, int(prioritized.get("HOLD") or 0))
+        if hold / counts["PRIORITIZE"] >= 0.85:
+            guidance.append(
+                "Most reviewed PRIORITIZE cases later resulted in HOLD. Ask for a specific "
+                "checkable catalyst or pricing thesis before PRIORITIZE; use NEEDS_DATA for a "
+                "plausible but unverified thesis. This is a research-cost proxy, not proof of loss."
+            )
+    missed = sum(
+        max(0, int((by_action.get(action) or {}).get(result) or 0))
+        for action in ("DEFER", "REJECT") for result in ("BUY", "SELL")
+    )
+    if counts["DEFER"] + counts["REJECT"] >= 10 and missed:
+        guidance.append(
+            "Some previously deferred/rejected candidates led to a full BUY/SELL decision. "
+            "Protect uncertain, under-observed events from confident exclusion; review the "
+            "safety-sampled cases before tightening filters. A decision is not a settled profit."
+        )
+    return {
+        "basis": "subsequent full decisions; selection-cost proxy, not P&L",
+        "reviewed_counts": counts,
+        "guidance": guidance[:3],
+    }
+
+
 def is_high_confidence(value: float | None, threshold: float = DEFAULT_SCREENING_CONFIDENCE) -> bool:
     """Return whether a typed screening answer clears the current adaptive threshold."""
 

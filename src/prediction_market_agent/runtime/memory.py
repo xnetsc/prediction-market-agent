@@ -1065,20 +1065,26 @@ class SessionMemory:
 
         Per-topic history tells the screener about markets it has seen. This tells it about itself:
         of everything it called worth attention, how much the deciding model then traded, and how
-        much it left alone. A screener that cannot see that has no way to become better calibrated;
-        it can only repeat whatever it did the first time.
+        much it left alone. Pair each topic's latest screen with only its first subsequent full
+        decision; earlier or repeated decisions must not be attributed to that screen.
         """
         history = self.screening_history(platform=platform)
         outcomes: dict[str, dict[str, int]] = {}
         for item in history.values():
             if not item["screened"] or not item["decided"]:
                 continue
-            screened = item["screened"][-1]["action"]
-            bucket = outcomes.setdefault(screened, {})
-            for decision in item["decided"]:
-                bucket[decision["action"]] = bucket.get(decision["action"], 0) + 1
+            latest_screen = item["screened"][-1]
+            following = next(
+                (decision for decision in item["decided"]
+                 if decision["at_ms"] >= latest_screen["at_ms"]),
+                None,
+            )
+            if following is None:
+                continue
+            bucket = outcomes.setdefault(latest_screen["action"], {})
+            bucket[following["action"]] = bucket.get(following["action"], 0) + 1
         return {
-            "meaning": "每种粗筛结论之后，决策模型实际做了什么（按标的累计）",
+            "meaning": "每个标的最近一次粗筛之后，首个完整决策做了什么（每标的最多一次）",
             "by_screening_action": outcomes,
             "topics_with_history": len(history),
         }

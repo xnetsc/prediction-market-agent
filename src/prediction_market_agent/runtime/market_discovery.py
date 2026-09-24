@@ -10,6 +10,7 @@ from ..agent.decision_evaluator import (
     DEFAULT_SCREENING_CONFIDENCE,
     MIN_SCREENING_CONFIDENCE,
     is_high_confidence,
+    screening_feedback,
 )
 from ..agent.evolution import (
     DISCOVERY_EVOLUTION_KEY,
@@ -25,6 +26,7 @@ from ..agent.market_discovery import (
     DiscoveryPrior,
     compose_discovery_payload,
 )
+from ..agent.market_playbook import read_market_playbook
 from ..plugin_system.contracts import PredictionMarketApiPlugin, Topic
 from .memory import SessionMemory
 
@@ -466,6 +468,7 @@ class DiscoveryEngine:
                         # How this screener's own verdicts have turned out here so far, so a
                         # round can be better calibrated than the one before it.
                         "screening_calibration": self._screening_calibration,
+                        "screening_feedback": screening_feedback(self._screening_calibration),
                     }
                     screening_state["_scan_deadline_monotonic"] = started + self.max_scan_seconds
                     chunk_size = 4 if per_candidate else max(1, len(candidates))
@@ -1461,6 +1464,13 @@ class _DiscoveryToolbox:
         # What it read about candidates this round, merged into the record afterwards.
         self.verified: dict[str, dict[str, Any]] = {}
         self.descriptions: dict[str, Any] = {
+            "READ_MARKET_PLAYBOOK": {
+                "purpose": (
+                    "Read one prediction-market guide only when needed: selection, execution, "
+                    "resolution, structure, feedback, or field_notes (first-person reports)."
+                ),
+                "arguments": {"section": "required section name"},
+            },
             "TOPIC_DETAIL": {
                 "purpose": (
                     "Read one page of a topic's markets, outcomes, resolution data and end time. "
@@ -1473,7 +1483,10 @@ class _DiscoveryToolbox:
                 },
             },
             "OUTCOME_BOOK": {
-                "purpose": "Read the order book for one outcome to check the real spread.",
+                "purpose": (
+                    "Read the order book, touch size and nearest depth for a specific outcome. "
+                    "A different contract in the same event can have a different book."
+                ),
                 "arguments": {"market_id": "required string", "outcome_id": "required string"},
             },
             "TOPIC_HISTORY": {
@@ -1493,8 +1506,10 @@ class _DiscoveryToolbox:
             # it next round. Anything these return can be selected like any other candidate.
             "VERIFY_TOPICS": {
                 "purpose": (
-                    "Read the deadline, the resolution wording, how many markets are open and the "
-                    "real spread for the candidates you name - all in this one step. Nothing in the "
+                    "Read event deadline and resolution, list the first open contracts, and sample "
+                    "ONE contract's book per named event. A bad sample does NOT reject other "
+                    "contracts or outcomes in the event: use TOPIC_DETAIL and OUTCOME_BOOK for "
+                    "the actual thesis. Nothing in the "
                     "list arrives priced, because which ones are worth reading is your call: name "
                     "the few you would actually give a slot to. Costs one platform read per "
                     "candidate, inside this round's read allowance."
@@ -1541,6 +1556,7 @@ class _DiscoveryToolbox:
 
     def execute(self, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
         handler = {
+            "READ_MARKET_PLAYBOOK": read_market_playbook,
             "TOPIC_DETAIL": self._topic_detail,
             "OUTCOME_BOOK": self._outcome_book,
             "TOPIC_HISTORY": self._topic_history,
@@ -1645,10 +1661,24 @@ class _DiscoveryToolbox:
             entry: dict[str, Any] = {"verified": True, "resolution": detail.get("resolution")}
             end_time = detail.get("end_time_ms")
             if end_time:
-                entry["seconds_remaining"] = max(0, (int(end_time) - now_ms) // 1000)
+                entry["event_seconds_remaining"] = max(0, (int(end_time) - now_ms) // 1000)
             markets = detail.get("markets") or []
             entry["markets"] = int(detail.get("markets_total", len(markets)))
             entry["markets_open"] = int(detail.get("markets_open", 0))
+            entry["market_options"] = [
+                {
+                    "market_id": market.get("market_id"),
+                    "question": market.get("question"),
+                    "liquidity_usdt": market.get("liquidity_usdt"),
+                    "fees_enabled": market.get("fees_enabled"),
+                    "fee_schedule": market.get("fee_schedule"),
+                    "outcomes": market.get("outcomes"),
+                }
+                for market in markets
+                if str(market.get("status", "")).upper() == "OPEN"
+            ]
+            entry["market_options_has_more"] = bool(detail.get("has_more"))
+            entry["sampled_market_count"] = 0
             # Only an open market has a book. Asking for one on a closed market is a guaranteed 404
             # that spends the allowance and tells the agent nothing - whereas "nothing here is open"
             # is itself the fact a status gate needs.
@@ -1662,10 +1692,17 @@ class _DiscoveryToolbox:
             outcomes = (priced.get("outcomes") or []) if priced else []
             if outcomes:
                 entry["tradeable"] = True
+                entry["sampled_market_count"] = 1
+                entry["unverified_open_markets"] = max(0, entry["markets_open"] - 1)
                 # Which market the price belongs to matters: in a ladder of deadlines, a spread on
                 # "by December" says nothing about "by June".
                 entry["priced_market"] = str(priced.get("question", ""))[:160]
+                entry["priced_market_id"] = str(priced.get("market_id", ""))
+                market_end = priced.get("end_time_ms") or end_time
+                if market_end:
+                    entry["seconds_remaining"] = max(0, (int(market_end) - now_ms) // 1000)
                 entry["priced_outcome"] = outcomes[0].get("name")
+                entry["priced_outcome_id"] = outcomes[0].get("outcome_id")
                 try:
                     book = self.execute("OUTCOME_BOOK", {
                         "market_id": priced.get("market_id"),
@@ -1675,8 +1712,10 @@ class _DiscoveryToolbox:
                     book = {"ok": False, "error": str(error)[:200]}
                 if book.get("ok"):
                     entry.update({
-                        key: book[key] for key in ("best_bid", "best_ask", "spread")
-                        if key in book
+                        key: book[key] for key in (
+                            "best_bid", "best_ask", "best_bid_size", "best_ask_size",
+                            "spread", "top_bids", "top_asks",
+                        ) if key in book
                     })
                     bid, ask = book.get("best_bid"), book.get("best_ask")
                     if bid and ask:
@@ -1732,6 +1771,9 @@ class _DiscoveryToolbox:
                     "question": market.question[:300],
                     "status": market.status,
                     "liquidity_usdt": market.liquidity_usdt,
+                    "end_time_ms": market.end_time_ms,
+                    "fees_enabled": market.fees_enabled,
+                    "fee_schedule": market.fee_schedule,
                     "outcomes": [
                         {
                             "outcome_id": outcome.outcome_id,
@@ -1752,18 +1794,25 @@ class _DiscoveryToolbox:
         book = self.plugin.get_order_book(
             str(arguments["market_id"]), str(arguments["outcome_id"])
         )
-        bids = [level.price for level in book.bids]
-        asks = [level.price for level in book.asks]
-        if not bids or not asks:
-            return {"ok": True, "two_sided": False}
-        best_bid, best_ask = max(bids), min(asks)
-        return {
+        bids = sorted(book.bids, key=lambda level: level.price, reverse=True)
+        asks = sorted(book.asks, key=lambda level: level.price)
+        answer: dict[str, Any] = {
             "ok": True,
-            "two_sided": True,
-            "best_bid": best_bid,
-            "best_ask": best_ask,
-            "spread": round(best_ask - best_bid, 6),
+            "two_sided": bool(bids and asks),
+            "top_bids": [
+                {"price": level.price, "quantity": level.quantity} for level in bids[:5]
+            ],
+            "top_asks": [
+                {"price": level.price, "quantity": level.quantity} for level in asks[:5]
+            ],
         }
+        if bids:
+            answer.update(best_bid=bids[0].price, best_bid_size=bids[0].quantity)
+        if asks:
+            answer.update(best_ask=asks[0].price, best_ask_size=asks[0].quantity)
+        if bids and asks:
+            answer["spread"] = round(asks[0].price - bids[0].price, 6)
+        return answer
 
     def _topic_history(self, arguments: dict[str, Any]) -> dict[str, Any]:
         topic_id = str(arguments["topic_id"])

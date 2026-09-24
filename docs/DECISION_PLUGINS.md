@@ -144,6 +144,11 @@ Codex 与 Claude 的独立代理字段和模型/强度在配置页首要分区�
 最终发现选择与交易决策仍由 Agent 完成。旧的自定义评估器若未实现可选 `answer_questions` 方法，仍可
 独立粗筛，但不会被放进这个工具的可用池。
 
+内置发现/决策 Agent 另有 `READ_MARKET_PLAYBOOK(section)` 按需工具，只在相关情况加载
+`selection`、`execution`、`resolution`、`structure`、`feedback` 或 `field_notes` 一段。
+个人交易复盘与 X 帖仅作为待验证线索，不能自动变成下单阈值；粗筛反馈有样本门槛，后续 HOLD
+只代表研究成本代理而不是实际亏损。详细复核见[预测市场选标与盘口](MARKET_SELECTION_REVIEW.md)。
+
 `JEV_CONNECTION=OPENROUTER` 时默认从 `JEV_SHARED_PROVIDER` 指定的 OpenRouter Provider 复用
 `OPENROUTER_API_KEY`，也可用 `JEV_API_KEY` 单独覆盖。选择官方 Jev 型号时自动请求
 `https://openrouter.ai/api/alpha/decisions`；Jev 模型本身只接受 Decisions 协议。选择其它 OpenRouter 聊天

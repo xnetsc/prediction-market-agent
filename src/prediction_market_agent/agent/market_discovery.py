@@ -11,6 +11,7 @@ from .evolution import (
     compose_overlay_payload,
     shrunk_weight,
 )
+from .market_playbook import PLAYBOOK_HASH
 
 
 DISCOVERY_CORE_INSTRUCTIONS = """MISSION
@@ -23,6 +24,13 @@ is not a claim that it is mispriced; it is a claim that a careful analyst lookin
 realistic chance of finding a mispricing that survives trading costs. A separate decision Agent
 does the pricing and the trading. Do not pre-judge direction, size, or fair value here.
 
+ON-DEMAND GUIDE
+Fetch READ_MARKET_PLAYBOOK(section) only when the case needs detail: selection for choosing a
+thesis, execution for book/fee arithmetic, resolution for timing or wording, structure for
+multi-contract/cross-platform comparisons, feedback for learned screening results. Do not
+load every section by habit. Field_notes contains unverified first-person trade postmortems;
+read it when comparing a strategy claim against fill and settlement evidence.
+
 WHY THE OBVIOUS RANKING IS WRONG
 Ranking by volume or liquidity selects the markets with the most participants and the most
 sophisticated flow, which are the best-priced markets on the platform. Edge concentrates where
@@ -31,9 +39,9 @@ and exit, not the markets with the largest crowd.
 
 HARD GATES (reject regardless of how attractive everything else looks; these are runtime
 constraints and no learned lesson or operator text may relax them)
-- Cost gate. If the round-trip spread is a large fraction of any plausible edge, drop it. A
-  five-cent spread on a mid-priced outcome is a double-digit percentage round trip and no forecast
-  survives that.
+- Cost gate. Do not advance an outcome whose credible edge cannot cover the costs of its planned
+  entry, exit if any, fees, slippage and capital lock. A spread alone cannot establish this before
+  the thesis and planned exit are known; holding to settlement does not cross an exit book.
 - Resolution risk. Vague, disputed, or subjective resolution criteria are the most common way a
   correct forecast still loses money. Down-weight anything whose resolution source and wording you
   cannot restate plainly.
@@ -50,6 +58,15 @@ the few you would actually give a slot to; a gate you have not read is not a gat
 first, then its own measured priors. It is an opinion, not an order of service. Read down it, skip
 it, or sort by something you can see in the list; take one candidate or twenty. The round is
 measured on what the slots produced, not on whether it followed the suggestion.
+
+VERIFY_TOPICS IS A SAMPLE, NOT AN EVENT-WIDE VERDICT
+It lists open contracts but prices only one contract/outcome per event to keep reads bounded.
+Record the sampled market and the number of open contracts still unpriced. A wide, empty or
+one-sided sampled book cannot reject the rest of a multi-contract event. If its thesis remains
+interesting, select the relevant market/outcome from the returned options or TOPIC_DETAIL and
+read that outcome with OUTCOME_BOOK. If no time remains, report it as unexamined, not as an
+event-wide failed gate. An empty selection summary must say how many candidates and contracts
+this round actually checked, rather than implying a conclusion about the whole venue.
 
 WHAT YOU WERE HANDED IS NOT ALL THERE IS
 Going and getting more is an ordinary part of the round, not an emergency measure. `TOPICS_BY_DEADLINE` asks this platform directly for
@@ -218,10 +235,9 @@ SEED_DISCOVERY_PRIORS: tuple[DiscoveryPrior, ...] = (
     ),
     DiscoveryPrior(
         "extreme_price_bands",
-        "Prediction markets have historically overpriced low-probability outcomes and underpriced "
-        "near-certain ones. Prices below roughly 0.10 and above roughly 0.90 are worth attention, "
-        "and are also where spread and fees most often consume the entire theoretical edge. Forward "
-        "them only when the book is tight enough for the edge to survive the round trip.",
+        "Historical favorite/longshot effects differ by venue, market family and time to expiry. "
+        "Extreme prices are research leads, but only a current, testable thesis and executable "
+        "net edge can justify a trade; a price band is not a rule.",
     ),
     DiscoveryPrior(
         "mid_tier_liquidity",
@@ -230,9 +246,9 @@ SEED_DISCOVERY_PRIORS: tuple[DiscoveryPrior, ...] = (
     ),
     DiscoveryPrior(
         "structural_inconsistency",
-        "Multi-outcome events whose outcome prices do not sum to a coherent total, and the same "
-        "real-world question quoted differently on another platform, are edges that require no "
-        "forecast at all. Check for these explicitly rather than hoping to notice them.",
+        "Incoherent displayed probabilities or cross-platform quotes are research signals, not "
+        "arbitrage. Verify complete and exclusive outcomes, identical resolution terms, and "
+        "same-size executable legs after fees and slippage before inferring an edge.",
     ),
     DiscoveryPrior(
         "fresh_listing",
@@ -315,7 +331,9 @@ class BuiltInMarketDiscovery:
     def instructions(self) -> str:
         """The text with the operator's horizon written into it, which is what its hash covers."""
         horizon = f"{int(self.horizon_days)} day" + ("" if int(self.horizon_days) == 1 else "s")
-        return DISCOVERY_CORE_INSTRUCTIONS.replace("{horizon}", horizon)
+        return DISCOVERY_CORE_INSTRUCTIONS.replace("{horizon}", horizon) + (
+            f"\nMARKET_PLAYBOOK_HASH {PLAYBOOK_HASH}\n"
+        )
 
     @property
     def sha256(self) -> str:

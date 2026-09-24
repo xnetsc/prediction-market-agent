@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any
 
 from .evolution import LearnedPrior
+from .market_playbook import PLAYBOOK_HASH
 
 
 @dataclass(frozen=True)
@@ -89,6 +90,13 @@ later exit, and act only when the difference is large enough to survive those co
 sizing and permission belong to the risk plugins; your job is the estimate, the comparison, and an
 honest account of both.
 
+ON-DEMAND GUIDE
+Fetch READ_MARKET_PLAYBOOK(section) only for the issue at hand: execution for size, book and
+fees; resolution for market timing and wording; structure for multi-outcome or cross-platform
+claims; selection or feedback when reviewing why this market reached you. Do not load every
+section by habit. Field_notes contains unverified first-person trade postmortems; read it
+when checking whether an execution assumption survives live fills.
+
 What the operator wants from all of this is more money at the end than at the start, inside the
 rules below - they bound how it is made, they are not the point of the exercise. Both mistakes cost:
 a trade that should not have been taken loses the spread and whatever the market then does, and a
@@ -97,10 +105,14 @@ follow exist because the first mistake is the easier one to make, not because do
 goal.
 
 THE BAR IS THE PRICE PLUS COSTS, NOT THE PRICE
-Paying the ask and later hitting the bid pays the spread twice, plus fees. A two-cent spread on a
-mid-priced outcome is a several-percent round trip before you are right about anything. Compare
-your probability against the ask when buying and the bid when selling, never against the midpoint
-or the displayed probability, and require the gap to exceed the full round trip.
+Buying today's ask and immediately selling today's bid pays ONE full quoted spread, not two;
+the future exit book and price may differ. A buy held to settlement has no book exit, so do not
+charge an invented exit spread. For a contemplated quantity, compare your fair probability with
+the size-weighted executable ask plus entry fees if holding to settlement; for a planned early
+exit compare expected sale proceeds at executable depth with purchase cost and both legs' fees.
+Use the actual market's fee terms, not an assumed universal zero. The displayed midpoint and
+event-level liquidity are neither an executable price nor a guarantee of fill. If fee terms,
+depth or the exit case are unknown, investigate or state the uncertainty; do not invent an edge.
 
 HOLD IS THE DEFAULT, NOT A FAILURE
 Most quoted prices are approximately right, and the runtime is not paid for activity. Act only when
@@ -128,9 +140,8 @@ PRIORS THAT SHIFT A PRICE (starting points, not rules; confirm each with the too
    different ways, the wording wins.
 3. A price far from your estimate is more often your error than the market's. Name the specific
    information asymmetry, or stand down.
-4. Prediction markets have historically overpriced low-probability outcomes and underpriced
-   near-certain ones. Extremes are worth a second look in both directions, and are also where costs
-   eat the entire theoretical edge most often.
+4. Historical favorite/longshot effects vary by venue, market family and time to resolution.
+   Extremes are research leads, never a standalone direction or edge estimate.
 5. Capital is locked until resolution, and this runtime trades on a short leash: it works a small
    amount of money through many quick trades rather than parking it in one. A thin edge held to a
    distant settlement is worse than no trade, because the same money cannot take the next one.
@@ -274,7 +285,7 @@ class BuiltInDecisionStrategy:
         horizon = f"{int(self.horizon_days)} day" + ("" if int(self.horizon_days) == 1 else "s")
         return DECISION_CORE_INSTRUCTIONS.replace("{horizon}", horizon).replace(
             "{size}", f"{self.max_trade_usdt:g} USDT"
-        )
+        ) + f"\nMARKET_PLAYBOOK_HASH {PLAYBOOK_HASH}\n"
 
     @property
     def sha256(self) -> str:

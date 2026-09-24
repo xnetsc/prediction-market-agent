@@ -758,6 +758,21 @@ class TheScreenerRemembersTests(unittest.TestCase):
         self.assertEqual(calibration["by_screening_action"]["PRIORITIZE"], {"HOLD": 1, "BUY": 1})
         self.assertEqual(calibration["topics_with_history"], 2)
 
+    def test_calibration_does_not_assign_old_or_repeated_decisions_to_latest_screen(self) -> None:
+        self._screened("t1", "PRIORITIZE", 0.8)
+        time.sleep(0.005)
+        self._decided("t1", "BUY", "old decision", "")
+        time.sleep(0.005)
+        self._screened("t1", "DEFER", 0.8)
+        self.assertEqual(self.memory.screening_calibration(platform="poly")["by_screening_action"], {})
+        time.sleep(0.005)
+        self._decided("t1", "HOLD", "first later decision", "")
+        self._decided("t1", "BUY", "second later decision", "")
+        self.assertEqual(
+            self.memory.screening_calibration(platform="poly")["by_screening_action"],
+            {"DEFER": {"HOLD": 1}},
+        )
+
     def test_evaluator_quality_uses_only_paired_full_decisions(self) -> None:
         for name, topic, screened, decided in (
             ("laya", "laya-good", "PRIORITIZE", "BUY"),

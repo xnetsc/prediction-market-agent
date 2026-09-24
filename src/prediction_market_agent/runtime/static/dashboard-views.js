@@ -1397,11 +1397,12 @@ function venueErrorText(text){
     return code?'平台返回 HTTP '+code:s.slice(0,80);
 }
 function candidateStateText(c){
+    const scope=c.unverified_open_markets>0?'；另有 '+c.unverified_open_markets+' 个开放合约未核盘口':'';
     if(c.lookup_error)return '没读到详情：'+venueErrorText(c.lookup_error);
-    if(c.book_error)return '没读到价格：'+venueErrorText(c.book_error);
+    if(c.book_error)return '抽查合约没读到价格：'+venueErrorText(c.book_error)+scope;
     if(c.why_not_priced)return c.why_not_priced==='no market in this event is open for trading'?'这个事件下没有开放交易的市场':String(c.why_not_priced);
-    if(c.book_one_sided)return '只有单边报价';
-    if('spread' in c)return '读到了价格'+(c.priced_market?'（按「'+c.priced_market+'」）':'');
+    if(c.book_one_sided)return '抽查合约只有单边报价'+scope;
+    if('spread' in c)return '抽查合约读到了价格'+(c.priced_market?'（「'+c.priced_market+'」）':'')+scope;
     if(c.verified)return '读到了详情，没有读价格';
     return '本轮没去核实';
 }
@@ -1560,7 +1561,7 @@ function detailsHtml(r){
         if(d.pacing_reason)parts.push('<h5>下次什么时候再看、为什么</h5><p>'+esc(d.pacing_reason)+'</p>');
         const candidates=r.context?.candidates;
         if(Array.isArray(candidates)&&candidates.length)
-            parts.push('<h5>候选市场</h5><div class="table-scroll"><table><thead><tr><th>市场</th><th>买一 / 卖一</th><th>价差占中间价</th><th>流动性</th><th>结算</th><th>情况</th></tr></thead><tbody>'
+            parts.push('<h5>候选事件</h5><p class="muted">盘口为本轮抽查的一个合约及结果，不代表事件下全部合约；流动性是事件目录数值，不代表当前可成交深度。</p><div class="table-scroll"><table><thead><tr><th>事件</th><th>抽查盘口买一 / 卖一</th><th>抽查价差占中间价</th><th>事件流动性</th><th>抽查合约剩余时间</th><th>核验范围</th></tr></thead><tbody>'
                 +candidates.map(c=>'<tr><td>'+esc(c.title||('市场 #'+c.topic_id))+'</td><td>'+esc(c.best_bid!==undefined||c.best_ask!==undefined?(c.best_bid??'—')+' / '+(c.best_ask??'—'):'—')+'</td><td>'+esc(c.spread_pct_of_mid!==undefined&&c.spread_pct_of_mid!==null?c.spread_pct_of_mid+'%':'—')+'</td><td>'+esc(compactUsd(c.liquidity_usdt))+'</td><td>'+esc(remainingText(c.seconds_remaining)||'—')+'</td><td>'+esc(candidateStateText(c))+'</td></tr>').join('')
                 +'</tbody></table></div>');
     }else{

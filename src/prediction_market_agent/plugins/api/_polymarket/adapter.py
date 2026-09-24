@@ -609,6 +609,9 @@ class PolymarketApiPlugin:
             liquidity_usdt=float(item.get("liquidity") or 0),
             volume_usdt=float(item.get("volume") or 0),
             outcomes=tuple(outcomes),
+            end_time_ms=_milliseconds(item.get("endDate")),
+            fees_enabled=(bool(item["feesEnabled"]) if item.get("feesEnabled") is not None else None),
+            fee_schedule=(item["feeSchedule"] if isinstance(item.get("feeSchedule"), dict) else None),
         )
 
     def list_topics(self, *, offset: int, limit: int) -> TopicPage:

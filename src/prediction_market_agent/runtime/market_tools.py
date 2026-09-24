@@ -16,6 +16,7 @@ import time
 from dataclasses import asdict, is_dataclass
 from typing import Any
 
+from ..agent.market_playbook import read_market_playbook
 from ..plugin_system.contracts import FUNDING_TIMEOUT_SECONDS
 from .operator_instructions import OperatorInstructions, by_urgency, instruction_detail
 
@@ -83,6 +84,13 @@ def _implied(bid: float, ask: float) -> dict[str, Any]:
 
 
 DESCRIPTIONS: dict[str, Any] = {
+    "READ_MARKET_PLAYBOOK": {
+        "purpose": (
+            "Read one prediction-market guide only when needed: selection, execution, "
+            "resolution, structure, feedback, or field_notes (first-person reports)."
+        ),
+        "arguments": {"section": "required section name"},
+    },
     "READ_ACCOUNT": {
         "purpose": (
             "Read a platform's account book: starting capital, cash, exposure, equity, realised "
@@ -291,6 +299,9 @@ class MarketToolset:
         if handler is None:
             raise KeyError(name)
         return handler(arguments)
+
+    def _read_market_playbook(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        return read_market_playbook(arguments)
 
     # Reading -------------------------------------------------------------------------------
     def _account_funds(self, arguments: dict[str, Any]) -> dict[str, Any]:

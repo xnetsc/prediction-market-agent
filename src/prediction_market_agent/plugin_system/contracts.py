@@ -129,6 +129,9 @@ class Market:
     liquidity_usdt: float
     volume_usdt: float
     outcomes: tuple[Outcome, ...]
+    end_time_ms: int | None = None
+    fees_enabled: bool | None = None
+    fee_schedule: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True)

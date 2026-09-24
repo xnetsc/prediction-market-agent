@@ -415,7 +415,9 @@ class SchemaDecisionEvaluator:
                     "instructions": (
                         f"Choose the next treatment for candidate {key} from only the supplied facts. "
                         "Missing facts require NEEDS_DATA; low current value is DEFER; use REJECT only "
-                        "when the supplied facts establish that it is unusable. When the candidate "
+                        "when the supplied facts establish that the whole candidate is unusable. "
+                        "Event-level liquidity is not fillable depth; an absent or wide book on one "
+                        "contract cannot reject other contracts in its event. When the candidate "
                         "carries `history`, it has been here before: `screened` is what you called "
                         "it, `decided` is what the deciding model concluded each time, and "
                         "`revisit_when` is the condition it named for looking again. A market "
@@ -423,9 +425,10 @@ class SchemaDecisionEvaluator:
                         "something it was waiting for has plausibly happened - a price or deadline "
                         "the trigger names, a change in the supplied figures. Otherwise DEFER: "
                         "handing it on again spends the round on an answer that is already known. "
-                        "`screening_calibration` in the state says what your own verdicts here have "
-                        "led to so far; if what you call PRIORITIZE is almost always held, ask less "
-                        "for that kind and more for what actually got traded."
+                        "`screening_calibration` and `screening_feedback` in the state use "
+                        "subsequent decisions and sample "
+                        "sizes to adjust research priority. Treat HOLD as a cost-usefulness proxy, "
+                        "not realized loss or proof that excluded markets lacked edge."
                     ),
                     "criteria": {
                         "PRIORITIZE": "Worth scarce research attention now.",

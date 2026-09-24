@@ -53,8 +53,9 @@ Prediction 与 Polymarket API 插件，以及 Codex、Claude、OpenRouter Provid
 - SQLite 保存每轮完整输入输出、Agent 工具轨迹、风险判定、执行请求/结果、独立采集证据、运行异常、
   决策删除审计，以及成交/结算/充提构成的不可变盈亏事件台账。充提只算外部资金流，不冒充盈利；缺失
   成本或盘口标记保持未知，不按零计算。
-- 可选纸面交易使用用户明确填写的模拟金额，按平台真实报价和费率在本地立即成交；所有模拟余额、订单和
-  台账都标记为 simulated，并与实盘账户镜像分开。它不模拟排队、部分成交或滑点，不能替代实盘验收。
+- 可选纸面交易使用用户明确填写的模拟金额，按插件提供的报价及固定费率在本地立即成交；所有模拟余额、订单和
+  台账都标记为 simulated，并与实盘账户镜像分开。它不模拟排队、部分成交或滑点；Polymarket 动态费用尚未
+  精确回填，纸面净收益不可当作实盘验收，见[选标与成本复核](docs/MARKET_SELECTION_REVIEW.md)。
 - Web 界面通过回环或明确的局域网私有 IP 访问时无需认证或加解密（地址范围见[认证说明](docs/AUTHENTICATION.md)）；其他主机首次访问注册 admin Passkey，每次登录把 P-256 ECDH 参数绑定进 WebAuthn challenge，登录后的
   业务请求与响应使用 AES-GCM 会话密钥加密，并可管理 Passkey 与设备会话。
 - Web 界面可筛选查看“上下文 → 证据 → 模型提案 → 风控调整 → 最终动作 → 执行 → 后续盘口”，并查看、
@@ -203,6 +204,7 @@ Windows 更新时将最后一条替换为 `.\start-local.ps1`。`once` 是明确
 - [管理员 Passkey、ECDH 与加密会话](docs/AUTHENTICATION.md)
 - [集成测试](docs/INTEGRATION_TESTS.md)
 - [时区信息延迟案例研究](docs/STRATEGY_RESEARCH.md)
+- [预测市场选标、盘口与粗筛复核](docs/MARKET_SELECTION_REVIEW.md)
 - [敏感信息与发布安全](SECURITY.md)
 - `examples/`：各类插件、两类过滤插件各自的 Python 规则脚本、插件 JSON 和插件目录配置的完整例子。
 

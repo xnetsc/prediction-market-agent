@@ -29,6 +29,18 @@ def best_prices(book: OrderBook) -> tuple[float, float]:
     return bid, ask
 
 
+def near_touch_levels(book: OrderBook, count: int = 5) -> dict[str, list[dict[str, float]]]:
+    """Normalize venue-specific book ordering before showing depth to a decision agent."""
+    return {
+        "top_bids": [asdict(level) for level in sorted(
+            book.bids, key=lambda level: level.price, reverse=True
+        )[:count]],
+        "top_asks": [asdict(level) for level in sorted(
+            book.asks, key=lambda level: level.price
+        )[:count]],
+    }
+
+
 def compact_market(
     platform: str, topic: Topic, detail: TopicDetail, market: Market
 ) -> dict[str, Any]:
@@ -46,10 +58,14 @@ def compact_market(
         "chart_type": detail.chart_type,
         "symbol": detail.reference_symbol,
         "start_date_ms": detail.start_time_ms,
-        "end_date_ms": detail.end_time_ms,
+        "end_date_ms": market.end_time_ms or detail.end_time_ms,
         "liquidity_usdt": market.liquidity_usdt or detail.topic.liquidity_usdt,
         "volume_usdt": market.volume_usdt or detail.topic.volume_usdt,
-        "fee_rate_bps": detail.fee_bps,
+        "fee_rate_bps": (
+            detail.fee_bps if market.fees_enabled is False or detail.fee_bps else None
+        ),
+        "fees_enabled": market.fees_enabled,
+        "fee_schedule": market.fee_schedule,
         "resolution_data": detail.resolution,
     }
 
@@ -84,21 +100,22 @@ class MarketEvaluationMixin:
 
     def _evaluate_topic(self, runtime: PlatformRuntime, topic: Topic) -> None:
         detail = runtime.plugin.get_topic(topic.topic_id)
-        if detail.end_time_ms is None:
-            raise ValueError("Normalized topic has no end_time_ms")
-        seconds_remaining = max(
-            (detail.end_time_ms - int(time.time() * 1000)) / 1000.0, 0.0
-        )
-        if seconds_remaining <= 0:
-            self._settle_if_possible(runtime, detail)
-            return
+        now_ms = int(time.time() * 1000)
+        any_open_time = False
         for market in self.decision_strategy.select_markets(detail.markets):
             if self._decisions_this_cycle >= self._max_decisions_this_cycle:
                 break
+            market_end = market.end_time_ms or detail.end_time_ms
+            if market_end is None or market_end <= now_ms:
+                continue
+            any_open_time = True
+            seconds_remaining = (market_end - now_ms) / 1000.0
             for outcome in self.decision_strategy.select_outcomes(market.outcomes):
                 self._evaluate_outcome(
                     runtime, topic, detail, market, outcome, seconds_remaining
                 )
+        if not any_open_time and detail.end_time_ms is not None and detail.end_time_ms <= now_ms:
+            self._settle_if_possible(runtime, detail)
 
     def screen_queue(
         self, runtime: PlatformRuntime,
@@ -205,19 +222,18 @@ class MarketEvaluationMixin:
             except Exception as error:
                 LOGGER.warning("could not expand topic %s: %s", topic.topic_id, error)
                 continue
-            if detail.end_time_ms is None:
-                continue
-            seconds_remaining = max(
-                (detail.end_time_ms - int(time.time() * 1000)) / 1000.0, 0.0
-            )
-            if seconds_remaining <= 0:
+            now_ms = int(time.time() * 1000)
+            entries = []
+            for market in self.decision_strategy.select_markets(detail.markets):
+                market_end = market.end_time_ms or detail.end_time_ms
+                if market_end is None or market_end <= now_ms:
+                    continue
+                entries.extend(
+                    (topic, detail, market, outcome, (market_end - now_ms) / 1000.0)
+                    for outcome in self.decision_strategy.select_outcomes(market.outcomes)
+                )
+            if not entries and detail.end_time_ms is not None and detail.end_time_ms <= now_ms:
                 self._settle_if_possible(runtime, detail)
-                continue
-            entries = [
-                (topic, detail, market, outcome, seconds_remaining)
-                for market in self.decision_strategy.select_markets(detail.markets)
-                for outcome in self.decision_strategy.select_outcomes(market.outcomes)
-            ]
             if entries:
                 by_topic.append(entries)
         queue: list[tuple[Topic, TopicDetail, Market, Outcome, float]] = []
@@ -290,8 +306,7 @@ class MarketEvaluationMixin:
                 "best_bid": bid,
                 "best_ask": ask,
                 "spread": ask - bid,
-                "top_bids": [asdict(level) for level in book.bids[:5]],
-                "top_asks": [asdict(level) for level in book.asks[:5]],
+                **near_touch_levels(book),
             },
             "seconds_remaining": seconds_remaining,
             "portfolio": {
