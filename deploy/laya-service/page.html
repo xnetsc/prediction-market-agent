@@ -22,15 +22,12 @@
 <pre id="log">booting…</pre>
 <script src="../dist/wgpy-main.js"></script>
 <script src="../webtorch/js/webtorch-main.js"></script>
-<script src="../webtorch/js/decision-vision.js"></script>
 <script>
 // The one model this service exists for, as the SDK's own catalogue lists it: the whole repo,
 // no `file:` inside it, about 0.8 GB.
 const LAYA = 'convaiinnovations/laya';
-const LAYA_VISION = 'thaitea/laya-vision';
 
-const state = { ready: false, error: '', model: '', backend: '', surface: null, status: '', source: '',
-  vision: { ready: false, loading: false, model: LAYA_VISION, backend: '', variant: '', error: '' } };
+const state = { ready: false, error: '', model: '', backend: '', surface: null, status: '', source: '' };
 const say = (text) => {
   state.status = String(text);
   document.getElementById('log').textContent = state.status;
@@ -65,8 +62,6 @@ if (webtorch.onError) webtorch.onError((error) => {
     });
     state.model = LAYA;
     state.surface = (info && info.surface) || null;
-    const kinds = (((state.surface || {}).takes || {}).state || {}).kinds || [];
-    for (const kind of ['image', 'multimodal']) if (!kinds.includes(kind)) kinds.push(kind);
     state.ready = true;
     say('ready: ' + LAYA + (state.backend ? ' on ' + state.backend : ''));
   } catch (error) {
@@ -81,29 +76,7 @@ window.__laya = {
   status: () => ({ ...state }),
   decide: async (request) => {
     if (!state.ready) throw new Error(state.error || 'model is not ready yet');
-    const normalized = webtorch.normalizeDecisionState(request.state);
-    if (!normalized.images.length) return wt.decide(request.state, request.questions);
-    if (!window.__layaVision) {
-      state.vision = { ...state.vision, loading: true, error: '' };
-      say('loading ' + LAYA_VISION + ' …');
-      try {
-        window.__layaVision = await webtorch.loadVisionDecision({
-          baseUrl: '/models/laya-vision/', variant: 'auto', backend: 'webgpu',
-          imageCacheEntries: 32,
-          onProgress: (p) => say('vision ' + p.label + ' '
-            + Math.round((p.loaded || 0) / 1048576) + ' MB'
-            + (p.total ? ' / ' + Math.round(p.total / 1048576) + ' MB' : '')),
-        });
-        state.vision = { ready: true, loading: false, model: window.__layaVision.model,
-          backend: window.__layaVision.backend, variant: window.__layaVision.variant, error: '' };
-        say('ready: text + vision on webgpu');
-      } catch (error) {
-        state.vision = { ...state.vision, loading: false,
-          error: String((error && error.message) || error) };
-        throw error;
-      }
-    }
-    return window.__layaVision.decide(request.state, request.questions);
+    return wt.decide(request.state, request.questions);
   },
 };
 </script>

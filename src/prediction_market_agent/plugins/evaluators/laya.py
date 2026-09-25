@@ -81,6 +81,15 @@ class LayaDecisionEvaluator(SchemaDecisionEvaluator):
         except (urllib.error.URLError, OSError, ValueError) as error:
             return {"status": "unavailable", "error": str(error)[:300]}
 
+    def answer_questions(self, state: dict[str, Any], questions: dict[str, Any]) -> dict[str, Any]:
+        if isinstance(state, dict) and (
+            state.get("type") in {"image", "multimodal"} or state.get("image") or state.get("images")
+        ):
+            raise DecisionEvaluatorError(
+                "Laya evaluator is text-only; use a vision-capable application"
+            )
+        return super().answer_questions(state, questions)
+
     def close(self) -> None:
         with self._queue_condition:
             self._closed = True
@@ -280,6 +289,8 @@ def _check_service(endpoint: str, proxy: str) -> dict[str, Any]:
     if not {"choice", "score", "noul"}.issubset(types) or max_questions < 4:
         raise ValueError("Laya 服务未声明粗筛所需的结构化问答协议")
     state_kinds = tuple(str(kind) for kind in (state.get("kinds") or ("text", "json")))
+    if set(state_kinds).intersection({"image", "multimodal"}):
+        raise ValueError("Laya service must be text-only")
     return {"max_questions": max_questions, "state_kinds": state_kinds}
 
 

@@ -1,15 +1,14 @@
-/** One GPU scheduler with separate lanes. Text work may pass queued vision work, while a running
- * task remains exclusive so two runtimes cannot contend for the same device or exhaust memory. */
+/** One GPU scheduler for the fixed text-only Laya service. */
 export function createGpuQueue(maxPending = 64) {
   if (!Number.isSafeInteger(maxPending) || maxPending < 1) {
     throw new RangeError('maxPending must be a positive integer');
   }
-  const lanes = { benchmark: [], text: [], vision: [] };
+  const lanes = { benchmark: [], text: [] };
   let pending = 0;
   let running = false;
 
   function take() {
-    return lanes.benchmark.shift() || lanes.text.shift() || lanes.vision.shift() || null;
+    return lanes.benchmark.shift() || lanes.text.shift() || null;
   }
 
   function pump() {

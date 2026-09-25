@@ -35,7 +35,7 @@ class _LayaHandler(BaseHTTPRequestHandler):
                           "active": self.benchmark_active, "samples": 3,
                           "median_ms": 52.0, "max_ms": 60.0, "measured_at": 1},
             "surface": {"takes": {
-                "state": {"kinds": ["text", "json", "image", "multimodal"]},
+                "state": {"kinds": ["text", "json"]},
                 "questions": {
                     "types": {"choice": {}, "score": {}, "noul": {}}, "max": 6,
                 },
@@ -149,7 +149,7 @@ class LayaPluginTests(unittest.TestCase):
             self.assertEqual(_LayaHandler.requests, [])  # Health checks never run inference.
             evaluator = plugin.factory(None)
             self.assertEqual(evaluator.name, "laya")
-            self.assertIn("multimodal", evaluator.state_kinds)
+            self.assertEqual(evaluator.state_kinds, {"text", "json"})
             self.assertEqual(evaluator.benchmark_status["status"], "ok")
             self.assertEqual(evaluator.benchmark_status["median_ms"], 52.0)
             self.assertEqual(_LayaHandler.requests, [])  # The robot never benchmarks itself.
@@ -165,18 +165,17 @@ class LayaPluginTests(unittest.TestCase):
                 self.assertEqual(request["response_format"]["type"], "json_schema")
             plugin.teardown()
 
-    def test_multimodal_fact_state_is_sent_in_the_service_wire_shape(self) -> None:
+    def test_multimodal_fact_state_is_rejected_by_the_text_service(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             evaluator = self._plugin(Path(directory)).factory(None)
             image = {"type": "image", "media_type": "image/png", "data": "AA=="}
-            evaluator.answer_questions(
-                {"type": "multimodal", "text": "read the chart", "images": [image]},
-                {"check": {"type": "noul", "instructions": "Is it rising?",
-                           "criteria": {"true": "rising", "false": "not rising"}}},
-            )
-            asked = json.loads(_LayaHandler.requests[-1]["messages"][-1]["content"])
-            self.assertEqual(asked["state"]["type"], "multimodal")
-            self.assertEqual(asked["state"]["images"], [image])
+            with self.assertRaisesRegex(DecisionEvaluatorError, "text-only"):
+                evaluator.answer_questions(
+                    {"type": "multimodal", "text": "read the chart", "images": [image]},
+                    {"check": {"type": "noul", "instructions": "Is it rising?",
+                               "criteria": {"true": "rising", "false": "not rising"}}},
+                )
+            self.assertEqual(_LayaHandler.requests, [])
 
     def test_scan_deadline_caps_network_timeout_without_entering_model_state(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

@@ -27,22 +27,6 @@ test('a failed GPU task does not poison later work', async () => {
   assert.equal(await exclusive(async () => 'recovered'), 'recovered');
 });
 
-test('text work passes vision work that has not started', async () => {
-  const exclusive = createGpuQueue();
-  const order = [];
-  let releaseFirst;
-  const first = exclusive(async () => {
-    order.push('first');
-    await new Promise((resolve) => { releaseFirst = resolve; });
-  }, { lane: 'vision' });
-  const vision = exclusive(async () => { order.push('vision'); }, { lane: 'vision' });
-  const text = exclusive(async () => { order.push('text'); }, { lane: 'text' });
-  await new Promise((resolve) => setImmediate(resolve));
-  releaseFirst();
-  await Promise.all([first, vision, text]);
-  assert.deepEqual(order, ['first', 'text', 'vision']);
-});
-
 test('unknown queue lanes are rejected without consuming capacity', async () => {
   const exclusive = createGpuQueue(1);
   await assert.rejects(exclusive(async () => {}, { lane: 'other' }), /unknown GPU queue lane/);
