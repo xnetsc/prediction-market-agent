@@ -36,7 +36,7 @@ const fs = require('node:fs');
                 if(message.url==='/api/laya/probe'){
                     assert.equal(message.body.endpoint,layaEndpoint);
                     await route.fulfill({json:layaReady
-                        ?{reachable:true,ready:true,backend:'webgpu',model:'convaiinnovations/laya'}
+                        ?{reachable:true,ready:true,backend:'webgpu',model:'convaiinnovations/laya-multilingual'}
                         :{reachable:true,ready:false,status:'loading model'}});return;
                 }
                 if(message.url==='/api/plugins/config/choices'&&message.body.name==='openrouter'){

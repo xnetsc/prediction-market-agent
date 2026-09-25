@@ -30,7 +30,7 @@ class _LayaHandler(BaseHTTPRequestHandler):
 
     def do_GET(self) -> None:  # noqa: N802
         self._reply({
-            "ready": True, "backend": self.backend, "model": "convaiinnovations/laya",
+            "ready": True, "backend": self.backend, "model": "convaiinnovations/laya-multilingual",
             "benchmark": {"status": "running" if self.benchmark_active else "ok",
                           "active": self.benchmark_active, "samples": 3,
                           "median_ms": 52.0, "max_ms": 60.0, "measured_at": 1},
@@ -160,7 +160,7 @@ class LayaPluginTests(unittest.TestCase):
             self.assertEqual([item.candidate_id for item in results], ["one", "two"])
             self.assertEqual(len(_LayaHandler.requests), 2)
             for request in _LayaHandler.requests:
-                self.assertEqual(request["model"], "convaiinnovations/laya")
+                self.assertEqual(request["model"], "convaiinnovations/laya-multilingual")
                 self.assertEqual(len(json.loads(request["messages"][-1]["content"])["questions"]), 4)
                 self.assertEqual(request["response_format"]["type"], "json_schema")
             plugin.teardown()

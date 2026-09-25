@@ -31,7 +31,7 @@ from prediction_market_agent.plugins.evaluators.jev import (
 )
 
 
-MODEL = "convaiinnovations/laya"
+MODEL = "convaiinnovations/laya-multilingual"
 DEFAULT_ENDPOINT = "http://host.proxy.internal:8899/v1"
 
 
@@ -281,7 +281,7 @@ def _check_service(endpoint: str, proxy: str) -> dict[str, Any]:
     if health.get("backend") != "webgpu":
         raise ValueError("Laya 当前未使用 WebGPU，不能作为粗筛评估器")
     if health.get("model") != MODEL:
-        raise ValueError("Laya 服务返回的模型不是 convaiinnovations/laya")
+        raise ValueError("Laya 服务返回的模型不是 convaiinnovations/laya-multilingual")
     questions = ((health.get("surface") or {}).get("takes") or {}).get("questions") or {}
     state = ((health.get("surface") or {}).get("takes") or {}).get("state") or {}
     types = questions.get("types") or {}

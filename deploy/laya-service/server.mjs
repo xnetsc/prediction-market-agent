@@ -59,7 +59,7 @@ const HEADLESS = option('headless', 'true') !== 'false';
 
 /* The one model this service exists for. Not a parameter: the SDK's demo page can load anything,
  * and this is a service for laya. */
-const MODEL = 'convaiinnovations/laya';
+const MODEL = 'convaiinnovations/laya-multilingual';
 const MODELS_DIR = resolve(option('models', process.env.LAYA_MODELS || join(HERE_DIR(), 'models')));
 const MODEL_DIR = join(MODELS_DIR, 'laya');
 const ENDPOINT = option('endpoint', process.env.HF_ENDPOINT || 'https://huggingface.co');
@@ -518,7 +518,7 @@ const server = createServer(async (request, response) => {
       response.writeHead(200, { 'Content-Type': 'application/json' }).end(JSON.stringify({
         data: [{
           id: MODEL, name: MODEL, object: 'model',
-          description: 'Typed text decisions on local WebGPU using convaiinnovations/laya.',
+          description: 'Typed text decisions on local WebGPU using convaiinnovations/laya-multilingual.',
           supported_parameters: ['response_format', 'structured_outputs'],
           input_modalities: ['text'],
           pricing: { prompt: '0', completion: '0' },

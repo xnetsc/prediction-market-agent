@@ -17,7 +17,7 @@ Docker 容器能否使用 GPU，取决于宿主系统、显卡和容器运行配
 bash start.sh
 ```
 
-第一次会装 Playwright、按需装一个无头 Chromium、把模型（约 800MB）下载到 `models/laya/`。
+第一次会装 Playwright、按需装一个无头 Chromium、把模型（约 615MB 权重）下载到 `models/laya/`。
 之后每次启动都从本地读取模型权重，不再重复下载权重。
 
 模型选源由这个服务应用处理，不属于 SDK。若设置了完整下载地址，服务会先确认该地址可用，再与
@@ -46,7 +46,7 @@ tokenizer/tokenizer.json
 看到这行就是好了：
 
 ```
-laya ready: convaiinnovations/laya on webgpu
+laya ready: convaiinnovations/laya-multilingual on webgpu
 ```
 
 `on webgpu` 很重要。如果是 `on cpu`，说明没拿到 GPU（页面不是安全上下文、或者浏览器没装上），
@@ -81,7 +81,7 @@ API 是 OpenRouter 的 chat-completions 形状，所以任何能调 OpenRouter �
 
 ```bash
 curl -s http://127.0.0.1:8899/v1/chat/completions -H 'content-type: application/json' -d '{
-  "model": "convaiinnovations/laya",
+  "model": "convaiinnovations/laya-multilingual",
   "messages": [{"role": "user", "content": "{\"state\":{\"ticket\":\"重复扣款\"},\"questions\":{\"route\":{\"type\":\"choice\",\"instructions\":\"谁来处理\",\"criteria\":{\"billing\":\"账务\",\"tech\":\"技术\"}}}}"}]
 }'
 ```
