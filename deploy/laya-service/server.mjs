@@ -67,6 +67,7 @@ const VISION_MODEL = 'thaitea/laya-vision';
 const VISION_WEB_MODEL = 'thaitea/laya-vision-web';
 const VISION_MODEL_DIR = join(MODELS_DIR, 'laya-vision');
 const ENDPOINT = option('endpoint', process.env.HF_ENDPOINT || 'https://huggingface.co');
+const MODEL_URL = process.env.LAYA_MODEL_URL || '';
 
 function HERE_DIR() { return resolve(new URL('.', import.meta.url).pathname); }
 
@@ -100,7 +101,10 @@ const HERE = HERE_DIR();
 /* ------------------------------------------------------ the copy on this disk */
 
 /** Files of the repo that a load actually reads; the rest of it is pictures and eval notes. */
-const WANTED = /^(encoder\/|tokenizer\/|model\.safetensors$|rl_agent_config\.json$|config\.json$)/;
+const MODEL_FILES = [
+  'model.safetensors', 'rl_agent_config.json', 'encoder/config.json',
+  'tokenizer/tokenizer.json', 'tokenizer/tokenizer_config.json',
+];
 
 async function present(path) {
   try { return (await stat(path)).size > 0; } catch { return false; }
@@ -117,6 +121,66 @@ async function verifiedFile(path, bytes, sha256) {
   return hash.digest('hex') === sha256;
 }
 
+function completeUrlSource(url, probe) {
+  if (!url) return null;
+  const target = new URL(url);
+  const encoded = probe.split('/').map(encodeURIComponent).join('/');
+  const base = target.pathname.endsWith('/' + encoded)
+    ? target.href.slice(0, target.href.length - encoded.length)
+    : target.href.replace(/\/?$/, '/');
+  return { name: 'listed-url', base };
+}
+
+const MODEL_SOURCES = [
+  completeUrlSource(MODEL_URL, 'model.safetensors'),
+  { name: 'huggingface', base: `${ENDPOINT.replace(/\/$/, '')}/${MODEL}/resolve/main/` },
+  { name: 'modelscope', base: `https://modelscope.cn/models/${MODEL}/resolve/master/` },
+  { name: 'huggingface-mirror', base: `https://hf-mirror.com/${MODEL}/resolve/main/` },
+].filter(Boolean).filter((source, index, all) =>
+  all.findIndex((item) => item.base === source.base) === index);
+let chosenModelSource = null;
+
+async function probeModelSource(source) {
+  const started = performance.now();
+  const response = await fetch(source.base + 'model.safetensors', {
+    signal: AbortSignal.timeout(15000), headers: { Range: 'bytes=0-1048575' },
+  });
+  if (!response.ok) throw new Error(`HTTP ${response.status}`);
+  const reader = response.body.getReader();
+  let bytes = 0;
+  while (bytes < 1048576) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    bytes += Math.min(value.length, 1048576 - bytes);
+  }
+  try { await reader.cancel(); } catch { /* response already ended */ }
+  if (!bytes) throw new Error('empty response');
+  const elapsed = Math.max(0.001, (performance.now() - started) / 1000);
+  return { ...source, sampleBytesPerSecond: bytes / elapsed };
+}
+
+async function chooseModelSource(log = console.log) {
+  if (chosenModelSource) return chosenModelSource;
+  const available = [];
+  const direct = MODEL_SOURCES.find((source) => source.name === 'listed-url');
+  if (direct) {
+    try { available.push(await probeModelSource(direct)); }
+    catch { /* hubs remain eligible; the URL is only a fallback when it works */ }
+  }
+  const hubs = MODEL_SOURCES.filter((source) => source !== direct);
+  const results = await Promise.allSettled(hubs.map(probeModelSource));
+  available.push(...results.filter((item) => item.status === 'fulfilled').map((item) => item.value));
+  available.sort((a, b) => b.sampleBytesPerSecond - a.sampleBytesPerSecond);
+  if (!available.length) {
+    const detail = results.map((item, index) =>
+      `${hubs[index].name}: ${sourceFailure(item.reason)}`).join(' | ');
+    throw new Error(`no Laya model source is reachable (${detail})`);
+  }
+  chosenModelSource = available[0];
+  log(`Laya source: ${chosenModelSource.name} (${(chosenModelSource.sampleBytesPerSecond / 1048576).toFixed(1)} MB/s sample)`);
+  return chosenModelSource;
+}
+
 /** Fetch the model once, to disk, so that every boot after this one reads from here.
  *
  * The browser could do it - a hub reader plus `default_io_write` keeps the weights in origin
@@ -127,18 +191,11 @@ async function ensureLocalModel(log = console.log) {
   const marker = join(MODEL_DIR, 'model.safetensors');
   if (await present(marker)) return true;
   log(`fetching ${MODEL} to ${MODEL_DIR} (once)`);
-  const index = await fetch(`${ENDPOINT}/api/models/${MODEL}`);
-  if (!index.ok) throw new Error(`the model index answered HTTP ${index.status}`);
-  const files = ((await index.json()).siblings || [])
-    .map((item) => String(item.rfilename || ''))
-    .filter((name) => WANTED.test(name));
-  if (!files.some((name) => name === 'model.safetensors')) {
-    throw new Error('the repo listing has no model.safetensors');
-  }
-  for (const name of files) {
+  const source = await chooseModelSource(log);
+  for (const name of MODEL_FILES) {
     const target = join(MODEL_DIR, name);
     if (await present(target)) continue;
-    const response = await fetch(`${ENDPOINT}/${MODEL}/resolve/main/${name}`);
+    const response = await fetch(source.base + name);
     if (!response.ok) throw new Error(`${name}: HTTP ${response.status}`);
     await mkdir(dirname(target), { recursive: true });
     // Streamed to disk rather than read into memory: the weights are 800 MB, and a download with
@@ -164,17 +221,40 @@ async function ensureLocalModel(log = console.log) {
   return true;
 }
 
-const VISION_FILES = [
-  'laya_web.json', 'tokenizer/tokenizer.json', 'tokenizer/tokenizer_config.json',
-  'vision_fp16.onnx', 'text_fp16.onnx', 'head_fp16.onnx',
-];
+const VISION_ONNX_FILES = ['vision_fp16.onnx', 'text_fp16.onnx', 'head_fp16.onnx'];
+const VISION_RELEASE = 'https://github.com/xnetsc/webpytorch/releases/download/laya-vision-web-201m-v1/';
 const VISION_SOURCES = [
-  { name: 'modelscope', base: `https://modelscope.cn/models/${VISION_WEB_MODEL}/resolve/master/` },
+  { name: 'github-release', base: VISION_RELEASE },
+  { name: 'huggingface-mirror', base: `https://hf-mirror.com/${VISION_WEB_MODEL}/resolve/main/` },
   { name: 'huggingface', base: `${ENDPOINT.replace(/\/$/, '')}/${VISION_WEB_MODEL}/resolve/main/` },
-];
+  { name: 'modelscope', base: `https://modelscope.cn/models/${VISION_WEB_MODEL}/resolve/master/` },
+].filter((source, index, all) => all.findIndex((item) => item.base === source.base) === index);
 let visionDownload = null;
 let chosenVisionSource = null;
 let visionSourceName = null;
+
+function visionTokenizerFiles(manifest) {
+  const files = manifest.tokenizer;
+  if (!Array.isArray(files) || files.length !== 2) throw new Error('manifest has no tokenizer files');
+  for (const name of files) {
+    if (typeof name !== 'string' || name.startsWith('/') || name.split('/').includes('..')) {
+      throw new Error('manifest contains an unsafe tokenizer path');
+    }
+  }
+  if (!files.some((name) => name.endsWith('tokenizer.json')) ||
+      !files.some((name) => name.endsWith('tokenizer_config.json'))) {
+    throw new Error('manifest has unexpected tokenizer files');
+  }
+  return files;
+}
+
+function sourceFailure(error) {
+  const message = String(error?.message || error);
+  if (/HTTP 401|HTTP 403/.test(message)) return 'requires authorization';
+  if (/HTTP 404/.test(message)) return 'has no published browser export';
+  if (error?.name === 'TimeoutError' || error?.name === 'AbortError') return 'timed out';
+  return message;
+}
 
 async function probeVisionSource(source) {
   const started = performance.now();
@@ -185,9 +265,11 @@ async function probeVisionSource(source) {
   const bytes = new Uint8Array(await response.arrayBuffer());
   const manifest = JSON.parse(new TextDecoder().decode(bytes));
   if (manifest.format_version !== 1 || manifest.source !== VISION_MODEL ||
-      !manifest.files?.['vision_fp16.onnx']) {
+      !VISION_ONNX_FILES.every((name) => manifest.files?.[name]?.bytes &&
+        manifest.files?.[name]?.sha256)) {
     throw new Error('not the expected vision export');
   }
+  visionTokenizerFiles(manifest);
   const latency = performance.now() - started;
   let sampled = 0, sampleBytesPerSecond = 0;
   const sampleStarted = performance.now();
@@ -212,10 +294,18 @@ async function probeVisionSource(source) {
 
 async function chooseVisionSource(log = console.log) {
   if (chosenVisionSource) return chosenVisionSource;
-  const results = await Promise.allSettled(VISION_SOURCES.map(probeVisionSource));
-  const available = results.filter((item) => item.status === 'fulfilled').map((item) => item.value);
+  const available = [];
+  const direct = VISION_SOURCES.find((source) => source.name === 'github-release');
+  if (direct) {
+    try { available.push(await probeVisionSource(direct)); }
+    catch { /* the hubs may still carry it */ }
+  }
+  const hubs = VISION_SOURCES.filter((source) => source !== direct);
+  const results = await Promise.allSettled(hubs.map(probeVisionSource));
+  available.push(...results.filter((item) => item.status === 'fulfilled').map((item) => item.value));
   if (!available.length) {
-    const detail = results.map((item, index) => `${VISION_SOURCES[index].name}: ${item.reason?.message || item.reason}`).join(' | ');
+    const detail = results.map((item, index) =>
+      `${hubs[index].name}: ${sourceFailure(item.reason)}`).join(' | ');
     throw new Error(`no Laya Vision source is reachable (${detail})`);
   }
   available.sort((a, b) => b.sampleBytesPerSecond - a.sampleBytesPerSecond || a.latency - b.latency);
@@ -266,10 +356,10 @@ async function ensureLocalVisionModel(log = console.log) {
     try {
       const manifest = JSON.parse(await readFile(join(VISION_MODEL_DIR, 'laya_web.json'), 'utf8'));
       const complete = manifest.format_version === 1 && manifest.source === VISION_MODEL &&
-        (await Promise.all(VISION_FILES.filter((name) => name.endsWith('.onnx')).map((name) =>
+        (await Promise.all(VISION_ONNX_FILES.map((name) =>
           verifiedFile(join(VISION_MODEL_DIR, name), manifest.files?.[name]?.bytes,
             manifest.files?.[name]?.sha256)))).every(Boolean) &&
-        (await Promise.all(VISION_FILES.filter((name) => name.startsWith('tokenizer/')).map((name) =>
+        (await Promise.all(visionTokenizerFiles(manifest).map((name) =>
           present(join(VISION_MODEL_DIR, name))))).every(Boolean);
       if (complete) {
         visionSourceName = 'local';
@@ -279,13 +369,13 @@ async function ensureLocalVisionModel(log = console.log) {
     const source = await chooseVisionSource(log);
     const manifest = source.manifest;
     await mkdir(VISION_MODEL_DIR, { recursive: true });
-    for (const name of VISION_FILES.filter((item) => item.endsWith('.onnx'))) {
+    for (const name of VISION_ONNX_FILES) {
       const expected = manifest.files?.[name];
       if (!expected?.bytes || !expected?.sha256) throw new Error(`${name} is missing from laya_web.json`);
       await downloadVerified(source.base + name, join(VISION_MODEL_DIR, name),
         expected.bytes, expected.sha256, log);
     }
-    for (const name of VISION_FILES.filter((item) => item.startsWith('tokenizer/'))) {
+    for (const name of visionTokenizerFiles(manifest)) {
       await downloadSmallFile(source.base + name, join(VISION_MODEL_DIR, name));
     }
     await writeFile(join(VISION_MODEL_DIR, 'laya_web.json'), source.manifestBytes);

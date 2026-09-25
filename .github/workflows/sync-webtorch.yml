@@ -24,6 +24,8 @@ jobs:
         with:
           ref: main
       - name: Update bundled SDK from GitHub
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
         run: node deploy/laya-service/sync-webtorch.mjs
       - name: Commit changed SDK files
         id: commit

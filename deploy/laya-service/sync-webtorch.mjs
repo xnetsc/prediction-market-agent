@@ -25,11 +25,15 @@ const REQUIRED = [
 
 function curl(url) {
   return new Promise((done, fail) => {
-    const child = spawn('curl', [
+    const args = [
       '--fail', '--location', '--silent', '--show-error', '--retry', '2',
       '--connect-timeout', '10', '--max-time', '90',
-      '--header', 'Accept: application/vnd.github+json', url,
-    ], { stdio: ['ignore', 'pipe', 'pipe'] });
+      '--header', 'Accept: application/vnd.github+json',
+    ];
+    const token = process.env.GITHUB_TOKEN || process.env.GH_TOKEN;
+    if (token) args.push('--header', `Authorization: Bearer ${token}`);
+    args.push(url);
+    const child = spawn('curl', args, { stdio: ['ignore', 'pipe', 'pipe'] });
     const chunks = [];
     const errors = [];
     child.stdout.on('data', (chunk) => chunks.push(chunk));
@@ -68,6 +72,19 @@ async function remoteIndex(download = curl) {
   return { commit, files };
 }
 
+async function remoteBlob(entry, download) {
+  const payload = JSON.parse((await download(
+    `https://api.github.com/repos/${REPOSITORY}/git/blobs/${entry.sha}`,
+  )).toString('utf8'));
+  if (payload.encoding !== 'base64' || payload.sha !== entry.sha ||
+      !Number.isSafeInteger(payload.size) || typeof payload.content !== 'string') {
+    throw new Error(`GitHub returned an invalid SDK blob: ${entry.path}`);
+  }
+  const bytes = Buffer.from(payload.content.replace(/\s/g, ''), 'base64');
+  if (bytes.length !== payload.size) throw new Error(`Upstream blob size mismatch: ${entry.path}`);
+  return bytes;
+}
+
 export async function syncWebtorch({ target = DEFAULT_TARGET, download = curl, log = console.log, keepPrevious = false } = {}) {
   target = resolve(target);
   const { commit, files } = await remoteIndex(download);
@@ -87,7 +104,9 @@ export async function syncWebtorch({ target = DEFAULT_TARGET, download = curl, l
       for (;;) {
         const entry = files[next++];
         if (!entry) break;
-        const bytes = await download(`https://raw.githubusercontent.com/${REPOSITORY}/${commit}/${entry.path}`);
+        // The Git data API is reachable on networks where raw.githubusercontent.com is blocked.
+        // Its base64 envelope is verified against both the declared byte count and Git's blob hash.
+        const bytes = await remoteBlob(entry, download);
         if (gitBlobHash(bytes) !== entry.sha) throw new Error(`Upstream blob hash mismatch: ${entry.path}`);
         const destination = join(stage, entry.path);
         if (!resolve(destination).startsWith(stage + sep)) throw new Error(`Unsafe SDK path: ${entry.path}`);

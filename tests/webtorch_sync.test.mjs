@@ -21,12 +21,16 @@ const hash = (bytes) => createHash('sha1').update(`blob ${bytes.length}\0`).upda
 function fixture(commit, corrupt = '') {
   const files = new Map(paths.map((path) => [path, Buffer.from(`${commit}:${path}`)]));
   const tree = paths.map((path) => ({ path, type: 'blob', sha: hash(files.get(path)) }));
+  const bySha = new Map(tree.map((entry) => [entry.sha, entry.path]));
   const download = async (url) => {
     if (url.endsWith('/commits/main')) return Buffer.from(JSON.stringify({ sha: commit }));
     if (url.includes('/git/trees/')) return Buffer.from(JSON.stringify({ tree, truncated: false }));
-    const path = url.split(`/${commit}/`)[1];
+    const sha = url.split('/git/blobs/')[1];
+    const path = bySha.get(sha);
     if (!files.has(path)) throw Error(`Unexpected download: ${url}`);
-    return path === corrupt ? Buffer.from('tampered') : files.get(path);
+    const bytes = path === corrupt ? Buffer.from('tampered') : files.get(path);
+    return Buffer.from(JSON.stringify({ sha, size: bytes.length, encoding: 'base64',
+      content: bytes.toString('base64') }));
   };
   return download;
 }

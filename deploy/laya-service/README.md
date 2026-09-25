@@ -20,10 +20,18 @@ bash start.sh
 第一次会装 Playwright、按需装一个无头 Chromium、把模型（约 800MB）下载到 `models/laya/`。
 之后每次启动都从本地读取模型权重，不再重复下载权重。
 
+文本模型和视觉模型的选源都由这个服务应用处理，不属于 SDK。若设置了完整下载地址，服务会先确认
+该地址可用，再与 Hugging Face、魔搭和 Hugging Face 国内镜像一起测速，最终使用最快的可用来源；
+Hub 都没有时仍可回退到完整地址。没有完整地址时，三个 Hub 都不可用就会明确失败。一次下载固定
+使用一个来源，不会把不同仓库版本的文件混在一起。文本模型的完整地址可通过
+`LAYA_MODEL_URL` 指向 `model.safetensors` 或其所在目录。
+
 文本请求始终使用这个原有模型。只有第一次收到图片状态时，服务才会额外获取 Laya Vision 的
-FP16 ONNX 导出（约 475MB）到 `models/laya-vision/` 并加载；没有图片请求就不下载、不占这部分显存。
-服务会同时探测魔搭与 Hugging Face 上是否存在同一份导出，并在可用来源中按小样本下载速度选择；
-当前若魔搭没有该仓库，会自动使用 Hugging Face，无需用户选择。完整本地副本在断网时也可继续使用。
+FP16 ONNX 导出（约 407MB）到 `models/laya-vision/` 并加载；没有图片请求就不下载、不占这部分显存。
+服务会同时探测固定版本的 GitHub Release、Hugging Face 中国镜像、Hugging Face 官方站和魔搭，
+只接受清单中尺寸与 SHA-256 完整的同一份导出，并在可用来源中按小样本下载速度自动选择；无需用户选择。
+镜像只能改善连通性，不能替代不存在或需要授权的仓库；错误信息会区分授权、缺少导出和超时。
+完整本地副本在断网时也可继续使用。
 
 服务启动及此后每 6 小时会检查 [GitHub 的 webpytorch 主分支](https://github.com/xnetsc/webpytorch)。
 只有版本变化或资源包缺文件时，才下载本服务使用的 `webtorch/`、浏览器运行文件 `dist/`、`LICENSE` 和 `NOTICE`，逐文件校验 Git blob 哈希后整包替换并重新载入模型；如果新版载入失败，则恢复上一版 SDK。网络检查失败也不会阻止已打包版本启动。`models/`、浏览器数据和机器人凭据不在更新范围内。
@@ -113,7 +121,7 @@ curl -s http://127.0.0.1:8899/v1/chat/completions -H 'content-type: application/
 | `--port` | `8899` | 监听端口 |
 | `--host` | `0.0.0.0` | 监听地址；如需仅本机访问，设为 `127.0.0.1` |
 | `--models` | `./models` | 模型落盘位置 |
-| `--endpoint` | `https://huggingface.co` | 首次下载模型的来源，可换镜像 |
+| `--endpoint` | `https://huggingface.co` | Hugging Face 候选端点；仍会与魔搭和国内镜像测速 |
 | `--headless false` | 无头 | 想看看浏览器里发生了什么时用 |
 
 需要 `curl` 访问 GitHub 检查 SDK；模型只在首次缺失时下载。代理：SDK 检查使用 curl 的代理环境变量；服务也会读 `HTTPS_PROXY` / `HTTP_PROXY`。
