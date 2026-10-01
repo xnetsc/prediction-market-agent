@@ -2200,7 +2200,7 @@ async def clear_cache(cache_dir=None, host=None):
 
 # ---- model-hub readers: ready-made read callbacks over the HTTP transport ----
 def hub_read(to_url, token=None, cache=True, cache_dir=None, max_parallel=16,
-             prefetch=True, chunk_mb=16, persist=True):
+             prefetch=True, chunk_mb=16, persist=True, digest=None):
     """An `io_read`-shaped callback for ANY host that serves files over HTTP.
 
     `hf_read` and `modelscope_read` are two lines each on top of this -- a lambda that builds
@@ -2227,12 +2227,19 @@ def hub_read(to_url, token=None, cache=True, cache_dir=None, max_parallel=16,
         webtorch.set_io_read(webtorch.hub_read([
             lambda r, p: "https://huggingface.co/%s/resolve/main/%s" % (r, p),
             lambda r, p: "https://modelscope.cn/models/%s/resolve/master/%s" % (r, p)]))
+
+    `digest` is how a mirror is checked properly: one `async digest(repo, path) -> str|None`
+    per builder, returning the hash THAT HOST publishes for the file. A hash the host
+    computed covers the whole file and costs one small request, so it is asked for first and
+    the byte sampling is only what happens when a host will not answer. `hf_digest` and
+    `modelscope_digest` are the two this package ships; `mirrored_read` wires them up.
     """
     return _hub_reader(to_url, token, cache, cache_dir, max_parallel, prefetch, chunk_mb,
-                       persist)
+                       persist, digest=digest)
 
 
-def _hub_reader(to_url, token, cache, cache_dir, max_parallel, prefetch, chunk_mb, persist):
+def _hub_reader(to_url, token, cache, cache_dir, max_parallel, prefetch, chunk_mb, persist,
+                digest=None):
     """The read callback behind `hub_read`, and so behind `hf_read` / `modelscope_read`.
 
     It asks the cache first, and when the cache says it does not have the bytes, it deals
@@ -2258,6 +2265,12 @@ def _hub_reader(to_url, token, cache, cache_dir, max_parallel, prefetch, chunk_m
     # different hosts would land under different keys and neither copy would ever be whole.
     import time
     builders = list(to_url) if isinstance(to_url, (list, tuple)) else [to_url]
+    # One per builder: `async digest(repo, path) -> str | None`, the hash the HOST publishes
+    # for that file. Supplied by whoever knows the hub's API, because `hub_read` knows no
+    # hub. None where a host has no such thing, or will not tell this context.
+    digests = list(digest) if isinstance(digest, (list, tuple)) else [digest] * len(builders)
+    digests += [None] * (len(builders) - len(digests))
+    _digest_of = {}         # url -> the builder index it came from, for asking the right one
     _alt = {}               # canonical url -> [url, ...] the same file is also served at
     mirrors = {}            # canonical url -> [url, ...] proven to be the same bytes
     rate = {}               # url -> bytes per second, last seen
@@ -2266,22 +2279,71 @@ def _hub_reader(to_url, token, cache, cache_dir, max_parallel, prefetch, chunk_m
     async def size(url):
         return await http_size(url, hdr)
 
+    _said = {}              # url -> hash or None, asked once
+    _mute = set()           # builder indexes that have shown they cannot answer here
+
+    async def _published(url):
+        """The hash the host publishes for this file, or None if it will not say.
+
+        Asked once per file, and once per HOST per session. A hub whose hash lives behind an
+        API that does not answer cross-origin will not start answering: the first failure
+        settles it, and without that this asked again for every one of a checkpoint's 170
+        tensors -- measured at 353 blocked requests and a load that stopped moving.
+        """
+        if url in _said:
+            return _said[url]
+        known_at = _digest_of.get(url)
+        if not known_at:
+            return None
+        i, repo, path = known_at
+        fn = digests[i] if i < len(digests) else None
+        if fn is None or i in _mute:
+            return None
+        try:
+            got = await fn(repo, path)
+        except Exception:
+            _mute.add(i)
+            _said[url] = None
+            return None
+        # No hash for THIS file is not a host that cannot answer: a small file is stored
+        # inline rather than as an LFS object and simply has none. Muting on that would give
+        # up checking the weights because a config was too small to have a hash.
+        out = str(got).strip().strip('"').lower() if got else None
+        _said[url] = out
+        return out
+
     async def _same_file(a, b, sa):
-        """Is `b` byte-for-byte the file `a` is? Asked before a mirror is ever MIXED IN.
+        """Is `b` the file `a` is? Asked before a mirror is ever MIXED IN.
 
         Mixing blocks from two hosts that disagree produces a model that is corrupt in a way
         nothing reports: every block arrives, the file is the right length, and the weights
-        are nonsense. So the mirror has to earn it -- same length, and one block from the
-        middle that matches. It is evidence rather than proof, and it is the evidence that
-        is affordable: the alternative is downloading both copies to compare them.
+        are nonsense. So a mirror has to earn it.
+
+        The host's own hash settles it when both hosts will give one -- it covers the whole
+        file and costs one small request, which is better in both directions than reading
+        bytes to compare. It is not always reachable: measured from a browser, one hub loses
+        the header to its CDN redirect and exposes nothing on the file route, its API answers
+        but CORS-blocked, while the other hub's API answers fine. So this asks, and falls
+        back when the answer is not available.
+
+        The fallback is evidence rather than proof, and says so: equal length, and three
+        blocks spread through the file. The alternative to evidence here is downloading both
+        copies in full to compare them, which is the thing the mirror existed to avoid.
         """
         try:
+            da, db = await _published(a), await _published(b)
+            if da and db:
+                return da == db                  # the hosts' own word, on the whole file
             if not sa or sa != await size(b):
                 return False
-            at = max(0, (sa // 2) - (sa // 2) % _SAMPLE)
-            ba = await http_get(a, at, _SAMPLE, hdr)
-            bb = await http_get(b, at, _SAMPLE, hdr)
-            return len(ba) == len(bb) and bytes(ba) == bytes(bb)
+            for frac in (0.1, 0.5, 0.9):
+                at = int(sa * frac)
+                at = max(0, min(at - at % _SAMPLE, max(0, sa - _SAMPLE)))
+                ba = await http_get(a, at, _SAMPLE, hdr)
+                bb = await http_get(b, at, _SAMPLE, hdr)
+                if len(ba) != len(bb) or bytes(ba) != bytes(bb):
+                    return False
+            return True
         except Exception:
             return False
 
@@ -2351,6 +2413,8 @@ def _hub_reader(to_url, token, cache, cache_dir, max_parallel, prefetch, chunk_m
             return name
         repo, path = _split_repo(name)
         urls = [b(repo, path) for b in builders]
+        for i, u in enumerate(urls):
+            _digest_of[u] = (i, repo, path)
         if len(urls) > 1:
             _alt.setdefault(urls[0], urls[1:])
         return urls[0]
@@ -2421,6 +2485,128 @@ def _hub_reader(to_url, token, cache, cache_dir, max_parallel, prefetch, chunk_m
     return read
 
 
+# Hub APIs that have already shown they cannot be reached from here. Per session, because
+# that is how long the answer stays true: a CORS policy does not change mid-page.
+_API_DEAD = {}
+
+
+async def _final_url(url, headers=None):
+    """Where a URL actually lands, after redirects. One byte is fetched to find out."""
+    try:
+        from pyodide.http import pyfetch                     # browser
+    except ImportError:
+        pyfetch = None
+    h = dict(headers or {}); h["Range"] = "bytes=0-0"
+    if pyfetch is not None:
+        r = await _pyfetch(url, headers=h)
+        # Read the one byte. An unread body is an open connection, and a few hundred of
+        # those is a browser that stops making requests at all.
+        try: await r.bytes()
+        except Exception: pass
+        return str(getattr(r, "url", "") or "")
+    import urllib.request
+    req = urllib.request.Request(url, headers=h)
+    with urllib.request.urlopen(req, timeout=30) as r:
+        return r.geturl()
+
+
+async def lfs_digest(url, token=None):
+    """The sha256 a host's own object URL names, or None.
+
+    Git-LFS stores an object under its hash, so a host that serves one from a CDN usually
+    says the hash in the path: `/lfs-objects/df/85/3bf7fe…95b72`, which is the oid split by
+    the usual two-and-two. That is the host's own statement about the file and it costs
+    nothing extra -- it comes back on the redirect of a request that was going to happen
+    anyway -- and it is readable from a browser, which the headers and APIs carrying the same
+    number frequently are not.
+
+    None whenever the path does not spell one out, which is not a failure: the caller falls
+    back to whatever else it knows.
+    """
+    import re
+    hdr = {"Authorization": "Bearer " + token} if token else None
+    try:
+        final = await _final_url(url, hdr)
+    except Exception:
+        return None
+    for part in reversed(final.split("?")[0].split("/")):
+        if not re.fullmatch(r"[0-9a-f]+", part or ""):
+            continue
+        # Walk back up the path joining hex segments, which is how the two-and-two split
+        # reads: .../df/85/3bf7…  ->  df85 3bf7…
+        pieces, segs = [], final.split("?")[0].split("/")
+        i = segs.index(part)
+        j = i
+        while j > 0 and re.fullmatch(r"[0-9a-f]+", segs[j - 1] or ""):
+            j -= 1
+        joined = "".join(segs[j:i + 1])
+        if len(joined) == 64:
+            return joined
+    return None
+
+
+async def hf_digest(repo, path, endpoint="https://huggingface.co", revision="main", token=None):
+    """The sha256 Hugging Face publishes for one file, or None.
+
+    From the LFS pointer, which this hub serves at `/raw/` as about 130 bytes of text and
+    which reads cross-origin. Not from the file's own headers: `X-Linked-ETag` carries the
+    number, but a browser following the redirect to the CDN never sees that header, and the
+    CDN's own `ETag` is a different hash entirely. The repo API carries it too and is the
+    fallback, being the larger request of the two.
+    """
+    import json, re
+    base = endpoint.rstrip("/")
+    hdr = {"Authorization": "Bearer " + token} if token else None
+    try:
+        ptr = bytes(await http_get("%s/%s/raw/%s/%s" % (base, repo, revision, path),
+                                   0, None, hdr)).decode("utf-8", "replace")
+        m = re.search(r"oid sha256:([0-9a-f]{64})", ptr)
+        if m:
+            return m.group(1)
+    except Exception:
+        pass
+    try:
+        body = await http_get("%s/api/models/%s?blobs=true" % (base, repo), 0, None, hdr)
+        for f in (json.loads(bytes(body).decode("utf-8")) or {}).get("siblings") or []:
+            if f.get("rfilename") == path:
+                lfs = f.get("lfs") or {}
+                return lfs.get("sha256") or lfs.get("oid")
+    except Exception:
+        pass
+    return None
+
+
+async def modelscope_digest(repo, path, endpoint="https://modelscope.cn", revision="master",
+                            token=None):
+    """The sha256 ModelScope publishes for one file, or None.
+
+    Two ways, because neither works everywhere. Its APIs carry the number and do not answer
+    cross-origin -- measured, both the file listing and the raw-pointer route fail from a
+    page -- so from a browser the answer comes from where the content redirect LANDS: this
+    hub serves LFS objects from a path that spells the oid out, and a final URL is readable
+    where a header is not.
+    """
+    import json
+    base = endpoint.rstrip("/")
+    hdr = {"Authorization": "Bearer " + token} if token else None
+    # Tried once. Where this API is reachable it answers for every file; where it is not --
+    # a browser, because it sends no CORS header -- it will not start, and asking again per
+    # file is a failed request and a console line each time for nothing.
+    try:
+        if _API_DEAD.get("modelscope"):
+            raise RuntimeError("asked before")
+        body = await http_get("%s/api/v1/models/%s/repo/files?Revision=%s" % (base, repo, revision),
+                              0, None, hdr)
+        data = json.loads(bytes(body).decode("utf-8")) or {}
+        for f in (data.get("Data") or {}).get("Files") or []:
+            if f.get("Path") == path:
+                if f.get("Sha256"):
+                    return f["Sha256"]
+    except Exception:
+        _API_DEAD["modelscope"] = True
+    return await lfs_digest("%s/models/%s/resolve/%s/%s" % (base, repo, revision, path), token)
+
+
 def mirrored_read(readers=None, **kw):
     """Read from several hubs at once, taking each block from whichever is answering.
 
@@ -2439,6 +2625,7 @@ def mirrored_read(readers=None, **kw):
             lambda repo, path: "https://huggingface.co/%s/resolve/main/%s" % (repo, path),
             lambda repo, path: "https://modelscope.cn/models/%s/resolve/master/%s" % (repo, path),
         ]
+        kw.setdefault("digest", [hf_digest, modelscope_digest])
     return hub_read(list(readers), **kw)
 
 
