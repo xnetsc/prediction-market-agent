@@ -23,9 +23,10 @@
 <script src="../dist/wgpy-main.js"></script>
 <script src="../webtorch/js/webtorch-main.js"></script>
 <script>
-// The one model this service exists for, as the SDK's own catalogue lists it: the whole repo,
-// no `file:` inside it, about 0.8 GB.
-const LAYA = 'convaiinnovations/laya-multilingual';
+// Which model this is, as the service told us. Not spelled here: the service reads it from
+// model.json and passes it in, so changing the checkpoint never touches this page.
+const PARAMS = new URLSearchParams(location.search);
+const LAYA = PARAMS.get('model') || '';
 
 const state = { ready: false, error: '', model: '', backend: '', surface: null, status: '', source: '' };
 const say = (text) => {
@@ -49,7 +50,8 @@ if (webtorch.onError) webtorch.onError((error) => {
     // is installed. `?local=` means this service already has the files on disk and serves them
     // from its own origin - no hub, no second download, the same bytes every boot. Without it we
     // fetch the repo once from Hugging Face so that the service can write that local copy.
-    const local = new URLSearchParams(location.search).get('local');
+    const local = PARAMS.get('local');
+    if (!local && !LAYA) throw new Error('neither ?model= nor ?local= was given');
     state.source = local || LAYA;
     await wt.run(local
       ? 'import webtorch\nwebtorch.use_default_io()'

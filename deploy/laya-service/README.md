@@ -17,7 +17,8 @@ Docker 容器能否使用 GPU，取决于宿主系统、显卡和容器运行配
 bash start.sh
 ```
 
-第一次会装 Playwright、按需装一个无头 Chromium、把模型（约 615MB 权重）下载到 `models/laya/`。
+第一次会装 Playwright、按需装一个无头 Chromium、把模型（约 644MB 权重）下载到 `model.json` 指定的目录
+（当前是 `models/xdecision/`）。
 之后每次启动都从本地读取模型权重，不再重复下载权重。
 
 模型选源由这个服务应用处理，不属于 SDK。若设置了完整下载地址，服务会先确认该地址可用，再与
@@ -26,11 +27,34 @@ Hugging Face、魔搭和 Hugging Face 国内镜像一起测速，最终使用最
 不会把不同仓库版本的文件混在一起。文本模型的完整地址可通过
 `LAYA_MODEL_URL` 指向 `model.safetensors` 或其所在目录。
 
+三个 Hub 是按模型 id 统一拼出来的，不是按模型挑的，所以某个 Hub 没有这个仓库时它只是探测失败被丢掉。
+当前的 `mccoysc/xDecision` 就不在魔搭上，日志里会看到它 `not found`——这是正常降级，不是故障，
+Hugging Face 和国内镜像都可用且支持 Range。
+
 服务启动及此后每 6 小时会检查 [GitHub 的 webpytorch 主分支](https://github.com/xnetsc/webpytorch)。
 只有版本变化或资源包缺文件时，才下载本服务使用的 `webtorch/`、浏览器运行文件 `dist/`、`LICENSE` 和 `NOTICE`，逐文件校验 Git blob 哈希后整包替换并重新载入模型；如果新版载入失败，则恢复上一版 SDK。网络检查失败也不会阻止已打包版本启动。`models/`、浏览器数据和机器人凭据不在更新范围内。
 仓库另有每日定时的同步工作流；它把相同的依赖更新提交到仓库，再触发容器镜像重建。运行中的服务与新镜像分别按 GitHub 版本检查，不依赖本地源码目录。
 
-模型按仓库自己的布局存在 `models/laya/`：
+## 换模型只改一个文件
+
+服务服务的是哪个 checkpoint，全写在 `model.json` 里：
+
+```json
+{
+  "protocol": 1,
+  "model": "mccoysc/xDecision",
+  "directory": "xdecision",
+  "repoPath": "models/checkpoint/",
+  "files": ["model.safetensors", "rl_agent_config.json", "encoder/config.json",
+            "tokenizer/tokenizer.json", "tokenizer/tokenizer_config.json"]
+}
+```
+
+`repoPath` 是 checkpoint 在那个仓库里的位置，放在仓库根目录时写 `""`；`directory` 既是本地目录名，
+也是页面读取它的挂载路径。模型 id、目录名、挂载路径、页面、下载清单以前是五处各写一遍、必须彼此一致，
+而不一致时没有任何地方会报警——现在只有这一处。
+
+模型按仓库自己的布局存在该目录下：
 
 ```
 model.safetensors
@@ -46,7 +70,7 @@ tokenizer/tokenizer.json
 看到这行就是好了：
 
 ```
-laya ready: convaiinnovations/laya-multilingual on webgpu
+laya ready: mccoysc/xDecision on webgpu
 ```
 
 `on webgpu` 很重要。如果是 `on cpu`，说明没拿到 GPU（页面不是安全上下文、或者浏览器没装上），
@@ -81,7 +105,7 @@ API 是 OpenRouter 的 chat-completions 形状，所以任何能调 OpenRouter �
 
 ```bash
 curl -s http://127.0.0.1:8899/v1/chat/completions -H 'content-type: application/json' -d '{
-  "model": "convaiinnovations/laya-multilingual",
+  "model": "mccoysc/xDecision",
   "messages": [{"role": "user", "content": "{\"state\":{\"ticket\":\"重复扣款\"},\"questions\":{\"route\":{\"type\":\"choice\",\"instructions\":\"谁来处理\",\"criteria\":{\"billing\":\"账务\",\"tech\":\"技术\"}}}}"}]
 }'
 ```

@@ -16,7 +16,7 @@
  */
 import { createServer } from 'node:http';
 import { mkdir, readFile, rename, rm, stat } from 'node:fs/promises';
-import { createReadStream, createWriteStream, existsSync } from 'node:fs';
+import {createReadStream, createWriteStream, existsSync, readFileSync} from 'node:fs';
 import { once } from 'node:events';
 import { dirname, extname, join, resolve, sep } from 'node:path';
 import { spawn } from 'node:child_process';
@@ -57,11 +57,24 @@ const PORT = Number(option('port', process.env.PORT || 8899));
 const HOST = option('host', process.env.LAYA_HOST || '0.0.0.0');
 const HEADLESS = option('headless', 'true') !== 'false';
 
-/* The one model this service exists for. Not a parameter: the SDK's demo page can load anything,
- * and this is a service for laya. */
-const MODEL = 'convaiinnovations/laya-multilingual';
+/* Which checkpoint this service serves, from model.json beside this file.
+ *
+ * Not a constant here. The model used to be spelled in five places that had to agree -- an id
+ * in this file, a directory name, a mount path, the page, the README -- and nothing noticed
+ * when they stopped agreeing. One file states it; everything below is derived. */
+const MODEL_SPEC = JSON.parse(readFileSync(join(HERE_DIR(), 'model.json'), 'utf8'));
+if (MODEL_SPEC?.protocol !== 1 || typeof MODEL_SPEC.model !== 'string'
+    || typeof MODEL_SPEC.directory !== 'string' || !Array.isArray(MODEL_SPEC.files)
+    || !MODEL_SPEC.files.length) {
+  throw new Error('model.json: needs protocol 1, a model id, a directory and a file list');
+}
+const MODEL = MODEL_SPEC.model;
+const MODEL_PATH = String(MODEL_SPEC.repoPath || '').replace(/^\/+|\/?$/g, '');
+const MODEL_FILES = [...MODEL_SPEC.files];
 const MODELS_DIR = resolve(option('models', process.env.LAYA_MODELS || join(HERE_DIR(), 'models')));
-const MODEL_DIR = join(MODELS_DIR, 'laya');
+const MODEL_DIR = join(MODELS_DIR, MODEL_SPEC.directory);
+/** Where the page reads the local copy from, e.g. `/models/xdecision/`. */
+const MODEL_MOUNT = `/models/${MODEL_SPEC.directory}/`;
 const ENDPOINT = option('endpoint', process.env.HF_ENDPOINT || 'https://huggingface.co');
 const MODEL_URL = process.env.LAYA_MODEL_URL || '';
 
@@ -97,11 +110,6 @@ const HERE = HERE_DIR();
 /* ------------------------------------------------------ the copy on this disk */
 
 /** Files of the repo that a load actually reads; the rest of it is pictures and eval notes. */
-const MODEL_FILES = [
-  'model.safetensors', 'rl_agent_config.json', 'encoder/config.json',
-  'tokenizer/tokenizer.json', 'tokenizer/tokenizer_config.json',
-];
-
 async function present(path) {
   try { return (await stat(path)).size > 0; } catch { return false; }
 }
@@ -116,11 +124,18 @@ function completeUrlSource(url, probe) {
   return { name: 'listed-url', base };
 }
 
+const IN_REPO = MODEL_PATH ? MODEL_PATH + '/' : '';
+/* ModelScope answers on two origins and they are NOT copies of each other. Measured, three reads
+ * each: `mccoysc/xDecision` is 200 on .ai and 404 on .cn, `convaiinnovations/laya-multilingual` is
+ * 200 on .cn and 404 on .ai, `Qwen/Qwen2-0.5B-Instruct` is on both. Both are listed, and the probe
+ * below already does the right thing with that -- an origin without the file drops out, and when
+ * both have it the faster one wins on a measurement rather than on which was written first. */
 const MODEL_SOURCES = [
-  completeUrlSource(MODEL_URL, 'model.safetensors'),
-  { name: 'huggingface', base: `${ENDPOINT.replace(/\/$/, '')}/${MODEL}/resolve/main/` },
-  { name: 'modelscope', base: `https://modelscope.cn/models/${MODEL}/resolve/master/` },
-  { name: 'huggingface-mirror', base: `https://hf-mirror.com/${MODEL}/resolve/main/` },
+  completeUrlSource(MODEL_URL, MODEL_FILES[0]),
+  { name: 'huggingface', base: `${ENDPOINT.replace(/\/$/, '')}/${MODEL}/resolve/main/${IN_REPO}` },
+  { name: 'modelscope-cn', base: `https://modelscope.cn/models/${MODEL}/resolve/master/${IN_REPO}` },
+  { name: 'modelscope-ai', base: `https://modelscope.ai/models/${MODEL}/resolve/master/${IN_REPO}` },
+  { name: 'huggingface-mirror', base: `https://hf-mirror.com/${MODEL}/resolve/main/${IN_REPO}` },
 ].filter(Boolean).filter((source, index, all) =>
   all.findIndex((item) => item.base === source.base) === index);
 let chosenModelSource = null;
@@ -167,10 +182,10 @@ async function chooseModelSource(log = console.log) {
   if (!available.length) {
     const detail = results.map((item, index) =>
       `${hubs[index].name}: ${sourceFailure(item.reason)}`).join(' | ');
-    throw new Error(`no Laya model source is reachable (${detail})`);
+    throw new Error(`no source for ${MODEL} is reachable (${detail})`);
   }
   chosenModelSource = available[0];
-  log(`Laya source: ${chosenModelSource.name} (${(chosenModelSource.sampleBytesPerSecond / 1048576).toFixed(1)} MB/s sample)`);
+  log(`${MODEL} source: ${chosenModelSource.name} (${(chosenModelSource.sampleBytesPerSecond / 1048576).toFixed(1)} MB/s sample)`);
   return chosenModelSource;
 }
 
@@ -181,7 +196,7 @@ async function chooseModelSource(log = console.log) {
  * profile is cleared, and moving this service to another machine means downloading again. On disk
  * it is a directory you can copy, mount, or ship in an image. */
 async function ensureLocalModel(log = console.log) {
-  const marker = join(MODEL_DIR, 'model.safetensors');
+  const marker = join(MODEL_DIR, MODEL_FILES[0]);
   if (await present(marker)) return true;
   log(`fetching ${MODEL} to ${MODEL_DIR} (once)`);
   const source = await chooseModelSource(log);
@@ -221,7 +236,7 @@ async function serveStatic(request, response, url) {
   const mount = url.pathname.startsWith('/laya/')
     ? [HERE, url.pathname.slice('/laya/'.length)]
     : url.pathname.startsWith('/models/')
-      ? [MODEL_DIR, url.pathname.slice('/models/laya/'.length)]
+      ? [MODEL_DIR, url.pathname.slice(MODEL_MOUNT.length)]
       : [WEBTORCH, url.pathname === '/' ? 'index.html' : url.pathname.slice(1)];
   const [root, relative] = mount;
   const path = join(root, relative);
@@ -370,7 +385,8 @@ async function browser() {
     const instance = await ensureBrowser();
     page = await instance.newPage();
     page.on('console', (message) => console.log('[page]', message.text()));
-    await page.goto(`http://127.0.0.1:${PORT}/laya/page.html?local=${encodeURIComponent('/models/laya/')}`);
+    await page.goto(`http://127.0.0.1:${PORT}/laya/page.html`
+      + `?local=${encodeURIComponent(MODEL_MOUNT)}&model=${encodeURIComponent(MODEL)}`);
     await page.waitForFunction(
       () => window.__laya && (window.__laya.status().ready || window.__laya.status().error),
       null,
@@ -518,7 +534,7 @@ const server = createServer(async (request, response) => {
       response.writeHead(200, { 'Content-Type': 'application/json' }).end(JSON.stringify({
         data: [{
           id: MODEL, name: MODEL, object: 'model',
-          description: 'Typed text decisions on local WebGPU using convaiinnovations/laya-multilingual.',
+          description: `Typed text decisions on local WebGPU using ${MODEL}.`,
           supported_parameters: ['response_format', 'structured_outputs'],
           input_modalities: ['text'],
           pricing: { prompt: '0', completion: '0' },

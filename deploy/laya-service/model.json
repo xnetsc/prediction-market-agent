@@ -1,0 +1,23 @@
+{
+  "_comment": [
+    "Which checkpoint this service serves. Here rather than in server.mjs because changing",
+    "the model used to mean editing a constant, a directory name, a mount path, a page and a",
+    "README -- five places that have to agree, and nothing to notice when they stop.",
+    "",
+    "model      the hub repository id",
+    "repoPath   where the checkpoint sits INSIDE that repository, \"\" when it is at the root",
+    "directory  the local directory under models/, and the path it is served at",
+    "files      what to fetch, relative to repoPath; the first one is also the completeness marker"
+  ],
+  "protocol": 1,
+  "model": "mccoysc/xDecision",
+  "directory": "xdecision",
+  "repoPath": "models/checkpoint/",
+  "files": [
+    "model.safetensors",
+    "rl_agent_config.json",
+    "encoder/config.json",
+    "tokenizer/tokenizer.json",
+    "tokenizer/tokenizer_config.json"
+  ]
+}
