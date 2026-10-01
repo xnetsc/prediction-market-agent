@@ -2413,6 +2413,93 @@ def _hub_reader(to_url, token, cache, cache_dir, max_parallel, prefetch, chunk_m
     if prefetch and cache:
         get = prefetch_whole_file(get, size=size, cache_dir=cdir, chunk_mb=chunk_mb)
 
+    _settled = {}           # canonical url -> the key this file is actually cached under
+
+    async def _same_copy(a, b):
+        """Are two CACHED entries the same file? Asked before one of them is deleted.
+
+        The hosts' own hashes settle it when both will give one. They do not always: this
+        hub serves one checkpoint straight from its own domain with no object URL to read a
+        hash out of, and its API does not answer cross-origin, so from a page there is no
+        hash to be had for it at all -- and the duplicate sat there because of it.
+
+        Both copies are already on this machine, so they can simply be compared. Nothing is
+        downloaded; this reads what is already stored, in windows, and stops at the first
+        difference. Slower than comparing two hashes and it is proof rather than evidence,
+        which is the right trade when the alternative is deleting 678 MB on a guess.
+        """
+        da, db = await _published(a), await _published(b)
+        if da and db:
+            return da == db
+        try:
+            sa, sb = await _cached_extent(a), await _cached_extent(b)
+        except Exception:
+            return False
+        if not sa or sa != sb:
+            return False
+        WIN = 8 << 20
+        off = 0
+        while off < sa:
+            n = min(WIN, sa - off)
+            x = await read_cache(a, off, n, cdir)
+            y = await read_cache(b, off, n, cdir)
+            if x is None or y is None or len(x) != n or len(y) != n or bytes(x) != bytes(y):
+                return False
+            off += n
+        return True
+
+    async def _cached_extent(key):
+        """How much of this entry is actually held, or None if it is not complete."""
+        for e in await list_cache(cdir):
+            if e["key"] == key or key.split("://", 1)[-1] == e["key"]:
+                return e["total"] if e["complete"] else None
+        return None
+
+    async def _cache_key(url):
+        """The one key this file is held under, whichever host it came from.
+
+        A cache keyed by URL treats the same bytes on two hubs as two files. That is not
+        hypothetical: switching this reader from one hub to the other put a second 678 MB
+        copy of the same checkpoint on disk, both complete, both identical -- the hashes had
+        already been checked equal, which is how blocks from either host were allowed to mix
+        in the first place.
+
+        So before fetching, the other hosts' urls are asked whether they are already holding
+        it, and the first that is becomes the key for reads AND writes. Nothing is
+        re-downloaded because a race picked a different winner this time, and nothing is
+        stored twice.
+        """
+        if cdir is None or url in _settled:
+            return _settled.get(url, url)
+        cands = [url] + list(_alt.get(url, []))
+        if len(cands) == 1:
+            _settled[url] = url
+            return url
+        held = []
+        for c in cands:
+            try:
+                if await read_cache(c, 0, 1, cdir):
+                    held.append(c)
+            except Exception:
+                continue
+        if not held:
+            _settled[url] = url
+            return url
+        keep = held[0]
+        # More than one copy. They are only the same file if the hosts say so -- `_alt` is a
+        # list of places this file is EXPECTED to be, not proof that it is, and deleting
+        # 678 MB on an expectation is not a thing to get wrong. Where both hosts publish a
+        # hash and the hashes agree, the extra copy goes now rather than waiting for someone
+        # to run a cleanup they do not know exists.
+        for other in held[1:]:
+            if await _same_copy(keep, other):
+                try:
+                    await delete_cache(other, cdir)
+                except Exception:
+                    pass
+        _settled[url] = keep
+        return keep
+
     def to_key(name):
         """The one url this file is cached under, remembering where else it lives.
 
@@ -2426,8 +2513,11 @@ def _hub_reader(to_url, token, cache, cache_dir, max_parallel, prefetch, chunk_m
         urls = [b(repo, path) for b in builders]
         for i, u in enumerate(urls):
             _digest_of[u] = (i, repo, path)
-        if len(urls) > 1:
-            _alt.setdefault(urls[0], urls[1:])
+            if len(urls) > 1:
+                # Each candidate lists the others, so the key may be ANY of them -- which is
+                # what lets a file already cached under one host go on being read from there
+                # while the rest stay available to fetch from.
+                _alt.setdefault(u, [v for v in urls if v != u])
         return urls[0]
 
     async def read(name, offset=0, length=None):
@@ -2450,7 +2540,7 @@ def _hub_reader(to_url, token, cache, cache_dir, max_parallel, prefetch, chunk_m
             data = await http_get(name, offset, length)
             _report(name, len(data), None)
             return data
-        url = to_key(name)
+        url = await _cache_key(to_key(name))
         if cdir is None:                               # caching off: straight to HTTP
             data = await get(url, offset, length)
             _report(url, len(data), None)
