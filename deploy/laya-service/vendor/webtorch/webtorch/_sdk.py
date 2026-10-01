@@ -71,7 +71,7 @@ class AutoModelForCausalLM:
     """
     @staticmethod
     async def from_pretrained(path, dtype="auto", bits=None, lmax=None, weights="native",
-                              **kw):
+                              container=None, **kw):
         """`kw` takes the same generation options as `load()`/`pipeline()` — temperature,
         top_p, top_k, min_p, do_sample, seed, repetition_penalty, presence_penalty,
         frequency_penalty, max_new_tokens, min_new_tokens, max_length, stop, constraint,
@@ -95,7 +95,8 @@ class AutoModelForCausalLM:
         _IMPL_LOADING[key] = fut
         try:
             impl = await AutoModelForCausalLM._load_raw(
-                p, dtype, bits, lmax, weights, kw.get("expert_weights_norm"))
+                p, dtype, bits, lmax, weights, kw.get("expert_weights_norm"),
+                container=container)
         except BaseException as exc:
             _IMPL_LOADING.pop(key, None)
             if not fut.done(): fut.set_exception(exc)
@@ -106,9 +107,10 @@ class AutoModelForCausalLM:
         return _apply_gen_defaults(impl, kw)
 
     @staticmethod
-    async def _load_raw(p, dtype, bits, lmax, weights, expert_weights_norm=None):
+    async def _load_raw(p, dtype, bits, lmax, weights, expert_weights_norm=None,
+                        container=None):
         from . import llm as _llm, webio
-        if p.endswith(".gguf"):
+        if (webio.container_of(p) if container is None else container) == "gguf":
             # "auto" means the same here as for an AutoGPTQ dir: keep the stored
             # precision (bits=None lets the loader read it off the file).
             gb = 8 if dtype == "int8" else (4 if dtype == "int4" else bits)
@@ -307,7 +309,7 @@ def release_all():
     for e in list(_IMPL_CACHE.values()):
         impl = e["impl"]
         if not impl.__dict__.get("_released"):
-            _drop_heavy(impl); n += 1
+            _free(impl); n += 1
     _IMPL_CACHE.clear()
     return n
 
@@ -338,9 +340,14 @@ async def load(source=None, task=None, dtype="auto", encoder=None, reuse=True, *
     `presence_penalty`, `frequency_penalty`, `max_new_tokens`, `min_new_tokens`, `max_length`,
     `stop`, `constraint`, `enable_thinking`. A `generate(...)`/`stream(...)` call still wins.
 
-    Detection is by content, not by model name: `.onnx`/`.gguf` by extension, otherwise the
-    served `config.json` decides (a decoder config -> the generic CausalLM/MoE/hybrid engine).
-    Every specialised API remains available and unchanged.
+    The CONTAINER may be read off the name -- `.gguf`/`.onnx`/`.safetensors` say how the
+    bytes are packed, which is all an extension is a convention for, and `container_of` is
+    the one place that reads it. WHICH MODEL is inside never is: the tensors the checkpoint
+    carries and the served `config.json` decide that (an encoder and a scorer -> a decision
+    model; a decoder config -> the generic CausalLM/MoE/hybrid engine), so a model nobody has
+    published yet is recognised on the first try and one with a familiar name is not. There
+    is one loader per model kind and none per container. Every specialised API remains
+    available and unchanged.
 
     **Loading the same model twice does not reload it.** Results are cached by request, so a
     second `load()` of the same source returns the SAME object instead of re-downloading and
@@ -381,7 +388,12 @@ async def _load_uncached(source, task, dtype, encoder, kw):
         return Model(await pipeline(task, kw.pop("model", "auto"), **kw), task)
 
     src = str(source).rstrip("/")
-    if src.endswith(".onnx"):
+    # Asked once, here, and handed to whoever needs it. A container is a file naming
+    # convention and reading it off the name is fine; what must never be read off a name is
+    # which MODEL is inside, and nothing below does -- every branch past this one is decided
+    # by what the checkpoint turns out to contain.
+    container = webio.container_of(src)
+    if container == "onnx":
         return Model(await OnnxModel.from_source(src), "onnx")
     if task is not None:                                   # explicit task -> registry
         return Model(await pipeline(task, kw.pop("model", "auto"), path=src, **kw), task)
@@ -389,9 +401,8 @@ async def _load_uncached(source, task, dtype, encoder, kw):
     # the standard field and is not specific to any family -- and without this a VLM loaded
     # by path silently became its text half: it answered, so nothing looked wrong, but no
     # image could ever reach it.
-    if encoder is None and not src.endswith(".gguf"):
+    if encoder is None and not container:                  # a directory has a config beside it
         try:
-            from . import webio
             _cfg = await webio.read_json(src + "/config.json")
         except Exception:
             _cfg = None
@@ -405,12 +416,12 @@ async def _load_uncached(source, task, dtype, encoder, kw):
     # and a scorer -- and that costs one ranged read of the file's index; guessing from the
     # directory's name would get a model nobody has published yet wrong.
     from . import decision as _decision
-    dm = (await _decision.load_decision_gguf(src, **kw) if src.endswith(".gguf")
-          else await _decision.load_decision(src, **kw))
+    dm = await _decision.load_decision(src, container=container, **kw)
     if dm is not None:
         return Model(dm, "decision")
     lm = await AutoModelForCausalLM.from_pretrained(
-        src, dtype=dtype, **{k: kw[k] for k in _LLM_OPTS if k in kw and k != "dtype"})
+        src, dtype=dtype, container=container,
+        **{k: kw[k] for k in _LLM_OPTS if k in kw and k != "dtype"})
     lm = _apply_gen_defaults(lm, kw)
     if encoder is not None:                                # decoder + media encoder
         enc = await multimodal.load_encoder(encoder, **kw.get("encoder_kwargs", {}))
@@ -658,10 +669,26 @@ _HEAVY = ("layers", "embed", "head", "final_norm", "mtp", "Kc", "Vc", "h_in", "c
           "_shard_hdr", "conv_state", "rec_state", "_state", "impl", "_impl", "lm", "encoder")
 
 
-# Recursion guard for the GPU-memory cleanup: `_drop_heavy` reaches the GPU release only
-# from its OUTERMOST call that actually dropped something — nested calls (wrappers freeing
-# what they wrap) would fire it while buffers are still being dropped into the pools.
+# Recursion guard for the GPU-memory cleanup: the device only hears about it from the
+# OUTERMOST release — nested calls (wrappers freeing what they wrap) would fire it while
+# buffers are still being dropped into the pools.
 _drop_depth = 0
+
+
+def _gpu_give_back():
+    """Hand the pools, and the pins the captured graphs hold, back to the device.
+
+    Asked once a release has fully unwound, and asked whether or not `_HEAVY` recognised
+    anything. Those are different questions, and treating them as one is how a decision model
+    came to free NOTHING: its weights hang off `enc`, which is not a name in that list, so the
+    drop reported nothing freed and this was skipped -- measured, 459 MB and 903 buffers still
+    held after `release()` returned, and gone the moment this ran by hand. A model's shape is
+    not something the memory it is sitting on depends on.
+    """
+    if _drop_depth:
+        return
+    from . import _core
+    _core._gpu_release_memory()
 
 
 def _drop_heavy(obj, _seen=None):
@@ -688,12 +715,9 @@ def _drop_heavy(obj, _seen=None):
         _drop_depth -= 1
     if freed:
         obj.__dict__["_released"] = True     # so using it afterwards gives a clear error
-        if _drop_depth == 0:
-            # All finalizers the drop set off have run (CPython refcounting runs them
-            # synchronously), so the pools now hold what the model was sitting on. Give
-            # it back to the device — otherwise the next model allocates on top of it.
-            from . import _core
-            _core._gpu_release_memory()
+    # All finalizers the drop set off have run (CPython refcounting runs them synchronously),
+    # so the pools now hold what the model was sitting on.
+    _gpu_give_back()
     return freed
 
 
@@ -702,8 +726,10 @@ def _free(obj, _seen=None):
     one (a shared model's hook does the refcounting — see `_impl_release`)."""
     if obj is None:
         return False
+    global _drop_depth
     own = getattr(obj, "release", None)          # respect a model's own release hook
     if callable(own) and getattr(own, "__self__", None) is obj and not getattr(obj, "_releasing", False):
+        _drop_depth += 1
         try:
             obj._releasing = True
             own(); return True
@@ -711,6 +737,8 @@ def _free(obj, _seen=None):
             return False
         finally:
             obj._releasing = False
+            _drop_depth -= 1
+            _gpu_give_back()                     # this path drops weights too
     return _drop_heavy(obj, _seen)
 
 
@@ -731,7 +759,7 @@ def _impl_release(impl):
                 return False                     # another handle still holds it
             _IMPL_CACHE.pop(key, None)
             break
-    return _drop_heavy(impl)                     # last handle: actually drop the weights
+    return _free(impl)                           # last handle: actually drop the weights
 
 
 def release(model):
