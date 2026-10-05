@@ -897,33 +897,27 @@ def half_weight(src):
 _mmk4 = {"added": set()}
 
 
-def _webgl_matmul_k4(x, w):
-    """`x @ w` for a `WebGLHalfMatrix` w: pack x's rows four K-values to a texel, then dot."""
+def _webgl_pack_x4(xd, K):
+    """Rows of `xd` (M, K) packed four K-values to an RGBA32F texel, R rows side by side per
+    texture row: texel (r*K4 + k4, i/R) holds row i = i/R*R + r, k = 4k4..4k4+3.
+
+    A row per texture row would cap a call at 16,384 sequence rows, past which the only copy
+    of a weight -- already dropped from the host -- could not be read any other way.
+    Returns (packed buffer, R, M)."""
     from wgpy_backends.webgl.texture import (WebGL2RenderingContext as GL,
                                              WebGLArrayTextureShape, get_max_texture_size)
     from wgpy_backends.webgl.webgl_buffer import WebGLBuffer
     plat = _copy_kernel["plat"]
-    xd = _contig(x.data if isinstance(x, Tensor) else x)
-    K, N = w.K, w.N
-    if int(xd.shape[-1]) != K:
-        raise ValueError("matmul_f16w: x has %d columns, the weight %d rows"
-                         % (int(xd.shape[-1]), K))
     M = 1
     for d in xd.shape[:-1]:
         M *= int(d)
     K4 = K // 4
-    # The packed rows are laid side by side, R to a texture row: texel (r*K4 + k4, i/R) of
-    # row i = i/R*R + r. A row per texture row would cap a call at 16,384 sequence rows,
-    # past which the only copy of the weight -- already dropped from the host -- could not
-    # be read any other way.
     mts = get_max_texture_size()
     R = max(1, mts // K4)
     if (M + R - 1) // R > mts:
-        raise ValueError("matmul_f16w: %d rows of %d exceed one WebGL texture" % (M, K))
-    head = ("#version 300 es\nprecision highp float; precision highp int; "
-            "precision highp sampler2D;\n")
+        raise ValueError("%d rows of %d exceed one WebGL texture" % (M, K))
     if "pk_x" not in _mmk4["added"]:
-        plat.addKernel("mmk4_pack_x", {"source": head + """uniform sampler2D tex_x;
+        plat.addKernel("mmk4_pack_x", {"source": _K4_GL_HEAD + """uniform sampler2D tex_x;
 uniform int K; uniform int K4; uniform int R; uniform int M;
 out vec4 fragColor;
 float fx(int idx) { int tw = textureSize(tex_x, 0).x; int y = idx / tw;
@@ -936,11 +930,40 @@ void main() {
   fragColor = vec4(fx(b), fx(b + 1), fx(b + 2), fx(b + 3)); }
 """})
         _mmk4["added"].add("pk_x")
+    per_row = min(R, M)
+    rows = (M + per_row - 1) // per_row
+    xshape = WebGLArrayTextureShape(height=rows, width=per_row * K4,
+                                    internal_format=GL.RGBA32F, format=GL.RGBA, type=GL.FLOAT)
+    xp_buf = WebGLBuffer(rows * per_row * K, np.dtype(np.float32), xshape)
+    plat.runKernel({"name": "mmk4_pack_x",
+                    "inputs": [{"name": "tex_x", "id": xd.buffer.buffer_id}],
+                    "output": xp_buf.buffer_id,
+                    "uniforms": [{"name": "K", "value": K, "type": "int"},
+                                 {"name": "K4", "value": K4, "type": "int"},
+                                 {"name": "R", "value": per_row, "type": "int"},
+                                 {"name": "M", "value": M, "type": "int"}]})
+    return xp_buf, per_row, M
+
+
+_K4_GL_HEAD = ("#version 300 es\nprecision highp float; precision highp int; "
+            "precision highp sampler2D; precision highp usampler2D;\n")
+
+
+def _webgl_matmul_k4(x, w):
+    """`x @ w` for a `WebGLHalfMatrix` w: pack x's rows four K-values to a texel, then dot."""
+    plat = _copy_kernel["plat"]
+    xd = _contig(x.data if isinstance(x, Tensor) else x)
+    K, N = w.K, w.N
+    if int(xd.shape[-1]) != K:
+        raise ValueError("matmul_f16w: x has %d columns, the weight %d rows"
+                         % (int(xd.shape[-1]), K))
+    K4 = K // 4
+    xp_buf, per_row, M = _webgl_pack_x4(xd, K)
     name = "mmk4_%d" % K
     if name not in _mmk4["added"]:
         # K is the loop bound, so it is compiled in; M and N are uniforms, so a new sequence
         # length does not compile a new program.
-        plat.addKernel(name, {"source": head + """#define K4 %d
+        plat.addKernel(name, {"source": _K4_GL_HEAD + """#define K4 %d
 uniform int _ka_tex_output_texture_w; uniform int M; uniform int N; uniform int R;
 uniform sampler2D tex_xp; uniform sampler2D tex_wp;
 out float fragColor;
@@ -964,18 +987,6 @@ void main() {
 }
 """ % K4})
         _mmk4["added"].add(name)
-    per_row = min(R, M)
-    rows = (M + per_row - 1) // per_row
-    xshape = WebGLArrayTextureShape(height=rows, width=per_row * K4,
-                                    internal_format=GL.RGBA32F, format=GL.RGBA, type=GL.FLOAT)
-    xp_buf = WebGLBuffer(rows * per_row * K, np.dtype(np.float32), xshape)
-    plat.runKernel({"name": "mmk4_pack_x",
-                    "inputs": [{"name": "tex_x", "id": xd.buffer.buffer_id}],
-                    "output": xp_buf.buffer_id,
-                    "uniforms": [{"name": "K", "value": K, "type": "int"},
-                                 {"name": "K4", "value": K4, "type": "int"},
-                                 {"name": "R", "value": per_row, "type": "int"},
-                                 {"name": "M", "value": M, "type": "int"}]})
     out = _empty((M, N))
     plat.runKernel({"name": name,
                     "inputs": [{"name": "tex_xp", "id": xp_buf.buffer_id},
@@ -988,6 +999,133 @@ void main() {
                                  {"name": "R", "value": per_row, "type": "int"}]})
     lead = tuple(int(d) for d in xd.shape[:-1])
     return Tensor(out.reshape(*(lead + (N,))))
+
+
+class WebGLQ8Matrix(object):
+    """A Q8_0 weight (N_out, K_in) for WebGL, its blocks' two parts in two textures.
+
+    The GGUF block is a half scale followed by 32 int8. Laid out as the stored kernel reads
+    it -- 34-byte blocks transposed into 32-bit words -- every group of four int8 straddles
+    two words half the time and the activations are fetched one value at a time; the Q8
+    xDecision encoder spent 1980 of its 2264 ms there. Here the int8 go to an RGBA8UI
+    texture, four K-values to a texel exactly as `WebGLHalfMatrix` holds halves (texel
+    (j, k/4) = W[j, k:k+4], the bytes unchanged), and the scales to an R16F texture
+    (texel (j, b) = d of block b of row j, the halves unchanged): the same bytes as the
+    file, no value converted, one fetch per four multiplies. Opaque: only
+    `_webgl_matmul_q8k4` reads it.
+    """
+    __slots__ = ("q", "d", "K", "N", "__weakref__")
+
+    def __init__(self, q, d, K, N):
+        self.q, self.d, self.K, self.N = q, d, int(K), int(N)
+
+
+def _webgl_q8_ok(type_name, K, N):
+    """Whether this WebGL device can hold a (K, N) weight as a `WebGLQ8Matrix`."""
+    if type_name != "Q8_0" or not _webgl_ready() or _adam_backend_ready():
+        return False
+    K, N = int(K), int(N)
+    if K % 32:
+        return False
+    from wgpy_backends.webgl.platform import get_platform
+    from wgpy_backends.webgl.texture import get_max_texture_size
+    info = get_platform().getDeviceInfo()
+    mts = get_max_texture_size()
+    return (N <= mts and K // 4 <= mts and bool(info.get("supportsTexture16bit"))
+            and bool(info.get("supportsTexture32bit")))
+
+
+def _q8_split(raw, K, N):
+    """Q8_0 blocks (N rows of K/32 blocks, 34 bytes each) as the two textures' contents:
+    the int8 bytes as (K/4, N, 4) uint8 -- texel (j, k4) = bytes of W[j, 4k4:4k4+4] -- and
+    the scales as (K/32, N) halves. Bytes and halves unchanged."""
+    K, N = int(K), int(N)
+    nb = K // 32
+    blocks = np.frombuffer(raw, np.uint8, count=N * nb * 34).reshape(N, nb, 34)
+    q = np.ascontiguousarray(blocks[:, :, 2:].reshape(N, K // 4, 4).transpose(1, 0, 2))
+    d = np.ascontiguousarray(blocks[:, :, :2]).view(np.float16).reshape(N, nb)
+    return q, np.ascontiguousarray(d.T)
+
+
+def _webgl_q8_pack(raw, K, N):
+    """Split Q8_0 blocks into a `WebGLQ8Matrix` (see `_q8_split`)."""
+    from wgpy_backends.webgl.texture import (WebGL2RenderingContext as GL,
+                                             WebGLArrayTextureShape)
+    from wgpy_backends.webgl.webgl_buffer import WebGLBuffer
+    from wgpy_backends.webgl.ndarray import ndarray as GLArray
+    K, N = int(K), int(N)
+    nb = K // 32
+    q, d = _q8_split(raw, K, N)
+    # Widened only for the upload call (exact); it writes the same halves back.
+    d = d.astype(np.float32)
+    qbuf = WebGLBuffer(K * N, np.dtype(np.uint8),
+                       WebGLArrayTextureShape(height=K // 4, width=N, internal_format=GL.RGBA8UI,
+                                              format=GL.RGBA_INTEGER, type=GL.UNSIGNED_BYTE))
+    qbuf.set_data(q)
+    dbuf = WebGLBuffer(nb * N, np.dtype(np.float32),
+                       WebGLArrayTextureShape(height=nb, width=N, internal_format=GL.R16F,
+                                              format=GL.RED, type=GL.HALF_FLOAT))
+    dbuf.set_data(d)
+    return WebGLQ8Matrix(GLArray((K // 4 * 4, N), np.uint8, buffer=qbuf),
+                         GLArray((nb, N), np.float32, buffer=dbuf), K, N)
+
+
+def _webgl_matmul_q8k4(xf, w):
+    """xf(M,K) @ W.T for a `WebGLQ8Matrix`: per block of 32, eight four-wide dots of the
+    packed activations with the int8, then the block's scale -- d * (sum of q*x), f32,
+    the same arithmetic as WebGPU's tiled kernel."""
+    plat = _copy_kernel["plat"]
+    xd = _contig(xf.data if isinstance(xf, Tensor) else xf)
+    K, N = w.K, w.N
+    if int(xd.shape[-1]) != K:
+        raise ValueError("Q8_0 matmul: x has %d columns, the weight %d" % (int(xd.shape[-1]), K))
+    xp_buf, per_row, M = _webgl_pack_x4(xd, K)
+    name = "mmq8k4_%d" % K
+    if name not in _mmk4["added"]:
+        plat.addKernel(name, {"source": _K4_GL_HEAD + """#define K4 %d
+#define NB %d
+uniform int _ka_tex_output_texture_w; uniform int M; uniform int N; uniform int R;
+uniform sampler2D tex_xp; uniform usampler2D tex_q; uniform sampler2D tex_d;
+out float fragColor;
+// The texel's four bytes are int8: u - 256 where u >= 128, exactly.
+vec4 Q(int j, int k4) {
+  vec4 u = vec4(texelFetch(tex_q, ivec2(j, k4), 0));
+  return u - 256.0 * step(128.0, u);
+}
+void main() {
+  int idx = int(gl_FragCoord.x) + int(gl_FragCoord.y) * _ka_tex_output_texture_w;
+  int i = idx / N; int j = idx - i * N;
+  if (i >= M) { return; }
+  int ry = i / R; int bx = (i - ry * R) * K4;
+  float s = 0.0;
+  for (int b = 0; b < NB; b++) {
+    int k4 = b * 8;
+    float p = dot(texelFetch(tex_xp, ivec2(bx + k4, ry), 0), Q(j, k4));
+    p += dot(texelFetch(tex_xp, ivec2(bx + k4 + 1, ry), 0), Q(j, k4 + 1));
+    p += dot(texelFetch(tex_xp, ivec2(bx + k4 + 2, ry), 0), Q(j, k4 + 2));
+    p += dot(texelFetch(tex_xp, ivec2(bx + k4 + 3, ry), 0), Q(j, k4 + 3));
+    p += dot(texelFetch(tex_xp, ivec2(bx + k4 + 4, ry), 0), Q(j, k4 + 4));
+    p += dot(texelFetch(tex_xp, ivec2(bx + k4 + 5, ry), 0), Q(j, k4 + 5));
+    p += dot(texelFetch(tex_xp, ivec2(bx + k4 + 6, ry), 0), Q(j, k4 + 6));
+    p += dot(texelFetch(tex_xp, ivec2(bx + k4 + 7, ry), 0), Q(j, k4 + 7));
+    s += p * texelFetch(tex_d, ivec2(j, b), 0).r;
+  }
+  fragColor = s;
+}
+""" % (K // 4, K // 32)})
+        _mmk4["added"].add(name)
+    out = _empty((M, N))
+    plat.runKernel({"name": name,
+                    "inputs": [{"name": "tex_xp", "id": xp_buf.buffer_id},
+                               {"name": "tex_q", "id": w.q.buffer.buffer_id},
+                               {"name": "tex_d", "id": w.d.buffer.buffer_id}],
+                    "output": out.buffer.buffer_id,
+                    "uniforms": [{"name": "_ka_tex_output_texture_w",
+                                  "value": out.buffer.texture_shape.width, "type": "int"},
+                                 {"name": "M", "value": M, "type": "int"},
+                                 {"name": "N", "value": N, "type": "int"},
+                                 {"name": "R", "value": per_row, "type": "int"}]})
+    return out
 
 
 def matmul_f16w(x, wpacked, K, N):
@@ -2848,6 +2986,101 @@ _GQA_SPLIT_ON = True   # A/B switch for the split-sequence decode attention
 _TUNED = {}
 _WEIGHT_TUNE_SECONDS = 0.0
 _WEIGHT_TUNE_CALLS = 0
+# Route races belong after a load, not inside an answer. A weight whose routes were measured
+# over a ladder of row counts (`calibrate_rows`) is "calibrated": its key prefix
+# (everything but the row bucket) is in `_CALIBRATED`, and a row count the ladder did not
+# visit takes the choice of the nearest bucket it did, instead of racing in front of the
+# person waiting. While calibrating, every race is run and every key asked is noted.
+_CALIBRATING = [0]
+_CALIBRATED = set()
+_CALIB_TOUCHED = []
+_NEAREST = {}
+
+
+class _calibrating(object):
+    """While inside, `_weight_execution` measures instead of borrowing."""
+
+    def __enter__(self):
+        _CALIBRATING[0] += 1
+        return self
+
+    def __exit__(self, *exc):
+        _CALIBRATING[0] -= 1
+        return False
+
+
+def _nearest_tuned(key):
+    """The measured choice of the bucket nearest `key`'s, in octaves, for a calibrated
+    prefix; None when the prefix was never calibrated. A tie goes to the larger bucket."""
+    prefix = key[:-1]
+    if prefix not in _CALIBRATED:
+        return None
+    hit = _NEAREST.get(key)
+    if hit is not None and hit[0] == len(_TUNED):
+        return hit[1]
+    want = int(key[-1]).bit_length()
+    best = None
+    for k, v in _TUNED.items():
+        if k[:-1] == prefix:
+            d = abs(int(k[-1]).bit_length() - want)
+            if best is None or d < best[0] or (d == best[0] and k[-1] > best[1]):
+                best = (d, k[-1], v)
+    choice = None if best is None else best[2]
+    _NEAREST[key] = (len(_TUNED), choice)
+    return choice
+
+
+def calibrate_rows(probe, top, lo=1, step=2):
+    """Measure every route race `probe(m)` sets off over a ladder of row counts, once.
+
+    `probe(m)` runs the operation at m rows. The ladder is bisected in octaves: `lo` and
+    `top` first, then the middle of any interval whose two ends chose differently for some
+    race, until the ends are at most `step` times apart -- so the crossovers are found where
+    they are, on this device, without visiting every bucket. Near a crossover the candidates
+    are close by definition, so locating it to within `step` costs little. Each race's
+    prefix is then calibrated:
+    a row count between probes takes the nearest probe's measured choice, and one past
+    `top` takes `top`'s. Returns the row counts probed.
+    """
+    lo, top = 1 << (max(1, int(lo)) - 1).bit_length(), 1 << (max(1, int(top)) - 1).bit_length()
+    seen = {}
+
+    def run(m):
+        del _CALIB_TOUCHED[:]
+        with _calibrating():
+            probe(m)
+        seen[m] = {k[:-1]: _TUNED[k] for k in _CALIB_TOUCHED if k in _TUNED}
+        del _CALIB_TOUCHED[:]
+
+    run(lo)
+    if top > lo:
+        run(top)
+    todo = [(lo, top)]
+    while todo:
+        a, b = todo.pop()
+        if b <= max(2, int(step)) * a:
+            continue
+        sa, sb = seen[a], seen[b]
+        if all(sa[k] == sb[k] for k in sa if k in sb):
+            continue
+        mid = 1 << ((a.bit_length() + b.bit_length()) // 2 - 1)
+        run(mid)
+        todo += [(a, mid), (mid, b)]
+    for got in seen.values():
+        _CALIBRATED.update(got)
+    _NEAREST.clear()
+    return sorted(seen)
+
+
+def _sync_small(a):
+    """Wait for the work that produced `a` by reading back one element of it, not all of
+    it: a race times each candidate to completion, and reading a 519x2304 answer back cost
+    more than the kernel being timed (2.3 of 3.2 ms)."""
+    d = a.data if isinstance(a, Tensor) else a
+    if not hasattr(d, "reshape") or not hasattr(d, "get"):
+        return
+    flat = d.reshape(-1)
+    np.asarray(_contig(flat[flat.shape[0] - 1:]).get())
 
 
 def _paired_evidence(samples, candidate, baseline):
@@ -2921,8 +3154,14 @@ def _weight_execution(family, storage_format, K, N, M, run,
     m = int(M)
     bucket = 1 << (m - 1).bit_length()
     key = ("weight_exec", str(family), str(storage_format), int(K), int(N), bucket)
+    if _CALIBRATING[0]:
+        _CALIB_TOUCHED.append(key)
     if key in _TUNED:
         return _TUNED[key]
+    if not _CALIBRATING[0]:
+        near = _nearest_tuned(key)
+        if near is not None:
+            return near
     import time as _t
     _tune_started = _t.perf_counter()
     candidates = tuple(candidates)
@@ -2938,8 +3177,7 @@ def _weight_execution(family, storage_format, K, N, M, run,
         t0 = _t.perf_counter()
         for _ in range(repeat):
             out = run(which)
-        if hasattr(out, "get"):
-            out.get()
+        _sync_small(out)
         return (_t.perf_counter() - t0) / repeat
 
     try:
@@ -2962,12 +3200,16 @@ def _weight_execution(family, storage_format, K, N, M, run,
             for which in order:
                 times[which].append(batch(which))
             # Five unanimous paired rounds are already p=1/32; more repetitions cannot
-            # make that decision more necessary. If ANY pair remains inconclusive, keep
-            # measuring through the requested rounds instead of dropping a local win.
-            if r >= 4 and all(
-                    _paired_faster(times, a, b) or _paired_faster(times, b, a)
-                    for i, a in enumerate(valid) for b in valid[:i]):
-                break
+            # make that decision more necessary. What has to be settled is the WINNER
+            # against each other candidate -- not how two losers rank against each other,
+            # which a race of three spent its remaining rounds on whenever they were close.
+            # If the winner is inconclusive against anything, keep measuring through the
+            # requested rounds instead of dropping a local win.
+            if r >= 4:
+                lead = _measured_choice(times, valid, default=valid[0])
+                if all(_paired_faster(times, lead, other)
+                       for other in valid if other != lead):
+                    break
         chosen = _measured_choice(times, valid, default=valid[0])
         _TUNED[key] = chosen
     finally:
@@ -3209,6 +3451,7 @@ def kernel_profile():
         "gqa_tuned": {"|".join(str(x) for x in k): v for k, v in _GQA_TUNED.items()},
         "checked": {"|".join(str(x) for x in k): bool(v) for k, v in _CHECKED.items()},
         "dequant_ok": dict(_DEQ_OK),
+        "calibrated": sorted("|".join(str(x) for x in k) for k in _CALIBRATED),
     }
 
 
@@ -3344,6 +3587,13 @@ def use_kernel_profile(profile):
     for k, v in (profile.get("dequant_ok") or {}).items():
         _DEQ_OK[str(k)] = bool(v)
         n += 1
+    for k in (profile.get("calibrated") or ()):
+        parts = str(k).split("|")
+        if (len(parts) == 5 and parts[0] == "weight_exec"
+                and parts[3].isdigit() and parts[4].isdigit()):
+            _CALIBRATED.add((parts[0], parts[1], parts[2], int(parts[3]), int(parts[4])))
+            n += 1
+    _NEAREST.clear()
     for k, v in (profile.get("gqa_tuned") or {}).items():
         parts = k.split("|")
         if len(parts) == 4 and type(v) is int and v in (4, 8, 16, 32):
@@ -8899,7 +9149,7 @@ _GGML_TILED_Q8_0_WGSL = """
 @group(0) @binding(0) var<storage,read> array_a: array<vec4<f32>>;
 @group(0) @binding(1) var<storage,read> packed: array<vec4<u32>>;
 @group(0) @binding(2) var<storage,read_write> array_c: array<vec4<f32>>;
-struct QMeta { M: u32, N: u32, K: u32, RW: u32, }
+struct QMeta { M: u32, N: u32, K: u32, RW: u32, G: u32, }
 @group(0) @binding(3) var<storage,read> qm: QMeta;
 // [k * 8 + c8]: one k of the block for 8 adjacent columns, as four half pairs.
 var<workgroup> bs: array<vec4<u32>, 256>;
@@ -8935,8 +9185,15 @@ fn main(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_id) li: 
   let i3 = select(i0, row + 3u, row + 3u < M);
   var s00 = vec4<f32>(); var s01 = vec4<f32>(); var s02 = vec4<f32>(); var s03 = vec4<f32>();
   var s10 = vec4<f32>(); var s11 = vec4<f32>(); var s12 = vec4<f32>(); var s13 = vec4<f32>();
+  // With G > 1 the blocks are cut G ways (workgroup z takes one share) and each share is
+  // written to its own (M, N) slice for a reduction pass: that is how a few rows still fill
+  // the device, exactly as mm_f16w does.
   let nb = K >> 5u;
-  for (var b: u32 = 0u; b < nb; b = b + 1u) {
+  let per = (nb + qm.G - 1u) / qm.G;
+  let b0 = wg.z * per;
+  let b1 = min(nb, b0 + per);
+  let sl = wg.z * M * ND4;
+  for (var b: u32 = b0; b < b1; b = b + 1u) {
     // Block b is bytes 34b.. of the column: its scale is the low half of word w0, or the
     // high half when the block starts mid-word -- and then its int8 are word-aligned.
     let byte0 = b * 34u;
@@ -8989,7 +9246,7 @@ fn main(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_id) li: 
   // whatever followed; each column's sum reads only its own column, so they are just not
   // written.
   if (row >= M || c0 >= N) { return; }
-  let cx = c0 >> 2u;
+  let cx = sl + (c0 >> 2u);
   let wide = c0 + 4u < N;
   array_c[cx + row * ND4] = s00;
   if (wide) { array_c[cx + 1u + row * ND4] = s10; }
@@ -9020,8 +9277,25 @@ def _ggml_tiled_ok(type_name, K, N):
     return int(K) % int(_GGML_TYPES[type_name][2]) == 0 and int(N) % 4 == 0
 
 
-def _ggml_tiled_matmul(xf, packed, type_name, K, N):
-    """xf(M,K) @ W(N,K).T from the stored blocks, through the tiled kernel above."""
+def _ggml_tiled_split(M, N):
+    """How many ways the tiled kernel cuts K: four when there are too few workgroups to keep
+    the device busy, else none.
+
+    Its own line, not mm_f16w's (`_mm_split_groups`, which cuts below 128 workgroups): each
+    cut repeats the per-block decode setup and adds a reduction pass, and measured that costs
+    this kernel more than it costs mm_f16w. Apple M5, ms, K uncut / cut in 4:
+        768x768    M=8  (12 groups) 0.095 / 0.072    M=64  (24) 0.110 / 0.114
+        1152x768   M=8  (12 groups) 0.113 / 0.081    M=64  (24) 0.125 / 0.105
+        768x2304   M=32 (36 groups) 0.116 / 0.109    M=64  (72) 0.154 / 0.319
+        768x768    M=128 (48 groups) 0.118 / 0.157   M=256 (96) 0.176 / 0.202
+    """
+    groups = ((int(N) + 63) // 64) * ((int(M) + 31) // 32)
+    return 4 if groups < 48 else 1
+
+
+def _ggml_tiled_matmul(xf, packed, type_name, K, N, split=None):
+    """xf(M,K) @ W(N,K).T from the stored blocks, through the tiled kernel above.
+    `split` overrides how many ways K is cut (measurement only)."""
     M, K, N = int(xf.shape[0]), int(K), int(N)
     plat = _adam_kernel["platform"]
     name = "ggml_tiled_" + type_name.lower()
@@ -9030,14 +9304,27 @@ def _ggml_tiled_matmul(xf, packed, type_name, K, N):
                               "bindingTypes": ["read-only-storage", "read-only-storage",
                                                "storage", "read-only-storage"]})
         _ggml_tiled_k["added"].add(name)
+    if "ggml_tiled_reduce" not in _ggml_tiled_k["added"]:
+        plat.addKernel("ggml_tiled_reduce", {"source": _MM_REDUCE_WGSL,
+                                             "bindingTypes": ["storage", "read-only-storage",
+                                                              "read-only-storage"]})
+        _ggml_tiled_k["added"].add("ggml_tiled_reduce")
     vals, blk = int(_GGML_TYPES[type_name][2]), int(_GGML_TYPES[type_name][3])
     words = ((K // vals) * blk + 3) // 4          # ggml_transpose pads a column to whole words
-    out = _empty((M, N))
-    meta = _adam_kernel["make_meta"]((M, N, K, words), "u4,u4,u4,u4")
+    G = int(split) if split else _ggml_tiled_split(M, N)
+    part = _empty((G * M, N))
+    meta = _adam_kernel["make_meta"]((M, N, K, words, G), "u4,u4,u4,u4,u4")
     plat.runKernel({"name": name,
                     "tensors": [xf.buffer.buffer_id, packed.buffer.buffer_id,
-                                out.buffer.buffer_id, meta.buffer_id],
-                    "workGroups": {"x": (N + 63) // 64, "y": (M + 31) // 32, "z": 1}})
+                                part.buffer.buffer_id, meta.buffer_id],
+                    "workGroups": {"x": (N + 63) // 64, "y": (M + 31) // 32, "z": G}})
+    if G == 1:
+        return part
+    out = _empty((M, N))
+    rmeta = _adam_kernel["make_meta"]((M * N, G), "u4,u4")
+    plat.runKernel({"name": "ggml_tiled_reduce",
+                    "tensors": [out.buffer.buffer_id, part.buffer.buffer_id, rmeta.buffer_id],
+                    "workGroups": {"x": (M * N + 63) // 64, "y": 1, "z": 1}})
     return out
 
 
@@ -9089,6 +9376,9 @@ def ggml_matmul(xf, packed, type_name, K, N, eidx=None, eslot=0, estride=0,
     # kernel is worth.
     if execution == "materialized" and not _adam_backend_ready():
         raise RuntimeError("materialized ggml comparison requires the WebGPU backend")
+    if isinstance(packed, WebGLQ8Matrix):
+        of = _webgl_matmul_q8k4(xf, packed)
+        return of if bias is None else of + bias
     if _webgl_ready() and not _adam_backend_ready():
         return _ggml_run_gl(xf, packed, type_name, K, N, eidx=eidx, eslot=eslot,
                             estride=estride, xper=xper, bias=bias)
@@ -9100,8 +9390,7 @@ def ggml_matmul(xf, packed, type_name, K, N, eidx=None, eslot=0, estride=0,
     can_materialize = (execution in ("auto", "materialized")
                        and eidx is None and not xper and _adam_backend_ready()
                        and ggml_dequant_ok(type_name))
-    # The tiled kernel reads the same stored blocks, so it costs no memory and sits right
-    # after "stored" in the candidate order (an unproven race keeps the earlier one).
+    # The tiled kernel reads the same stored blocks and allocates nothing.
     can_tiled = (execution in ("auto", "tiled")
                  and eidx is None and not xper and _adam_backend_ready()
                  and _ggml_tiled_ok(type_name, K, N))
@@ -9116,6 +9405,8 @@ def ggml_matmul(xf, packed, type_name, K, N, eidx=None, eslot=0, estride=0,
         raise RuntimeError("%s shape has no tiled stored-format path" % type_name)
     if execution == "auto":
         if can_tiled or can_dp4a or can_materialize:
+            # The tiled kernel reads the same stored blocks and allocates nothing, so it
+            # sits right after "stored": an unproven race keeps the earlier candidate.
             candidates = (("stored",) + (("tiled",) if can_tiled else ())
                           + (("dp4a",) if can_dp4a else ())
                           + (("materialized",) if can_materialize else ()))
@@ -9428,6 +9719,7 @@ def parallel_swiglu(linears, x, execution="auto"):
                and len({int(l.Nt) for l in linears}) == 1
                and all(l.bias is None for l in linears)
                and _GGML_TYPES[linears[0].type_name][4] is None
+               and not any(isinstance(l.packed, WebGLQ8Matrix) for l in linears)
                and (_adam_backend_ready() or _webgl_ready()))
     if not capable:
         return separate()
@@ -12409,16 +12701,19 @@ class GGMLLinear(Module):
         if execution not in ("stored", "tiled", "dp4a", "materialized", "auto"):
             raise ValueError("execution must be 'stored', 'tiled', 'dp4a', 'materialized', "
                              "or 'auto'")
-        b = np.frombuffer(raw, np.uint8)
-        pad = (-b.size) % 4
-        if pad:
-            b = np.concatenate([b, np.zeros(pad, np.uint8)])
-        up = xp.asarray(b.view(np.int32))
-        # Transposed on the way in, once, so every later matmul reads it coalesced. Done on
-        # the device: the host copy is already the largest thing in flight during a load.
         vals, blk = _GGML_TYPES[type_name][2], _GGML_TYPES[type_name][3]
-        self.packed = ggml_transpose(up, int(N), (int(K) // vals) * blk)
-        del up
+        if _webgl_q8_ok(type_name, K, N):
+            self.packed = _webgl_q8_pack(raw, K, N)
+        else:
+            b = np.frombuffer(raw, np.uint8)
+            pad = (-b.size) % 4
+            if pad:
+                b = np.concatenate([b, np.zeros(pad, np.uint8)])
+            up = xp.asarray(b.view(np.int32))
+            # Transposed on the way in, once, so every later matmul reads it coalesced. Done
+            # on the device: the host copy is already the largest thing in flight in a load.
+            self.packed = ggml_transpose(up, int(N), (int(K) // vals) * blk)
+            del up
         self.type_name = type_name
         self.storage_format = type_name
         self.execution = execution
