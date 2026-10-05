@@ -3516,6 +3516,14 @@ def use_kernel_profile(profile):
               and v in ("fused", "composed")):
             _TUNED[(parts[0], int(parts[1]), int(parts[2]))] = v
             n += 1
+        elif (len(parts) == 3 and parts[0] == "greedy_chunk_v1" and parts[1] == "webgpu"
+              and len(parts[2]) == 24 and all(c in "0123456789abcdef" for c in parts[2])
+              and isinstance(v, dict) and v.get("count") in (0, 1, 2, 4)
+              and isinstance(v.get("row", ""), str)):
+            _TUNED[(parts[0], parts[1], parts[2])] = {
+                "count": int(v["count"]), "row": str(v.get("row") or "host"),
+                "median_ms": v.get("median_ms")}
+            n += 1
         elif (len(parts) == 3 and parts[0] == "vocab_sample_full"
               and parts[2] == "webgpu" and v in ("js", "gpu")
               and parts[1].isdigit() and 0 < int(parts[1]) <= 1 << 24):
@@ -3527,7 +3535,7 @@ def use_kernel_profile(profile):
                     int(parts[5]))] = v
             n += 1
         elif (len(parts) == 6 and parts[0] == "weight_exec"
-              and v in ("stored", "tiled", "dp4a", "materialized", "full",
+              and v in ("stored", "tiled", "dp4a", "materialized", "full", "packed",
                         "selected_full", "selected_q", "base", "alternate")):
             _TUNED[(parts[0], parts[1], parts[2], int(parts[3]), int(parts[4]),
                     int(parts[5]))] = v
@@ -9264,8 +9272,303 @@ fn main(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_id) li: 
   }
 }
 """
+# Every other block format the same way, from one template. What makes it possible: in
+# each of them a weight is A * q' - B, where q' is a small integer -- a nibble, a nibble
+# minus 8, six bits minus 32, two bits minus 4 -- that a half holds exactly, and A, B are one
+# pair per sub-block of 16 or 32 values and column (d*sc and dmin*m for the K-quants, d and
+# -min for the _1 formats, B = 0 where the offset is folded into q'). So the workgroup memory
+# holds q' as halves, exactly as for Q8_0, and a sub-block's contribution is
+# A * (sum of q'*x) - B * (sum of x): both sums in f32, nothing rounded below the stored
+# width. A format brings three functions over four adjacent columns: QV (q' for four k),
+# QA and, when it has an offset, QB. Byte reads are vec4 over those columns, each one word
+# of the (word, row) layout the stored kernel reads -- the same buffer, untouched.
+_TILED_HELP = """
+var<private> ND4: u32;
+var<private> RWW: u32;
+fn WV(w: u32, c4: u32) -> vec4<u32> {
+  if (w >= RWW) { return vec4<u32>(0u); }
+  return packed[w * ND4 + c4];
+}
+fn B4V(o: u32, c4: u32) -> vec4<u32> {
+  let w = o >> 2u; let sh = (o & 3u) * 8u;
+  let lo = WV(w, c4);
+  if (sh == 0u) { return lo; }
+  return (lo >> vec4<u32>(sh)) | (WV(w + 1u, c4) << vec4<u32>(32u - sh));
+}
+fn BV(o: u32, c4: u32) -> vec4<u32> {
+  return (WV(o >> 2u, c4) >> vec4<u32>((o & 3u) * 8u)) & vec4<u32>(255u);
+}
+fn F16V(o: u32, c4: u32) -> vec4<f32> {
+  let w = WV(o >> 2u, c4);
+  let h = select(w & vec4<u32>(0xFFFFu), w >> vec4<u32>(16u), vec4<bool>((o & 2u) != 0u));
+  return vec4<f32>(unpack2x16float(h.x).x, unpack2x16float(h.y).x,
+                   unpack2x16float(h.z).x, unpack2x16float(h.w).x);
+}
+fn NIB(w: vec4<u32>, i: u32, sh: u32) -> vec4<f32> {
+  return vec4<f32>((w >> vec4<u32>(8u * i + sh)) & vec4<u32>(15u));
+}
+fn BIT16(w: vec4<u32>, b: u32) -> vec4<f32> {
+  return vec4<f32>((w >> vec4<u32>(b)) & vec4<u32>(1u)) * 16.0;
+}
+"""
+_TILED_Q4_0 = """
+fn QV(b: u32, kl: u32, c4: u32) -> mat4x4<f32> {
+  let w = B4V(b * 18u + 2u + (kl & 15u), c4); let sh = select(0u, 4u, kl >= 16u);
+  let e = vec4<f32>(8.0);
+  return mat4x4<f32>(NIB(w, 0u, sh) - e, NIB(w, 1u, sh) - e, NIB(w, 2u, sh) - e, NIB(w, 3u, sh) - e);
+}
+fn QA(b: u32, s: u32, c4: u32) -> vec4<f32> { return F16V(b * 18u, c4); }
+"""
+_TILED_Q4_1 = """
+fn QV(b: u32, kl: u32, c4: u32) -> mat4x4<f32> {
+  let w = B4V(b * 20u + 4u + (kl & 15u), c4); let sh = select(0u, 4u, kl >= 16u);
+  return mat4x4<f32>(NIB(w, 0u, sh), NIB(w, 1u, sh), NIB(w, 2u, sh), NIB(w, 3u, sh));
+}
+fn QA(b: u32, s: u32, c4: u32) -> vec4<f32> { return F16V(b * 20u, c4); }
+fn QB(b: u32, s: u32, c4: u32) -> vec4<f32> { return -F16V(b * 20u + 2u, c4); }
+"""
+_TILED_Q5_0 = """
+fn QV(b: u32, kl: u32, c4: u32) -> mat4x4<f32> {
+  let o = b * 22u; let qh = B4V(o + 2u, c4);
+  let w = B4V(o + 6u + (kl & 15u), c4); let sh = select(0u, 4u, kl >= 16u);
+  let e = vec4<f32>(16.0);
+  return mat4x4<f32>(NIB(w, 0u, sh) + BIT16(qh, kl) - e, NIB(w, 1u, sh) + BIT16(qh, kl + 1u) - e,
+                     NIB(w, 2u, sh) + BIT16(qh, kl + 2u) - e, NIB(w, 3u, sh) + BIT16(qh, kl + 3u) - e);
+}
+fn QA(b: u32, s: u32, c4: u32) -> vec4<f32> { return F16V(b * 22u, c4); }
+"""
+_TILED_Q5_1 = """
+fn QV(b: u32, kl: u32, c4: u32) -> mat4x4<f32> {
+  let o = b * 24u; let qh = B4V(o + 4u, c4);
+  let w = B4V(o + 8u + (kl & 15u), c4); let sh = select(0u, 4u, kl >= 16u);
+  return mat4x4<f32>(NIB(w, 0u, sh) + BIT16(qh, kl), NIB(w, 1u, sh) + BIT16(qh, kl + 1u),
+                     NIB(w, 2u, sh) + BIT16(qh, kl + 2u), NIB(w, 3u, sh) + BIT16(qh, kl + 3u));
+}
+fn QA(b: u32, s: u32, c4: u32) -> vec4<f32> { return F16V(b * 24u, c4); }
+fn QB(b: u32, s: u32, c4: u32) -> vec4<f32> { return -F16V(b * 24u + 2u, c4); }
+"""
+# The K-quants' packed 6-bit (scale, min) of sub-block j, for four columns.
+_TILED_K4SC = """
+fn K4SCV(so: u32, j: u32, c4: u32) -> mat2x4<f32> {
+  if (j < 4u) {
+    return mat2x4<f32>(vec4<f32>(BV(so + j, c4) & vec4<u32>(63u)),
+                       vec4<f32>(BV(so + j + 4u, c4) & vec4<u32>(63u)));
+  }
+  let a = BV(so + j + 4u, c4);
+  return mat2x4<f32>(
+    vec4<f32>((a & vec4<u32>(15u)) | ((BV(so + j - 4u, c4) >> vec4<u32>(6u)) << vec4<u32>(4u))),
+    vec4<f32>((a >> vec4<u32>(4u)) | ((BV(so + j, c4) >> vec4<u32>(6u)) << vec4<u32>(4u))));
+}
+"""
+_TILED_Q4_K = _TILED_K4SC + """
+fn QV(b: u32, kl: u32, c4: u32) -> mat4x4<f32> {
+  let o = b * 144u; let j = kl >> 5u; let l = kl & 31u;
+  let w = WV((o + 16u + (j >> 1u) * 32u + l) >> 2u, c4); let sh = (j & 1u) * 4u;
+  return mat4x4<f32>(NIB(w, 0u, sh), NIB(w, 1u, sh), NIB(w, 2u, sh), NIB(w, 3u, sh));
+}
+fn QA(b: u32, s: u32, c4: u32) -> vec4<f32> { let o = b * 144u; return F16V(o, c4) * K4SCV(o + 4u, s, c4)[0]; }
+fn QB(b: u32, s: u32, c4: u32) -> vec4<f32> { let o = b * 144u; return F16V(o + 2u, c4) * K4SCV(o + 4u, s, c4)[1]; }
+"""
+_TILED_Q5_K = _TILED_K4SC + """
+fn QV(b: u32, kl: u32, c4: u32) -> mat4x4<f32> {
+  let o = b * 176u; let j = kl >> 5u; let l = kl & 31u;
+  let w = WV((o + 48u + (j >> 1u) * 32u + l) >> 2u, c4); let sh = (j & 1u) * 4u;
+  let hw = WV((o + 16u + l) >> 2u, c4);
+  return mat4x4<f32>(NIB(w, 0u, sh) + BIT16(hw, j), NIB(w, 1u, sh) + BIT16(hw, 8u + j),
+                     NIB(w, 2u, sh) + BIT16(hw, 16u + j), NIB(w, 3u, sh) + BIT16(hw, 24u + j));
+}
+fn QA(b: u32, s: u32, c4: u32) -> vec4<f32> { let o = b * 176u; return F16V(o, c4) * K4SCV(o + 4u, s, c4)[0]; }
+fn QB(b: u32, s: u32, c4: u32) -> vec4<f32> { let o = b * 176u; return F16V(o + 2u, c4) * K4SCV(o + 4u, s, c4)[1]; }
+"""
+_TILED_Q6_K = """
+fn Q6E(qs: vec4<u32>, qh: vec4<u32>, i: u32, qsh: u32, hsh: u32) -> vec4<f32> {
+  return vec4<f32>(((qs >> vec4<u32>(8u * i + qsh)) & vec4<u32>(15u))
+                   | (((qh >> vec4<u32>(8u * i + hsh)) & vec4<u32>(3u)) << vec4<u32>(4u))) - 32.0;
+}
+fn QV(b: u32, kl: u32, c4: u32) -> mat4x4<f32> {
+  let o = b * 210u; let h = kl >> 7u; let r = kl & 127u; let qt = r >> 5u; let l = r & 31u;
+  let qs = B4V(o + h * 64u + l + 32u * (qt & 1u), c4);
+  let qh = B4V(o + 128u + h * 32u + l, c4);
+  let qsh = 4u * (qt >> 1u); let hsh = 2u * qt;
+  return mat4x4<f32>(Q6E(qs, qh, 0u, qsh, hsh), Q6E(qs, qh, 1u, qsh, hsh),
+                     Q6E(qs, qh, 2u, qsh, hsh), Q6E(qs, qh, 3u, qsh, hsh));
+}
+fn QA(b: u32, s: u32, c4: u32) -> vec4<f32> {
+  let o = b * 210u;
+  let sc = vec4<f32>(vec4<i32>(BV(o + 192u + s, c4) << vec4<u32>(24u)) >> vec4<u32>(24u));
+  return F16V(o + 208u, c4) * sc;
+}
+"""
+_TILED_Q3_K = """
+fn Q3E(q: vec4<u32>, m: vec4<u32>, i: u32, sh: u32, mb: u32) -> vec4<f32> {
+  return vec4<f32>((q >> vec4<u32>(8u * i + sh)) & vec4<u32>(3u))
+         - select(vec4<f32>(4.0), vec4<f32>(0.0), ((m >> vec4<u32>(8u * i + mb)) & vec4<u32>(1u)) != vec4<u32>(0u));
+}
+fn QV(b: u32, kl: u32, c4: u32) -> mat4x4<f32> {
+  let o = b * 110u; let is = kl >> 4u; let l = kl & 15u;
+  let blk2 = is >> 3u; let jj = (is >> 1u) & 3u; let half = is & 1u;
+  let q = B4V(o + 32u + blk2 * 32u + half * 16u + l, c4);
+  let m = B4V(o + half * 16u + l, c4);
+  let sh = 2u * jj; let mb = blk2 * 4u + jj;
+  return mat4x4<f32>(Q3E(q, m, 0u, sh, mb), Q3E(q, m, 1u, sh, mb),
+                     Q3E(q, m, 2u, sh, mb), Q3E(q, m, 3u, sh, mb));
+}
+fn QA(b: u32, s: u32, c4: u32) -> vec4<f32> {
+  let o = b * 110u;
+  let a0 = B4V(o + 96u, c4); let a1 = B4V(o + 100u, c4); let a2 = B4V(o + 104u, c4);
+  let lo4 = vec4<u32>(0x0F0F0F0Fu); let lo2 = vec4<u32>(0x03030303u); let f = vec4<u32>(4u);
+  let wsel = s >> 2u;
+  var v: vec4<u32>;
+  if (wsel == 0u) { v = (a0 & lo4) | ((a2 & lo2) << f); }
+  else if (wsel == 1u) { v = (a1 & lo4) | (((a2 >> vec4<u32>(2u)) & lo2) << f); }
+  else if (wsel == 2u) { v = ((a0 >> f) & lo4) | (((a2 >> f) & lo2) << f); }
+  else { v = ((a1 >> f) & lo4) | (((a2 >> vec4<u32>(6u)) & lo2) << f); }
+  let sc = vec4<f32>((v >> vec4<u32>(8u * (s & 3u))) & vec4<u32>(255u)) - 32.0;
+  return F16V(o + 108u, c4) * sc;
+}
+"""
+_TILED_Q2_K = """
+fn QV(b: u32, kl: u32, c4: u32) -> mat4x4<f32> {
+  let o = b * 84u; let is = kl >> 4u; let l = kl & 15u;
+  let blk2 = is >> 3u; let jj = (is >> 1u) & 3u; let half = is & 1u;
+  let q = WV((o + 16u + blk2 * 32u + half * 16u + l) >> 2u, c4); let sh = 2u * jj;
+  let t = vec4<u32>(3u);
+  return mat4x4<f32>(vec4<f32>((q >> vec4<u32>(sh)) & t), vec4<f32>((q >> vec4<u32>(8u + sh)) & t),
+                     vec4<f32>((q >> vec4<u32>(16u + sh)) & t), vec4<f32>((q >> vec4<u32>(24u + sh)) & t));
+}
+fn QA(b: u32, s: u32, c4: u32) -> vec4<f32> { let o = b * 84u; return F16V(o + 80u, c4) * vec4<f32>(BV(o + s, c4) & vec4<u32>(15u)); }
+fn QB(b: u32, s: u32, c4: u32) -> vec4<f32> { let o = b * 84u; return F16V(o + 82u, c4) * vec4<f32>(BV(o + s, c4) >> vec4<u32>(4u)); }
+"""
+# name: (sub-block values, has an offset, functions)
+_TILED_FORMATS = {
+    "Q4_0": (32, False, _TILED_Q4_0), "Q4_1": (32, True, _TILED_Q4_1),
+    "Q5_0": (32, False, _TILED_Q5_0), "Q5_1": (32, True, _TILED_Q5_1),
+    "Q4_K": (32, True, _TILED_Q4_K), "Q5_K": (32, True, _TILED_Q5_K),
+    "Q6_K": (16, False, _TILED_Q6_K), "Q3_K": (16, False, _TILED_Q3_K),
+    "Q2_K": (16, True, _TILED_Q2_K),
+}
+_TILED_TEMPLATE = """
+@group(0) @binding(0) var<storage,read> array_a: array<vec4<f32>>;
+@group(0) @binding(1) var<storage,read> packed: array<vec4<u32>>;
+@group(0) @binding(2) var<storage,read_write> array_c: array<vec4<f32>>;
+struct QMeta { M: u32, N: u32, K: u32, RW: u32, G: u32, }
+@group(0) @binding(3) var<storage,read> qm: QMeta;
+// [k * 8 + c8]: one k of a 32-k stage for 8 adjacent columns, q' as four half pairs.
+var<workgroup> bs: array<vec4<u32>, 256>;
+// A (and B) of the stage's sub-blocks for the workgroup's 64 columns: [sub * 16 + col4].
+var<workgroup> sA: array<vec4<f32>, 32>;
+var<workgroup> sB: array<vec4<f32>, 32>;
+fn h2(v: vec4<f32>, u: vec4<f32>) -> vec4<u32> {
+  return vec4<u32>(pack2x16float(v.xy), pack2x16float(v.zw), pack2x16float(u.xy), pack2x16float(u.zw));
+}
+HELP
+FUNCS
+@compute @workgroup_size(8,8,1)
+fn main(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_id) li: vec3<u32>) {
+  let M = qm.M; let N = qm.N; let K = qm.K;
+  ND4 = N >> 2u; RWW = qm.RW;
+  let KD4 = K >> 2u;
+  let t = li.y * 8u + li.x;
+  let c8 = t & 7u; let kq = t >> 3u;
+  let c4 = (wg.x * 64u + c8 * 8u) >> 2u;
+  let c0 = wg.x * 64u + li.x * 8u;
+  let row = wg.y * 32u + li.y * 4u;
+  let i0 = select(M - 1u, row, row < M);
+  let i1 = select(i0, row + 1u, row + 1u < M);
+  let i2 = select(i0, row + 2u, row + 2u < M);
+  let i3 = select(i0, row + 3u, row + 3u < M);
+  var s00 = vec4<f32>(); var s01 = vec4<f32>(); var s02 = vec4<f32>(); var s03 = vec4<f32>();
+  var s10 = vec4<f32>(); var s11 = vec4<f32>(); var s12 = vec4<f32>(); var s13 = vec4<f32>();
+  let ns = K >> 5u;
+  let per = (ns + qm.G - 1u) / qm.G;
+  let st0 = wg.z * per;
+  let st1 = min(ns, st0 + per);
+  let sl = wg.z * M * ND4;
+  for (var st: u32 = st0; st < st1; st = st + 1u) {
+    let kg = st * 32u;
+    let b = kg / VALSu; let kl0 = kg - b * VALSu;
+    let mlo = QV(b, kl0 + kq * 4u, c4);
+    let mhi = QV(b, kl0 + kq * 4u, c4 + 1u);
+    for (var j: u32 = 0u; j < 4u; j = j + 1u) {
+      bs[(kq * 4u + j) * 8u + c8] = h2(mlo[j], mhi[j]);
+    }
+    if (kq < NSUBu) {
+      let s = kl0 / SBu + kq;
+      sA[kq * 16u + c8 * 2u] = QA(b, s, c4);
+      sA[kq * 16u + c8 * 2u + 1u] = QA(b, s, c4 + 1u);
+      HASB_STORE
+    }
+    workgroupBarrier();
+    for (var sub: u32 = 0u; sub < NSUBu; sub = sub + 1u) {
+      var p00 = vec4<f32>(); var p01 = vec4<f32>(); var p02 = vec4<f32>(); var p03 = vec4<f32>();
+      var p10 = vec4<f32>(); var p11 = vec4<f32>(); var p12 = vec4<f32>(); var p13 = vec4<f32>();
+      var r0 = 0.0; var r1 = 0.0; var r2 = 0.0; var r3 = 0.0;
+      let kb4 = (kg >> 2u) + sub * SB4u;
+      for (var k4: u32 = 0u; k4 < SB4u; k4 = k4 + 1u) {
+        let a0 = array_a[i0 * KD4 + kb4 + k4]; let a1 = array_a[i1 * KD4 + kb4 + k4];
+        let a2 = array_a[i2 * KD4 + kb4 + k4]; let a3 = array_a[i3 * KD4 + kb4 + k4];
+        HASB_ROWSUM
+        for (var j: u32 = 0u; j < 4u; j = j + 1u) {
+          let pk = bs[((sub * SB4u + k4) * 4u + j) * 8u + li.x];
+          let lo = vec4<f32>(unpack2x16float(pk.x), unpack2x16float(pk.y));
+          let hi = vec4<f32>(unpack2x16float(pk.z), unpack2x16float(pk.w));
+          p00 = vec4<f32>(a0[j]) * lo + p00; p10 = vec4<f32>(a0[j]) * hi + p10;
+          p01 = vec4<f32>(a1[j]) * lo + p01; p11 = vec4<f32>(a1[j]) * hi + p11;
+          p02 = vec4<f32>(a2[j]) * lo + p02; p12 = vec4<f32>(a2[j]) * hi + p12;
+          p03 = vec4<f32>(a3[j]) * lo + p03; p13 = vec4<f32>(a3[j]) * hi + p13;
+        }
+      }
+      let d0 = sA[sub * 16u + li.x * 2u]; let d1 = sA[sub * 16u + li.x * 2u + 1u];
+      s00 = p00 * d0 + s00; s10 = p10 * d1 + s10;
+      s01 = p01 * d0 + s01; s11 = p11 * d1 + s11;
+      s02 = p02 * d0 + s02; s12 = p12 * d1 + s12;
+      s03 = p03 * d0 + s03; s13 = p13 * d1 + s13;
+      HASB_APPLY
+    }
+    workgroupBarrier();
+  }
+  if (row >= M || c0 >= N) { return; }
+  let cx = sl + (c0 >> 2u);
+  let wide = c0 + 4u < N;
+  array_c[cx + row * ND4] = s00;
+  if (wide) { array_c[cx + 1u + row * ND4] = s10; }
+  if (row + 1u < M) { array_c[cx + (row + 1u) * ND4] = s01; if (wide) { array_c[cx + 1u + (row + 1u) * ND4] = s11; } }
+  if (row + 2u < M) { array_c[cx + (row + 2u) * ND4] = s02; if (wide) { array_c[cx + 1u + (row + 2u) * ND4] = s12; } }
+  if (row + 3u < M) { array_c[cx + (row + 3u) * ND4] = s03; if (wide) { array_c[cx + 1u + (row + 3u) * ND4] = s13; } }
+}
+"""
+
+
+def _ggml_tiled_src(type_name):
+    """The tiled kernel for a format in `_TILED_FORMATS`, from `_TILED_TEMPLATE`."""
+    sb, hasb, funcs = _TILED_FORMATS[type_name]
+    vals = int(_GGML_TYPES[type_name][2])
+    src = (_TILED_TEMPLATE.replace("HELP", _TILED_HELP).replace("FUNCS", funcs)
+           .replace("VALSu", "%du" % vals).replace("NSUBu", "%du" % (32 // sb))
+           .replace("SB4u", "%du" % (sb // 4)).replace("SBu", "%du" % sb))
+    if hasb:
+        src = (src.replace("HASB_STORE",
+                           "sB[kq * 16u + c8 * 2u] = QB(b, s, c4);\n"
+                           "      sB[kq * 16u + c8 * 2u + 1u] = QB(b, s, c4 + 1u);")
+               .replace("HASB_ROWSUM",
+                        "let one = vec4<f32>(1.0);\n"
+                        "        r0 = r0 + dot(a0, one); r1 = r1 + dot(a1, one);\n"
+                        "        r2 = r2 + dot(a2, one); r3 = r3 + dot(a3, one);")
+               .replace("HASB_APPLY",
+                        "let e0 = sB[sub * 16u + li.x * 2u]; let e1 = sB[sub * 16u + li.x * 2u + 1u];\n"
+                        "      s00 = s00 - e0 * r0; s10 = s10 - e1 * r0;\n"
+                        "      s01 = s01 - e0 * r1; s11 = s11 - e1 * r1;\n"
+                        "      s02 = s02 - e0 * r2; s12 = s12 - e1 * r2;\n"
+                        "      s03 = s03 - e0 * r3; s13 = s13 - e1 * r3;"))
+    else:
+        src = (src.replace("HASB_STORE", "").replace("HASB_ROWSUM", "")
+               .replace("HASB_APPLY", ""))
+    return src
+
+
 # Formats with a tiled kernel. Adding one is adding its decode, not a branch elsewhere.
 _GGML_TILED = {"Q8_0": _GGML_TILED_Q8_0_WGSL}
+_GGML_TILED.update({name: _ggml_tiled_src(name) for name in _TILED_FORMATS})
 _ggml_tiled_k = {"added": set()}
 
 
@@ -9274,7 +9577,8 @@ def _ggml_tiled_ok(type_name, K, N):
     vec4s (N % 4), and the weight is whole blocks."""
     if type_name not in _GGML_TILED:
         return False
-    return int(K) % int(_GGML_TYPES[type_name][2]) == 0 and int(N) % 4 == 0
+    return (int(K) % int(_GGML_TYPES[type_name][2]) == 0 and int(K) % 32 == 0
+            and int(N) % 4 == 0)
 
 
 def _ggml_tiled_split(M, N):
@@ -10991,11 +11295,48 @@ def _gl_rowinit(moe, moedec):
 
 _ggml_gl = {"added": set()}
 
+# The same kernel reading its activations four to an RGBA32F texel (`_webgl_pack_x4`).
+# `_GL_HEAD`'s note records that this LOST on the one-row decode sweep, where the single
+# activation row is cached and a scalar fetch is cheaper than a vec4 fetch plus a dynamic
+# index -- so it is not a replacement. It is a candidate for the batched modes, where a
+# fragment reads a whole activation row of its own: four fetches become one, and the race in
+# `_ggml_run_gl` decides per format, shape and row bucket on the device.
+_GL_PACKED_X = (
+    ("uniform sampler2D tex_x;", "uniform sampler2D tex_xp; uniform int u_R; uniform int u_K4;"),
+    ("int _xw; int _ww;", "int _ry; int _bx; int _xw; int _ww;"),
+    ("  _xw = textureSize(tex_x, 0).x; _xh = textureSize(tex_x, 0).y;\n", ""),
+    ("void ACC(uint k, float v) { acc0 += Xf(int(xrow + k)) * v; }",
+     "void ACC(uint k, float v) {\n"
+     "  acc0 += texelFetch(tex_xp, ivec2(_bx + int(k >> 2u), _ry), 0)[int(k & 3u)] * v; }"),
+    ("void ACC4(uint k, vec4 v) { int i = int(xrow + k);\n"
+     "  acc0 += dot(vec4(Xf(i), Xf(i + 1), Xf(i + 2), Xf(i + 3)), v); }",
+     "void ACC4(uint k, vec4 v) {\n"
+     "  acc0 += dot(texelFetch(tex_xp, ivec2(_bx + int(k >> 2u), _ry), 0), v); }"),
+    ("  woff = 0u;\n  xrow = uint(r) * gm.K;",
+     "  woff = 0u;\n  xrow = uint(r) * gm.K;\n  _ry = r / u_R; _bx = (r - _ry * u_R) * u_K4;"),
+)
+
+
+def _ggml_packed_x_src(src):
+    """`src` (a dense batched GL kernel) reading packed activations; every substitution
+    must apply, so a change to the template is an error here rather than a kernel that
+    still reads `tex_x`."""
+    for old, new in _GL_PACKED_X:
+        if old not in src:
+            raise RuntimeError("WebGL GGML template changed; packed-activation variant "
+                               "cannot be derived (%r)" % old[:40])
+        src = src.replace(old, new)
+    # Nothing else may read the scalar activation texture.
+    i = src.index("float Xf(int i)")
+    j = src.index("\n}\n", i) + 3
+    return src[:i] + src[j:]
+
 
 def _ggml_name_gl(type_name, moe, moedec, bias=False, mode=1, exact_route="base"):
     return "ggml_gl_%s_%s_m%d_%s%s" % (type_name.lower().replace("-", "_"),
                                        "md" if moedec else ("mb" if moe else "d"), mode,
-                                       "xa" if exact_route == "alternate" else "xb",
+                                       {"alternate": "xa", "packed": "xp"}.get(exact_route,
+                                                                                "xb"),
                                        "_b" if bias else "")
 
 
@@ -11005,9 +11346,12 @@ def _ggml_add_gl(type_name, moe=False, moedec=False, bias=False, mode=1,
     if key in _ggml_gl["added"]:
         return
     plat = _copy_kernel["plat"]
+    if exact_route == "packed":
+        src = _ggml_packed_x_src(_ggml_src_gl(type_name, moe, moedec, bias, mode, "selected"))
+    else:
+        src = _ggml_src_gl(type_name, moe, moedec, bias, mode, exact_route)
     plat.addKernel(_ggml_name_gl(type_name, moe, moedec, bias, mode, exact_route),
-                   {"source": _ggml_src_gl(type_name, moe, moedec, bias, mode,
-                                            exact_route)})
+                   {"source": src})
     _ggml_gl["added"].add(key)
 
 
@@ -11024,8 +11368,16 @@ def _ggml_run_gl_exact(xf, packed, type_name, K, N, eidx=None, eslot=0, estride=
     _ggml_add_gl(type_name, moe, moedec, bias is not None, mode, exact_route)
     of = _empty((rows, N))
     grid = _ggml_grid(type_name)
-    inputs = [{"name": "tex_x", "id": _contig(xf).buffer.buffer_id},
-              {"name": "tex_w", "id": packed.buffer.buffer_id}]
+    extra = []
+    if exact_route == "packed":
+        xp_buf, per_row, _ = _webgl_pack_x4(_contig(xf), int(K))
+        inputs = [{"name": "tex_xp", "id": xp_buf.buffer_id},
+                  {"name": "tex_w", "id": packed.buffer.buffer_id}]
+        extra = [{"name": "u_R", "value": int(per_row), "type": "int"},
+                 {"name": "u_K4", "value": int(K) // 4, "type": "int"}]
+    else:
+        inputs = [{"name": "tex_x", "id": _contig(xf).buffer.buffer_id},
+                  {"name": "tex_w", "id": packed.buffer.buffer_id}]
     if moe:
         inputs.append({"name": "tex_e", "id": eidx.buffer.buffer_id})
     if grid is not None:
@@ -11041,7 +11393,7 @@ def _ggml_run_gl_exact(xf, packed, type_name, K, N, eidx=None, eslot=0, estride=
                                  U("u_M", M), U("u_N", N), U("u_K", K),
                                  U("u_rowb", (K // vals) * blk), U("u_estride", estride),
                                  U("u_eslot", eslot), U("u_xper", 1 if xper else 0),
-                                 U("u_ROWS", rows)]})
+                                 U("u_ROWS", rows)] + extra})
     return of
 
 
@@ -11166,7 +11518,13 @@ def _ggml_run_gl(xf, packed, type_name, K, N, eidx=None, eslot=0, estride=0, xpe
                                   eslot=eslot, estride=estride, xper=xper, bias=bias,
                                   exact_route=route)
 
-    if override is None:
+    # Packed activations: dense batched modes only (a MoE kernel indexes its activation
+    # row differently), and only where RGBA32F renders.
+    packed_ok = (not moe and mode in (0, 3) and int(K) % 4 == 0
+                 and bool(get_platform_info_gl().get("supportsTexture32bit")))
+    candidates = (("base",) + (("alternate",) if override is not None else ())
+                  + (("packed",) if packed_ok else ()))
+    if len(candidates) == 1:
         return run("base")
     reference = [None]
 
@@ -11185,9 +11543,20 @@ def _ggml_run_gl(xf, packed, type_name, K, N, eidx=None, eslot=0, estride=0, xpe
                                      "slot" if moe and M <= 2 else "batch",
                                      "bias" if bias is not None else "nobias")
     route = _weight_execution("ggml_gl_exact", storage, K, N, M, run,
-                              candidates=("base", "alternate"), check=correct,
+                              candidates=candidates, check=correct,
                               rounds=9, repeat=2)
     return run(route)
+
+
+_GL_INFO = {}
+
+
+def get_platform_info_gl():
+    """This WebGL device's capability flags, asked of the platform once."""
+    if "v" not in _GL_INFO:
+        from wgpy_backends.webgl.platform import get_platform
+        _GL_INFO["v"] = get_platform().getDeviceInfo()
+    return _GL_INFO["v"]
 
 
 def _ggml_run(xf, packed, type_name, K, N, small=_AUTO, eidx=None, eslot=0,
