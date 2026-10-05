@@ -934,8 +934,14 @@ class DecisionModel(wt.Module):
                 route = "batch"
         if route == "batch":
             stage_start = time.perf_counter()
+            tune_start = wt._WEIGHT_TUNE_SECONDS if profile else 0.0
+            tune_calls = wt._WEIGHT_TUNE_CALLS if profile else 0
             device_batch = self.enc._encode_many_device(sequences)
             encoder_ms += (time.perf_counter() - stage_start) * 1000
+            if profile:
+                execution["encoder_tune_ms"] = round(
+                    (wt._WEIGHT_TUNE_SECONDS - tune_start) * 1000, 3)
+                execution["encoder_tune_calls"] = wt._WEIGHT_TUNE_CALLS - tune_calls
 
         encoded = {}
         scored_cache = {}
@@ -949,6 +955,8 @@ class DecisionModel(wt.Module):
                 raise RuntimeError("batch route selected without multiple head jobs")
             batch_h, lengths, padded = device_batch
             stage_start = time.perf_counter()
+            tune_start = wt._WEIGHT_TUNE_SECONDS if profile else 0.0
+            tune_calls = wt._WEIGHT_TUNE_CALLS if profile else 0
             outputs = self._score_many(
                 batch_h, lengths, padded,
                 [job[1] for job in jobs],
@@ -958,6 +966,10 @@ class DecisionModel(wt.Module):
             head_passes = 1
             head_batched = True
             head_ms += (time.perf_counter() - stage_start) * 1000
+            if profile:
+                execution["head_tune_ms"] = round(
+                    (wt._WEIGHT_TUNE_SECONDS - tune_start) * 1000, 3)
+                execution["head_tune_calls"] = wt._WEIGHT_TUNE_CALLS - tune_calls
             scored_cache.update(zip(jobs, outputs))
         for qid, q, qtype, ids, markers, labels in built:
             key = tuple(ids)
@@ -1368,12 +1380,19 @@ async def _gguf_tensor(path, data_start, info):
 
 
 async def _gguf_weight(path, data_start, info):
-    """Read one GGUF tensor, preserving a native quantized Linear where possible."""
+    """Read one GGUF tensor, preserving encoded blocks only for quantized Linear.
+
+    GGUF F16/F32 are already dense values, not quantized blocks. Sending those
+    matrices through the generic ggml byte decoder bypasses the backend's dense
+    half/f32 matmul and gives identical values a different execution path from
+    safetensors. Use the same dense route regardless of which container held them.
+    """
     from . import ggufload as G
 
     shape = tuple(int(d) for d in reversed(info["dims"]))
     kind = G.GGML_NAMES.get(info["type"])
-    if (len(shape) == 2 and wt.ggml_native_supported(kind)
+    if (len(shape) == 2 and kind not in ("F16", "F32")
+            and wt.ggml_native_supported(kind)
             and shape[1] % wt._GGML_TYPES[kind][2] == 0):
         count = int(np.prod(shape, dtype=np.int64))
         offset = data_start + int(info["offset"])
