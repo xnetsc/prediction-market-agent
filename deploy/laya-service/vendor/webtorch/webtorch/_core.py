@@ -3887,7 +3887,8 @@ def _route_names():
     from the candidate tables themselves, so a new route is kept across reloads the day it
     is added rather than silently re-measured on every load."""
     return ({"stored", "tiled", "tiled_half", "dp4a", "materialized", "full", "packed",
-             "selected_full", "selected_q", "base", "alternate", "f32", "f16"}
+             "selected_full", "selected_q", "base", "alternate", "f32", "f16",
+             "slots", "grouped", "grouped_half"}
             | set(_ATTN_TILES) | set(_CATTN_TARGETS))
 
 def _weight_execution(family, storage_format, K, N, M, run,
@@ -4783,6 +4784,120 @@ def _f16_kv_source(src):
 _kvw = {"added": False}
 _kvwp = {"f32": False, "f16": False}
 
+
+
+# ---- a prompt's q/k/v from the projections' own rows, without the transposing copies ----
+#
+# The prefill took q, k and v out of the projections as (T, heads, HD) rows, transposed them
+# to heads first -- three strided COPIES a layer, each ~250 us of host through the generic
+# elementwise path -- then rotated q and k (two dispatches) and wrote k and v into the cache
+# (two more). Here kernel A reads the rows, rotates q into the heads-first layout attention
+# reads and rotates k straight into the packed cache; kernel B packs v into the cache from its
+# rows. Seven dispatches a layer become two and nothing is copied that is not also computed.
+
+_ROPE_QK_ROWS_KV_WGSL = """
+@group(0) @binding(0) var<storage,read> qsrc: array<vec2<f32>>;
+@group(0) @binding(1) var<storage,read> ksrc: array<vec2<f32>>;
+@group(0) @binding(2) var<storage,read> cosb: array<vec2<f32>>;
+@group(0) @binding(3) var<storage,read> sinb: array<vec2<f32>>;
+@group(0) @binding(4) var<storage,read_write> qout: array<vec2<f32>>;
+@group(0) @binding(5) var<storage,read_write> kc: array<u32>;
+struct RM { T: u32, NH: u32, NKV: u32, HD: u32, LMAX: u32, start: u32, }
+@group(0) @binding(6) var<storage,read> rm: RM;
+@compute @workgroup_size(64)
+fn main(@builtin(global_invocation_id) g: vec3<u32>) {
+  // One thread per (row, q-or-k head, j): dims 2j, 2j+1 and their partners half further on.
+  let H2 = rm.HD / 2u; let Q = rm.HD / 4u; let heads = rm.NH + rm.NKV;
+  let i = g.x + g.y * 65535u * 64u;
+  if (i >= rm.T * heads * Q) { return; }
+  let t = i / (heads * Q);
+  let r = i % (heads * Q);
+  let hh = r / Q;
+  let j = r % Q;
+  let c0 = cosb[(t * rm.HD) / 2u + j]; let s0 = sinb[(t * rm.HD) / 2u + j];
+  let c1 = cosb[(t * rm.HD + H2) / 2u + j]; let s1 = sinb[(t * rm.HD + H2) / 2u + j];
+  var lo: vec2<f32>; var hi: vec2<f32>;
+  if (hh < rm.NH) {
+    let b = (t * rm.NH + hh) * rm.HD / 2u;
+    lo = qsrc[b + j]; hi = qsrc[b + j + H2 / 2u];
+  } else {
+    let b = (t * rm.NKV + (hh - rm.NH)) * rm.HD / 2u;
+    lo = ksrc[b + j]; hi = ksrc[b + j + H2 / 2u];
+  }
+  let rl = lo * c0 - hi * s0;
+  let rh = hi * c1 + lo * s1;
+  if (hh < rm.NH) {
+    let o = (hh * rm.T + t) * rm.HD / 2u;
+    qout[o + j] = rl; qout[o + j + H2 / 2u] = rh;
+  } else {
+    let o = ((hh - rm.NH) * rm.LMAX + rm.start + t) * H2;
+    kc[o + j] = pack2x16float(rl); kc[o + j + H2 / 2u] = pack2x16float(rh);
+  }
+}
+"""
+_KV_WRITE_ROWS_WGSL = """
+@group(0) @binding(0) var<storage,read_write> vc: array<u32>;
+@group(0) @binding(1) var<storage,read> vsrc: array<vec2<f32>>;
+struct VM { T: u32, NKV: u32, HD: u32, LMAX: u32, start: u32, }
+@group(0) @binding(2) var<storage,read> vm: VM;
+@compute @workgroup_size(64)
+fn main(@builtin(global_invocation_id) g: vec3<u32>) {
+  let H2 = vm.HD / 2u;
+  let i = g.x + g.y * 65535u * 64u;
+  if (i >= vm.T * vm.NKV * H2) { return; }
+  let t = i / (vm.NKV * H2);
+  let r = i % (vm.NKV * H2);
+  let kvh = r / H2; let j = r % H2;
+  vc[(kvh * vm.LMAX + vm.start + t) * H2 + j] = pack2x16float(vsrc[(t * vm.NKV + kvh) * H2 + j]);
+}
+"""
+_rows_kv_added = {"v": False}
+
+
+def _grid1(n):
+    return {"x": min((n + 63) // 64, 65535), "y": (n + 64 * 65535 - 1) // (64 * 65535), "z": 1}
+
+
+def rope_qk_rows_kv(q, k, v, cos, sin, kcache, vcache, start, NH, NKV, HD, LMAX):
+    """From the projections' (T, heads, HD) rows: q rotated into (NH, T, HD); k rotated and v,
+    as halves, written into the packed caches at rows start..start+T-1. Full rotary only
+    (`cos`/`sin` are the (T, HD) tables). None where this does not apply."""
+    if not (_adam_backend_ready() and kv_f16()):
+        return None
+    NH, NKV, HD, LMAX, start = int(NH), int(NKV), int(HD), int(LMAX), int(start)
+    qd = _contig(q.data if isinstance(q, Tensor) else q)
+    kd = _contig(k.data if isinstance(k, Tensor) else k)
+    vd = _contig(v.data if isinstance(v, Tensor) else v)
+    cd = _contig(cos.data if isinstance(cos, Tensor) else cos)
+    sd = _contig(sin.data if isinstance(sin, Tensor) else sin)
+    kc = kcache.data if isinstance(kcache, Tensor) else kcache
+    vc = vcache.data if isinstance(vcache, Tensor) else vcache
+    T = int(qd.shape[0])
+    if (HD % 4 or tuple(qd.shape) != (T, NH, HD) or tuple(kd.shape) != (T, NKV, HD)
+            or tuple(vd.shape) != (T, NKV, HD) or tuple(cd.shape) != (T, HD)
+            or int(kc.shape[-1]) * 2 != HD or start + T > LMAX):
+        return None
+    plat = _adam_kernel["platform"]
+    if not _rows_kv_added["v"]:
+        plat.addKernel("rope_qk_rows_kv", {"source": _ROPE_QK_ROWS_KV_WGSL,
+                                           "bindingTypes": ["read-only-storage"] * 4
+                                           + ["storage", "storage", "read-only-storage"]})
+        plat.addKernel("kv_write_rows", {"source": _KV_WRITE_ROWS_WGSL,
+                                         "bindingTypes": ["storage", "read-only-storage",
+                                                          "read-only-storage"]})
+        _rows_kv_added["v"] = True
+    qo = _empty((NH, T, HD))
+    meta = _adam_kernel["make_meta"]((T, NH, NKV, HD, LMAX, start), "u4,u4,u4,u4,u4,u4")
+    plat.runKernel({"name": "rope_qk_rows_kv",
+                    "tensors": [qd.buffer.buffer_id, kd.buffer.buffer_id, cd.buffer.buffer_id,
+                                sd.buffer.buffer_id, qo.buffer.buffer_id, kc.buffer.buffer_id,
+                                meta.buffer_id],
+                    "workGroups": _grid1(T * (NH + NKV) * (HD // 4))})
+    vmeta = _adam_kernel["make_meta"]((T, NKV, HD, LMAX, start), "u4,u4,u4,u4,u4")
+    plat.runKernel({"name": "kv_write_rows",
+                    "tensors": [vc.buffer.buffer_id, vd.buffer.buffer_id, vmeta.buffer_id],
+                    "workGroups": _grid1(T * NKV * (HD // 2))})
+    return Tensor(qo)
 
 def kv_write(cache, src, pos, T, nkv, hd, lmax, ctl=None):
     """cache[:, pos:pos+T, :] = src, in place on GPU (no readback).
@@ -7235,9 +7350,11 @@ def _adam_backend_ready():
         return False
     try:
         from wgpy_backends.webgpu.platform import get_platform
-        from wgpy_backends.webgpu.webgpu_buffer import create_meta_buffer_from_structure
+        from wgpy_backends.webgpu.webgpu_buffer import (create_meta_buffer_from_structure,
+                                                         create_meta_buffer)
         _adam_kernel["platform"] = get_platform()
-        _adam_kernel["make_meta"] = create_meta_buffer_from_structure
+        _adam_kernel["make_meta"] = _packed_meta(create_meta_buffer_from_structure,
+                                                 create_meta_buffer)
         return True
     except Exception as e:
         _backend_why["platform"] = "%s: %s" % (type(e).__name__, e)
@@ -9979,6 +10096,17 @@ def ggml_dequant_ok(type_name):
         nbytes = (K // vals) * N * blk
         raw = np.random.default_rng(0).integers(0, 200, nbytes + (-nbytes % 4),
                                                 dtype=np.uint8)
+        # A float format's bytes ARE its values: random bytes viewed as F32 include NaN,
+        # infinities and 3e38, both sides come back non-finite, and the check refused F32 --
+        # which failed a 30B MoE's load at its F32 router. Such formats get finite values.
+        floats = {"F32": lambda v: v.view(np.uint8),
+                  "F16": lambda v: v.astype(np.float16).view(np.uint8),
+                  "BF16": lambda v: (v.view(np.uint32) >> 16).astype(np.uint16).view(np.uint8)}
+        if type_name in floats:
+            v = np.random.default_rng(0).standard_normal(K * N).astype(np.float32) * 0.1
+            enc = floats[type_name](v)
+            raw = np.zeros(nbytes + (-nbytes % 4), np.uint8)
+            raw[:enc.size] = enc
         W = Tensor(raw.view(np.float32).copy()).data
         # One row against many. The quantised GEMV is the reference because decode uses it
         # every token; the batched rows are what the fast path replaces. Checking only one
@@ -13048,6 +13176,10 @@ _PHASE2_CROSS_WIDTH = {
         "webgpu": "measured_per_shape_device_when_shader_f16",
         "webgl": "primitive_unavailable_keep_f32",
     },
+    "moe_grouped_activation_f16": {           # "grouped_half", raced in `forward_routed`
+        "webgpu": "measured_per_format_shape_device_when_shader_f16",
+        "webgl": "primitive_unavailable_keep_stored",
+    },
     "ggml_tiled_activation_f16": {            # `_ggml_tiled_half_src`, raced in `ggml_matmul`
         "webgpu": "measured_per_format_shape_device_when_shader_f16",
         "webgl": "primitive_unavailable_keep_stored",
@@ -14170,8 +14302,40 @@ def _gpu_stat_push(force=False):
         _stat_why = type(e).__name__ + ": " + str(e)[:80]
 
 
-def gpu_reap():
+
+_META_STRUCTS = {}
+
+
+def _packed_meta(slow, create):
+    """`make_meta(values, "u4,u4,f4")` without numpy: every dispatch makes one, and building a
+    structured array parses the dtype string each time -- 620 of them were 15 ms of a 0.6B's
+    prefill. Formats of 4-byte fields pack with a cached `struct.Struct` (the same little-
+    endian bytes); anything else, or a value struct will not take, takes the numpy path."""
+    import struct
+
+    def meta(values, dtype):
+        st = _META_STRUCTS.get(dtype)
+        if st is None:
+            codes = {"u4": "I", "i4": "i", "f4": "f"}
+            parts = [p.strip() for p in str(dtype).split(",")]
+            st = (struct.Struct("<" + "".join(codes[p] for p in parts))
+                  if all(p in codes for p in parts) else False)
+            _META_STRUCTS[dtype] = st
+        if st:
+            try:
+                return create(st.pack(*values))
+            except (struct.error, TypeError):
+                pass
+        return slow(values, dtype)
+    return meta
+
+def gpu_reap(budgeted=False):
     """Return finished intermediates to the device. A no-op where there is nothing to return.
+
+    `budgeted`: only once the bytes allocated since the last reap pass the backend's budget
+    (8% of what is live, at least 256 MB). A collect costs ~5 ms of host time whether or not
+    there is anything to free -- four of them were 20 ms of a 0.6B's 114 ms prefill, which
+    never came near the budget; a 27B's prefill passes it and still reaps.
 
     Called at a LAYER boundary, not from the allocation path, and the difference is not
     subtle. A collect can only free what nothing refers to, and inside `WebGPUBuffer.__init__`
@@ -14184,6 +14348,8 @@ def gpu_reap():
     if not _adam_backend_ready():
         return                                   # WebGL, or no GPU backend at all
     import wgpy_backends.webgpu.webgpu_buffer as _b
+    if budgeted and getattr(_b, "_bytes_since_reap", 0) < getattr(_b, "_reap_budget", 0):
+        return
     fn = getattr(_b, "reap_now", None)
     if fn is not None:
         fn()
@@ -14297,6 +14463,174 @@ class GGMLLinear(Module):
         return Tensor(of.reshape(*lead, self.Nt))                 # inference-only
 
 
+
+# ---- routed experts for a whole prompt: one weight read per expert, not per (token, slot) --
+#
+# A prefill's routed layer ran every (token, slot) pair as its own GEMV against the expert it
+# was routed to (`GGMLMoELinear.forward` with a row per slot), which reads an expert's weights
+# once for EVERY token routed to it. On a 30B (128 experts, 8 per token) at 248 tokens that
+# is 1984 reads where 128 do: the expert GEMVs were 1.33 of a 1.62 s prefill. Here the slots
+# are first grouped by expert on the device, then each expert's rows are one small GEMM over
+# its weights (the tiled kernel, re-pointed): 39.9 -> 9.9 ms for that model's gate/up.
+
+_MOE_GROUP_WGSL = """
+// Group the routed slots by expert, on the device: counts, starts, a permutation that lists
+// each expert's slots together, and a table of (expert, first row) for every 32-row tile.
+@group(0) @binding(0) var<storage,read> eidx: array<i32>;
+@group(0) @binding(1) var<storage,read_write> grp: array<u32>;
+struct GMeta { S: u32, E: u32, PERM0: u32, TT0: u32, TOT: u32, }
+@group(0) @binding(2) var<storage,read> gmm: GMeta;
+var<workgroup> cnt: array<atomic<u32>, 256>;
+var<workgroup> fill: array<atomic<u32>, 256>;
+var<workgroup> tst: array<u32, 257>;
+@compute @workgroup_size(256)
+fn main(@builtin(local_invocation_id) li: vec3<u32>) {
+  let t = li.x; let S = gmm.S; let E = gmm.E;
+  atomicStore(&cnt[t], 0u);
+  workgroupBarrier();
+  for (var i = t; i < S; i = i + 256u) { atomicAdd(&cnt[u32(eidx[i])], 1u); }
+  workgroupBarrier();
+  if (t == 0u) {
+    var s = 0u; var ts = 0u;
+    for (var e = 0u; e < E; e = e + 1u) {
+      let c = atomicLoad(&cnt[e]);
+      grp[e] = s; atomicStore(&fill[e], s); tst[e] = ts;
+      s = s + c; ts = ts + (c + 31u) / 32u;
+    }
+    grp[E] = s; tst[E] = ts; grp[gmm.TOT] = ts;
+  }
+  workgroupBarrier();
+  for (var i = t; i < S; i = i + 256u) {
+    let p = atomicAdd(&fill[u32(eidx[i])], 1u);
+    grp[gmm.PERM0 + p] = i;
+  }
+  if (t < E) {
+    let c = atomicLoad(&cnt[t]);
+    for (var j = 0u; j < (c + 31u) / 32u; j = j + 1u) {
+      grp[gmm.TT0 + 2u * (tst[t] + j)] = t;
+      grp[gmm.TT0 + 2u * (tst[t] + j) + 1u] = j * 32u;
+    }
+  }
+}
+"""
+_moe_group_added = {"v": False}
+
+
+def moe_group(eidx, S, E):
+    """Group S routed slots by expert, on the device: (grp, info) for `_ggml_tiled_moe_src`.
+    `grp` holds the experts' start offsets, the permutation and the tile table."""
+    S, E = int(S), int(E)
+    if E > 256:
+        return None
+    plat = _adam_kernel["platform"]
+    if not _moe_group_added["v"]:
+        plat.addKernel("moe_group", {"source": _MOE_GROUP_WGSL,
+                                     "bindingTypes": ["read-only-storage", "storage",
+                                                      "read-only-storage"]})
+        _moe_group_added["v"] = True
+    PERM0 = E + 1
+    TT0 = PERM0 + S
+    maxT = (S + 31) // 32 + E
+    TOT = TT0 + 2 * maxT
+    grp = _empty_i32((TOT + 1,))
+    meta = _adam_kernel["make_meta"]((S, E, PERM0, TT0, TOT), "u4,u4,u4,u4,u4")
+    plat.runKernel({"name": "moe_group",
+                    "tensors": [eidx.buffer.buffer_id, grp.buffer.buffer_id, meta.buffer_id],
+                    "workGroups": {"x": 1, "y": 1, "z": 1}})
+    return grp, (PERM0, TT0, TOT, maxT)
+
+
+def _ggml_tiled_moe_src(type_name, half):
+    """The tiled kernel (f32 or half) over the rows `moe_group` grouped by expert.
+
+    One workgroup per (expert, 32-row tile) x 64 columns, its expert's weights at
+    `expert * estride` and its rows read through the permutation: a token's row directly
+    for the first projection (no k-fold copy of the activations), a slot's row for the
+    second. Each row is written to its slot."""
+    src = _ggml_tiled_half_src(type_name) if half else _GGML_TILED[type_name]
+    gbind = 5 if "binding(4) var<storage,read> gr" in src else 4
+    subs = [
+        ("struct QMeta { M: u32, N: u32, K: u32, RW: u32, G: u32, }",
+         "struct QMeta { M: u32, N: u32, K: u32, RW: u32, G: u32, ESTR4: u32, KSLOT: u32, SLOTROWS: u32, PERM0: u32, TT0: u32, TOT: u32, }\n"
+         "@group(0) @binding(%d) var<storage,read> grp: array<u32>;\nvar<private> EOFF: u32;" % gbind),
+        ("  return packed[w * ND4 + c4];", "  return packed[EOFF + w * ND4 + c4];"),
+        ("""  let row = wg.y * 32u + li.y * 4u;
+  let i0 = select(M - 1u, row, row < M);
+  let i1 = select(i0, row + 1u, row + 1u < M);
+  let i2 = select(i0, row + 2u, row + 2u < M);
+  let i3 = select(i0, row + 3u, row + 3u < M);""",
+         """  let tt = wg.y;
+  if (tt >= grp[qm.TOT]) { return; }
+  let ge = grp[qm.TT0 + 2u * tt]; let r0 = grp[qm.TT0 + 2u * tt + 1u];
+  let es = grp[ge]; let cnt = grp[ge + 1u] - es;
+  EOFF = ge * qm.ESTR4;
+  let lrow = r0 + li.y * 4u;
+  let o0 = grp[qm.PERM0 + es + min(lrow, cnt - 1u)];
+  let o1 = grp[qm.PERM0 + es + min(lrow + 1u, cnt - 1u)];
+  let o2 = grp[qm.PERM0 + es + min(lrow + 2u, cnt - 1u)];
+  let o3 = grp[qm.PERM0 + es + min(lrow + 3u, cnt - 1u)];
+  let i0 = select(o0 / qm.KSLOT, o0, qm.SLOTROWS != 0u);
+  let i1 = select(o1 / qm.KSLOT, o1, qm.SLOTROWS != 0u);
+  let i2 = select(o2 / qm.KSLOT, o2, qm.SLOTROWS != 0u);
+  let i3 = select(o3 / qm.KSLOT, o3, qm.SLOTROWS != 0u);"""),
+        ("""  if (row >= M || c0 >= N) { return; }
+  let cx = sl + (c0 >> 2u);
+  let wide = c0 + 4u < N;
+  array_c[cx + row * ND4] = s00;
+  if (wide) { array_c[cx + 1u + row * ND4] = s10; }
+  if (row + 1u < M) { array_c[cx + (row + 1u) * ND4] = s01; if (wide) { array_c[cx + 1u + (row + 1u) * ND4] = s11; } }
+  if (row + 2u < M) { array_c[cx + (row + 2u) * ND4] = s02; if (wide) { array_c[cx + 1u + (row + 2u) * ND4] = s12; } }
+  if (row + 3u < M) { array_c[cx + (row + 3u) * ND4] = s03; if (wide) { array_c[cx + 1u + (row + 3u) * ND4] = s13; } }""",
+         """  if (c0 >= N) { return; }
+  let cx = c0 >> 2u;
+  let wide = c0 + 4u < N;
+  if (lrow < cnt) { array_c[cx + o0 * ND4] = s00; if (wide) { array_c[cx + 1u + o0 * ND4] = s10; } }
+  if (lrow + 1u < cnt) { array_c[cx + o1 * ND4] = s01; if (wide) { array_c[cx + 1u + o1 * ND4] = s11; } }
+  if (lrow + 2u < cnt) { array_c[cx + o2 * ND4] = s02; if (wide) { array_c[cx + 1u + o2 * ND4] = s12; } }
+  if (lrow + 3u < cnt) { array_c[cx + o3 * ND4] = s03; if (wide) { array_c[cx + 1u + o3 * ND4] = s13; } }"""),
+    ]
+    if half:
+        subs.append(("      let ir = min(wg.y * 32u + rr, M - 1u);",
+                     "      let os = grp[qm.PERM0 + es + min(r0 + rr, cnt - 1u)];\n"
+                     "      let ir = select(os / qm.KSLOT, os, qm.SLOTROWS != 0u);"))
+    for old, new in subs:
+        assert src.count(old) == 1, (type_name, half, old[:50])
+        src = src.replace(old, new)
+    return src, gbind
+
+
+_moe_tiled_added = set()
+
+
+def _moe_grouped_run(stack, xd, group, k, slot_rows, S, half):
+    t = stack.type_name
+    src, gbind = _ggml_tiled_moe_src(t, half)
+    name = "moe_tiled%s_%s" % ("h" if half else "", t.lower())
+    grid = _ggml_grid(t) if gbind == 5 else None
+    plat = _adam_kernel["platform"]
+    if name not in _moe_tiled_added:
+        plat.addKernel(name, {"source": src,
+                              "bindingTypes": ["read-only-storage", "read-only-storage",
+                                               "storage", "read-only-storage"]
+                                             + (["read-only-storage"] if grid is not None
+                                                else []) + ["read-only-storage"]})
+        _moe_tiled_added.add(name)
+    vals, blk = int(_GGML_TYPES[t][2]), int(_GGML_TYPES[t][3])
+    K, N = int(stack.Kt), int(stack.Nt)
+    words = ((K // vals) * blk + 3) // 4
+    grp, (PERM0, TT0, TOT, maxT) = group
+    out = _empty((int(S), N))
+    meta = _adam_kernel["make_meta"](
+        (int(xd.shape[0]), N, K, words, 1, int(stack.estride) // 4, int(k),
+         1 if slot_rows else 0, PERM0, TT0, TOT), "u4,u4,u4,u4,u4,u4,u4,u4,u4,u4,u4")
+    plat.runKernel({"name": name,
+                    "tensors": [xd.buffer.buffer_id, stack.packed.buffer.buffer_id,
+                                out.buffer.buffer_id, meta.buffer_id]
+                               + ([grid.buffer.buffer_id] if grid is not None else [])
+                               + [grp.buffer.buffer_id],
+                    "workGroups": {"x": (N + 63) // 64, "y": maxT, "z": 1}})
+    return out
+
 class GGMLMoELinear(Module):
     """One projection of a sparse-MoE layer: every expert's weight, stacked in one buffer.
 
@@ -14379,6 +14713,60 @@ class GGMLMoELinear(Module):
         of = ggml_matmul(_contig(xd.reshape(-1, self.Kt)), self.packed, self.type_name,
                          self.Kt, self.Nt, eidx=eidx, estride=self.estride, xper=xper)
         return Tensor(of)
+
+    def forward_routed(self, x, eidx, k, slot_rows, cache=None):
+        """Every routed slot of a prompt: (S, N), a row per slot, S = len(eidx).
+
+        `x` is (T, K) token rows when `slot_rows` is False (slot s reads token s // k) and
+        (S, K) slot rows when True. Three executions, raced per format/shape/slot count:
+        "slots" (a GEMV per slot -- the old path, with the token rows repeated), "grouped" and
+        "grouped_half" (`_ggml_tiled_moe_src`; half only with `shader-f16`). `cache` shares
+        one grouping between the projections of a layer."""
+        xd = _contig(x.data if isinstance(x, Tensor) else x)
+        S = int(eidx.shape[0])
+        k = int(k)
+
+        def slots():
+            rows = xd if slot_rows else repeat_rows(xd, k, execution="device")
+            return ggml_matmul(_contig(rows.reshape(-1, self.Kt)), self.packed,
+                               self.type_name, self.Kt, self.Nt, eidx=eidx,
+                               estride=self.estride, xper=True)
+        can = (_adam_backend_ready() and self.type_name in _GGML_TILED
+               and self.type_name in _TILED_FORMATS and int(self.n_experts) <= 256
+               and _ggml_tiled_ok(self.type_name, self.Kt, self.Nt) and S > 2)
+        if not can:
+            return Tensor(slots())
+
+        def grouped(half):
+            group = cache.get("group") if cache is not None else None
+            if group is None:
+                group = moe_group(eidx, S, self.n_experts)
+                if cache is not None:
+                    cache["group"] = group
+            return _moe_grouped_run(self, xd, group, k, slot_rows, S, half)
+
+        def run(which):
+            if which == "slots":
+                return slots()
+            return grouped(which == "grouped_half")
+        candidates = ("slots", "grouped") + (("grouped_half",) if gpu_features().get("f16")
+                                              else ())
+        reference = [None]
+
+        def correct(which):
+            if which == "slots":
+                return True
+            if reference[0] is None:
+                reference[0] = np.asarray(run("slots").get(), np.float32)
+            got = np.asarray(run(which).get(), np.float32)
+            if not np.all(np.isfinite(got)):
+                return False
+            scale = max(1e-6, float(np.abs(reference[0]).max()))
+            limit = 1e-2 if which == "grouped_half" else 1e-4
+            return float(np.abs(got - reference[0]).max()) / scale < limit
+        which = _weight_execution("moe_routed", self.type_name, self.Kt, self.Nt, S, run,
+                                  candidates=candidates, check=correct)
+        return Tensor(run(which))
 
     def nbytes(self):
         return int(self.packed.size) * 4

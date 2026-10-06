@@ -2080,8 +2080,18 @@ class CausalLM:
         Keeping that difference below this layer avoids either backend changing the model
         graph merely because its atomic primitive set differs.
         """
-        return wt.add_rmsnorm(residual, update, w, self.eps,
-                              execution=getattr(self, "_add_rms_execution", "auto"))
+        # The decode plan's choice is about one row. For more rows "fused" does a strict
+        # subset of "composed"'s work -- one pass that reads the pair once and writes both,
+        # against an add pass and a norm pass over its result -- so it is not raced there;
+        # the plan's "composed" (its exact reference when the plan ran out of time) was
+        # costing a prefill two extra dispatches a layer, each ~250 us of host time.
+        rows = 1
+        for d in tuple(getattr(getattr(residual, "data", residual), "shape", (1,)))[:-1]:
+            rows *= int(d)
+        route = getattr(self, "_add_rms_execution", "auto")
+        if rows > 1 and route == "composed" and wt._adam_backend_ready():
+            route = "fused"
+        return wt.add_rmsnorm(residual, update, w, self.eps, execution=route)
 
     def _audit(self):
         """Refuse a model whose weights do not agree with what its own file declares.
@@ -4393,7 +4403,7 @@ class CausalLM:
                                        execution=self._gate_up_execution)
         return lay["down"](activated)
 
-    def _qkv(self, lay, x, T, apply_norm=True):
+    def _qkv(self, lay, x, T, apply_norm=True, rows=False):
         """q,k,v projections -> (heads, T, HD). Applies per-head QK-norm (RMSNorm over head_dim,
         before rope) when `lay` carries `qn`/`kn` weights.
 
@@ -4422,6 +4432,8 @@ class CausalLM:
         if apply_norm:
             q = self._qk_norm(q, lay.get("qn"), T, self.NH)
             k = self._qk_norm(k, lay.get("kn"), T, self.NKV)
+        if rows:                          # (T, heads, HD) as the projections wrote them
+            return q, k, vraw.reshape(T, self.NKV, self.HD)
         v = vraw.reshape(T, self.NKV, self.HD).permute(1, 0, 2)
         return q.permute(1, 0, 2), k.permute(1, 0, 2), v
 
@@ -4753,25 +4765,51 @@ class CausalLM:
                     wt._sync_small(lay(x))
                 wt.calibrate_rows(probe, 512, lo=16, step=4, defer=True)
                 _load_stage("tuning", done=i + 1, total=len(ladder))
+            # A prompt's routed experts: per slot GEMV against grouped small GEMMs, by how
+            # many slots there are. One ladder per distinct stacked projection; the probe
+            # routes random slots over all of the layer's experts.
+            routed = {}
+            for lay in self.layers:
+                st = (lay.get("moe") or {}).get("stacked") if isinstance(lay, dict) else None
+                if st:
+                    for name, slot_rows in (("gate_up", False), ("down", True)):
+                        lin = st.get(name)
+                        if callable(getattr(lin, "forward_routed", None)):
+                            routed.setdefault((lin.type_name, lin.Kt, lin.Nt), (lin, slot_rows))
+            for (tname, kt, nt), (lin, slot_rows) in sorted(routed.items()):
+                kk = max(1, int(self.top_k or 2))
+
+                def rprobe(m, lin=lin, slot_rows=slot_rows, kk=kk):
+                    S = max(kk, (int(m) // kk) * kk)
+                    rows = S if slot_rows else S // kk
+                    x = wt.Tensor(rng.standard_normal((rows, int(lin.Kt))).astype(np.float32))
+                    e = wt._empty_i32((S,))
+                    e.buffer.set_data(rng.integers(0, int(lin.n_experts), S).astype(np.int32))
+                    wt._sync_small(lin.forward_routed(x, e, kk, slot_rows))
+                wt.calibrate_rows(rprobe, 4096, lo=16, step=4, defer=True)
             # Prefill attention against the cache: how far to split the keys over workgroups
             # depends on how much context a few new rows read, so the ladder walks the
             # context with a short new segment. Reads one layer's cache; writes nothing.
+            # Its own small cache, not the model's: the model's is allocated by the first
+            # prefill, after this -- probing it here skipped the ladder, and the first long
+            # prompt then raced the splits inside its answer.
             kv0 = next((j for j in range(len(self.layers))
                         if not self._is_linear_layer(j)), None)
-            if self._gpu and wt.kv_f16() and kv0 is not None and getattr(self, "Kc", None):
-                K0, V0 = self.Kc[self._kv_i[kv0]], self.Vc[self._kv_i[kv0]]
+            if self._gpu and wt.kv_f16() and kv0 is not None and self.HD % 2 == 0:
+                top = 4096
+                words = int(self.NKV) * top * (int(self.HD) // 2)
+                K0 = wt.Tensor(np.zeros((words,), np.float32))
+                V0 = wt.Tensor(np.zeros((words,), np.float32))
                 sc0 = 1.0 / math.sqrt(self.HD)
 
-                def aprobe(m, K0=K0, V0=V0, sc0=sc0):
+                def aprobe(m, K0=K0, V0=V0, sc0=sc0, top=top):
                     t = min(32, int(m))
                     q = wt.Tensor(rng.standard_normal((self.NH, t, self.HD)).astype(np.float32))
                     o = wt.causal_attention_cache(q, K0, V0, int(m) - t, self.NH, self.NKV,
-                                                  self.HD, self.kv_cap, sc0)
+                                                  self.HD, top, sc0)
                     if o is not None:
                         wt._sync_small(o)
-                if int(self.kv_cap) >= 64:
-                    wt.calibrate_rows(aprobe, min(4096, int(self.kv_cap)), lo=64, step=4,
-                                      defer=True)
+                wt.calibrate_rows(aprobe, top, lo=64, step=4, defer=True)
             _warm_s = time.perf_counter() - _t0
             wt.flash_tune(self.NH, self.NKV, self.HD)
             # What this phase actually spent, broken down, so the next slow load is a table
@@ -5075,15 +5113,30 @@ class CausalLM:
         sc = 1.0 / math.sqrt(HD)
         x = self._rms(h, self.layers[0]["in_ln"]) if self.layers else None
         fin = self._rms(h, self.final_norm) if not self.layers else None
+        # The row-layout q/k/v path: full rotary, a half cache, rows that fit.
+        rows_qkv = (wt._adam_backend_ready() and wt.kv_f16() and HD % 4 == 0
+                    and getattr(self, "rope_dim", HD) == HD and end <= LMAX
+                    and getattr(self, "_fused", False) and wt._ROPE_FUSED)
         for i, lay in enumerate(self.layers):
             if self._is_linear_layer(i):                       # recurrent (fixed-state) layer
                 mix = self._linear_mixer(i, lay, x, T)
             else:                                              # softmax attention layer
-                q, k, v = self._qkv(lay, x, T)
-                q = self._rope_qk(q, cos_t, sin_t, T); k = self._rope_qk(k, cos_t, sin_t, T)
                 K, V = self.Kc[self._kv_i[i]], self.Vc[self._kv_i[i]]
-                K.data = wt.kv_write(K.data, wt._contig(k).data, start, T, NKV, HD, LMAX)
-                V.data = wt.kv_write(V.data, wt._contig(v).data, start, T, NKV, HD, LMAX)
+                rows = None
+                if rows_qkv:
+                    # q/k/v straight from the projections' rows: k and v land in the cache
+                    # and q heads-first for attention, with no transposing copy between.
+                    qr, kr, vr = self._qkv(lay, x, T, rows=True)
+                    q = wt.rope_qk_rows_kv(qr, kr, vr, cos_t, sin_t, K, V, start,
+                                           NH, NKV, HD, LMAX)
+                    if q is None:
+                        raise RuntimeError("row-layout rope/KV write refused a prefill shape "
+                                           "it was checked for")
+                else:
+                    q, k, v = self._qkv(lay, x, T)
+                    q = self._rope_qk(q, cos_t, sin_t, T); k = self._rope_qk(k, cos_t, sin_t, T)
+                    K.data = wt.kv_write(K.data, wt._contig(k).data, start, T, NKV, HD, LMAX)
+                    V.data = wt.kv_write(V.data, wt._contig(v).data, start, T, NKV, HD, LMAX)
                 # Where the backend has it, attention reads the packed cache where it lies
                 # and writes the out-projection's rows: no widened copy of the span, no
                 # transpose back. None keeps the path below.
@@ -5117,7 +5170,7 @@ class CausalLM:
             # and stays at 14.0-14.3GB with it. It also makes the prefill faster rather than
             # slower (100.2s to 87.2s), because the memory it stops using was being paged.
             if (i & 7) == 7:
-                wt.gpu_reap()
+                wt.gpu_reap(budgeted=True)
         # Kept, not just passed on: the load-time smoke test needs the logits this produced,
         # and the tensor is built here either way.
         # The LAST REAL row, which is not the last row when the prompt was padded above.
